@@ -1,40 +1,86 @@
-# SPDX-FileCopyrightText: © 2024 Tiny Tapeout
-# SPDX-License-Identifier: Apache-2.0
-
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, RisingEdge
+
+CLKS_PER_BIT = 434  # must match project.v
 
 
-@cocotb.test()
-async def test_project(dut):
-    dut._log.info("Start")
+def tx(dut):
+    return int(dut.uo_out.value) & 1
 
-    # Set the clock period to 10 us (100 KHz)
-    clock = Clock(dut.clk, 10, unit="us")
+
+def busy(dut):
+    return (int(dut.uo_out.value) >> 1) & 1
+
+
+async def reset(dut):
+    # 50 MHz clock
+    clock = Clock(dut.clk, 20, unit="ns")
     cocotb.start_soon(clock.start())
 
-    # Reset
-    dut._log.info("Reset")
     dut.ena.value = 1
     dut.ui_in.value = 0
     dut.uio_in.value = 0
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 10)
     dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 5)
 
-    dut._log.info("Test project behavior")
 
-    # Set the input values you want to test
-    dut.ui_in.value = 20
-    dut.uio_in.value = 30
+async def send(dut, byte):
+    dut.ui_in.value = byte
+    dut.uio_in.value = 1
+    await ClockCycles(dut.clk, 5)
+    dut.uio_in.value = 0
 
-    # Wait for one clock cycle to see the output values
-    await ClockCycles(dut.clk, 1)
 
-    # The following assersion is just an example of how to check the output values.
-    # Change it to match the actual expected output of your module:
-    assert dut.uo_out.value == 50
+async def receive_byte(dut):
+    """Act like the receiving end: watch the TX pin and decode one byte."""
+    # wait for the start bit (line goes low)
+    for _ in range(CLKS_PER_BIT * 20):
+        await RisingEdge(dut.clk)
+        if tx(dut) == 0:
+            break
+    else:
+        assert False, "never saw a start bit"
 
-    # Keep testing the module by changing the input values, waiting for
-    # one or more clock cycles, and asserting the expected output values.
+    # go to the middle of the start bit and make sure it's still low
+    await ClockCycles(dut.clk, CLKS_PER_BIT // 2)
+    assert tx(dut) == 0, "start bit glitch"
+
+    # sample each data bit in the middle, LSB first
+    byte = 0
+    for i in range(8):
+        await ClockCycles(dut.clk, CLKS_PER_BIT)
+        byte |= tx(dut) << i
+
+    await ClockCycles(dut.clk, CLKS_PER_BIT)
+    assert tx(dut) == 1, "stop bit should be high (framing error)"
+    return byte
+
+
+@cocotb.test()
+async def test_idle_high(dut):
+    await reset(dut)
+    assert tx(dut) == 1, "TX should idle high"
+    assert busy(dut) == 0
+
+
+@cocotb.test()
+async def test_send_one_byte(dut):
+    await reset(dut)
+    await send(dut, 0x41)  # 'A'
+    got = await receive_byte(dut)
+    assert got == 0x41, f"sent 0x41, got {got:#04x}"
+
+
+@cocotb.test()
+async def test_send_several_bytes(dut):
+    await reset(dut)
+    for b in [0x00, 0xFF, 0x55, 0xA5, ord("h"), ord("i")]:
+        await send(dut, b)
+        got = await receive_byte(dut)
+        assert got == b, f"sent {b:#04x}, got {got:#04x}"
+        # wait for the stop bit to finish before sending again
+        while busy(dut):
+            await RisingEdge(dut.clk)
