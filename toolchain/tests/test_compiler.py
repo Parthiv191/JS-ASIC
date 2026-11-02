@@ -148,3 +148,14 @@ def test_debug_map_has_every_pc():
     assert sorted(img.debug) == list(range(len(img.words)))
     assert "test_compiler.py:" in img.debug[2] and "hold" in img.debug[2]
     assert img.abort_pc == 0
+
+
+def test_s_rejects_program_over_depth():
+    def nops(k):
+        d = Description("t", parties=("a", "b"))
+        for _ in range(k):
+            d.nop()
+        return d
+    assert rules(nops(65)) == {"S-range"}
+    compile_desc(nops(64), check_timing=False)
+    compile_desc(nops(65), check_timing=False, prog_depth=128)

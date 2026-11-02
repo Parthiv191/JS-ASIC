@@ -65,7 +65,7 @@ def _owner(desc: Description, name: str | None) -> Owner:
     return Owner(desc.parties.index(name))
 
 
-def lower(desc: Description) -> Lowered:
+def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     diags: list[Diagnostic] = []
 
     def err(rule: str, step: Step, msg: str) -> None:
@@ -177,8 +177,8 @@ def lower(desc: Description) -> Lowered:
         anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
         err("S-table", anchor, f"tables exceed limits: {len(profiles)} profiles (max {NUM_PROFILES}), "
                                f"{len(lanes)} lanes (max {NUM_LANES}), {len(lines)} lines (max {NUM_LINES})")
-    if len(instrs) > PROG_DEPTH:
-        err("S-range", desc.steps[-1], f"program has {len(instrs)} words (max {PROG_DEPTH})")
+    if len(instrs) > prog_depth:
+        err("S-range", desc.steps[-1], f"program has {len(instrs)} words (max {prog_depth})")
 
     abort_pc = 0
     if desc.abort_label is not None:
@@ -205,8 +205,9 @@ def lower(desc: Description) -> Lowered:
     return Lowered(instrs, image, spans, pc_step, diags)
 
 
-def compile_desc(desc: Description, *, check_timing: bool = True) -> Image:
-    low = lower(desc)
+def compile_desc(desc: Description, *, check_timing: bool = True,
+                 prog_depth: int = PROG_DEPTH) -> Image:
+    low = lower(desc, prog_depth)
     diags = list(low.diags)
     if not diags:
         from . import analysis  # imports this module; deferred to avoid a cycle

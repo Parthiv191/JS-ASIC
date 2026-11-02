@@ -61,3 +61,14 @@ def test_role_if_operand_roundtrip():
     assert unpack_role_if(role_if_operand(mask, 300)) == (0b110, 300)
     with pytest.raises(ValueError):
         role_if_operand(mask, 512)
+
+
+def test_r2_opcode_allocation():
+    """isa-v0 r2 §1/§3: 64-word programs and the CRC/FZ/IRQ/TO codes."""
+    from emu import isa
+    assert isa.PROG_DEPTH == 64
+    assert (isa.Op.CRC, isa.Op.FZ) == (13, 14)
+    assert isa.BrCond.TO == 3 and isa.Src.FZ == 3
+    assert isa.F_IRQ == 1 << 4
+    assert [(m.name, m.value) for m in isa.CrcOp] == [("RESET", 0), ("FEED", 1), ("GET", 2)]
+    assert [(m.name, m.value) for m in isa.FzOp] == [("NEXT", 0), ("TOK", 1), ("END", 2)]

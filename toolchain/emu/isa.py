@@ -16,7 +16,7 @@ NUM_LINES = 8
 NUM_REGS = 4
 NUM_PROFILES = 16
 NUM_LANES = 16
-PROG_DEPTH = 4096
+PROG_DEPTH = 64  # words per image (team draft); branch targets stay 12-bit
 INF = 0xFFFF
 REG_MASK = 0xFFFF
 MAX_XFER_BITS = 16
@@ -36,6 +36,8 @@ class Op(IntEnum):
     MARK = 10
     RAW = 11
     HALT = 12
+    CRC = 13
+    FZ = 14
     # reserved for later phases
     CHOICE = 16
     ARB = 17
@@ -83,6 +85,7 @@ class BrCond(IntEnum):
     ALWAYS = 0
     Z = 1
     NZ = 2
+    TO = 3  # last timed step timed out; role blocks only (R2)
 
 
 class RawOp(IntEnum):
@@ -93,10 +96,23 @@ class RawOp(IntEnum):
     JPIN = 4
 
 
+class CrcOp(IntEnum):
+    RESET = 0
+    FEED = 1
+    GET = 2
+
+
+class FzOp(IntEnum):
+    NEXT = 0
+    TOK = 1
+    END = 2
+
+
 class Src(IntEnum):
     ZERO = 0
     ONES = 1
     FIFO = 2
+    FZ = 3  # next staged fuzz byte (bus-fuzzer.md)
     R0 = 4
     R1 = 5
     R2 = 6
@@ -116,6 +132,7 @@ F_CHK = 1 << 0
 F_RESYNC = 1 << 1
 F_ABORT = 1 << 2
 F_REG = 1 << 3
+F_IRQ = 1 << 4  # MARK raises the host interrupt
 
 _FIELDS = (  # name, shift, width
     ("op", 27, 5),
