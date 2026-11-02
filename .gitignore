@@ -14,3 +14,10 @@ test/gate_level_netlist.v
 
 # local python env
 .venv
+
+# python toolchain build artifacts
+__pycache__/
+*.pyc
+*.egg-info/
+.hypothesis/
+.pytest_cache/
