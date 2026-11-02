@@ -89,6 +89,14 @@ def test_r3_rejects_branch_out_of_block():
     assert rules(d) == {"R3-escape"}
 
 
+def test_r3_allows_loop_back_to_own_block_head():
+    d, pp, od, p = base()
+    with d.only("b"):
+        d.label("wait")
+        d.raw_jpin(pp, 1, "wait")  # "wait" names the block's ROLE_IF
+    compile_desc(d, check_timing=False)
+
+
 def test_r3_rejects_branch_into_block():
     d, pp, od, p = base()
     d.br("inside")

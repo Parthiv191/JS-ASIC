@@ -164,7 +164,7 @@ def lower(desc: Description) -> Lowered:
         if s.kind in BRANCHES:
             t = ins.operand if s.kind == "br" else ins.operand & 0x7FF
             here, there = span_of(pc), span_of(t)
-            if here is not None and not (here.start <= t <= here.end):
+            if here is not None and not (here.start <= t <= here.end or t == here.role_if_pc):
                 err("R3-escape", s, "branch leaves its role block")
             if here is None and there is not None:
                 err("R3-escape", s, "branch enters a role block from outside")
