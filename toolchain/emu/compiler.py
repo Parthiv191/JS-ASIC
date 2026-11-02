@@ -209,14 +209,10 @@ def compile_desc(desc: Description, *, check_timing: bool = True) -> Image:
     low = lower(desc)
     diags = list(low.diags)
     if not diags:
-        try:
-            from . import analysis
-        except ImportError:  # pragma: no cover - analysis lands in Task 4
-            analysis = None
-        if analysis is not None:
-            diags += analysis.check_branches(desc, low)
-            if check_timing:
-                diags += analysis.check_timing(desc, low)
+        from . import analysis  # imports this module; deferred to avoid a cycle
+        diags += analysis.check_branches(desc, low)
+        if check_timing:
+            diags += analysis.check_timing(desc, low)
     if diags:
         raise CompileError(diags)
     return low.image
