@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emu"
+version = "0.1.0"
+description = "Toolchain for the role-switching protocol emulator: ISA, description compiler, reference model, fuzzer"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "hypothesis>=6.100"]
+
+[tool.setuptools.packages.find]
+include = ["emu*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--color=no -q"

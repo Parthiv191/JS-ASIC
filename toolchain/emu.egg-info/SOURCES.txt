@@ -1,0 +1,8 @@
+pyproject.toml
+emu/__init__.py
+emu.egg-info/PKG-INFO
+emu.egg-info/SOURCES.txt
+emu.egg-info/dependency_links.txt
+emu.egg-info/requires.txt
+emu.egg-info/top_level.txt
+tests/test_isa.py
