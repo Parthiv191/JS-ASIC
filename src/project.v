@@ -27,12 +27,28 @@ module tt_um_prot_emu_SAP (
     input  wire       rst_n     // reset_n - low to reset
 );
 
+  // Reset asserts asynchronously and releases on a clock edge. Every flop
+  // then resets through its own RESET_B pin, not through logic in front of D.
+  // With a synchronous reset, synthesis may build that logic as q | !q, and
+  // gate-level simulation turns it into X when the flops power up as X
+  // (CI run 41580430296: the UART's baud counter never left X).
+  reg rst_n_meta, rst_n_sync;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      rst_n_meta <= 1'b0;
+      rst_n_sync <= 1'b0;
+    end else begin
+      rst_n_meta <= 1'b1;
+      rst_n_sync <= rst_n_meta;
+    end
+  end
+
   // The uio pins come from outside and aren't synced to our clock, so pass
   // them through two flops first (synchronizer), then look for 0 -> 1 edges.
   // ui_in is not synchronized: the host holds it steady around each strobe.
   reg [6:0] s1, s2, s3;
-  always @(posedge clk) begin
-    if (!rst_n) begin
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) begin
       s1 <= 7'b0;
       s2 <= 7'b0;
       s3 <= 7'b0;
@@ -52,7 +68,7 @@ module tt_um_prot_emu_SAP (
       .CLKS_PER_BIT(434)
   ) u_uart_tx (
       .clk  (clk),
-      .rst_n(rst_n),
+      .rst_n(rst_n_sync),
       .start(rise[0]),
       .data (ui_in),
       .tx   (tx),
@@ -64,8 +80,8 @@ module tt_um_prot_emu_SAP (
   reg  [31:0] wdata;
   wire [31:0] rdata;
 
-  always @(posedge clk) begin
-    if (!rst_n) begin
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) begin
       addr  <= 8'h00;
       wdata <= 32'h0;
     end else begin

@@ -6,7 +6,7 @@ module uart_tx #(
     parameter CLKS_PER_BIT = 434  // 50 MHz / 115200 baud
 ) (
     input  wire       clk,
-    input  wire       rst_n,
+    input  wire       rst_n,  // asynchronous; release it in step with clk
     input  wire       start,
     input  wire [7:0] data,
     output wire       tx,
@@ -25,7 +25,7 @@ module uart_tx #(
   assign tx   = shreg[0];
   assign busy = (bits_left != 0);
 
-  always @(posedge clk) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       shreg     <= 10'h3FF;  // line idles high
       bits_left <= 0;
