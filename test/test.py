@@ -84,3 +84,79 @@ async def test_send_several_bytes(dut):
         # wait for the stop bit to finish before sending again
         while busy(dut):
             await RisingEdge(dut.clk)
+
+
+# ---------------------------------------------------------------- SRAM trial harness
+# uio_in[1] ADDR, [2] DATA, [3] WRITE, [4] READ: rising-edge strobes, ui_in holds the byte.
+# uio_in[5] CHASE (level): read mem[rdata[7:0]] every cycle. uio_in[6] VIEW (level):
+# uo_out shows byte ui_in[1:0] of the last read word instead of TX/busy.
+ADDR, DATA, WRITE, READ, CHASE, VIEW = (1 << i for i in range(1, 7))
+
+
+async def strobe(dut, bit, byte=0):
+    dut.ui_in.value = byte
+    dut.uio_in.value = bit
+    await ClockCycles(dut.clk, 4)
+    dut.uio_in.value = 0
+    await ClockCycles(dut.clk, 4)
+
+
+async def mem_write(dut, addr, word):
+    await strobe(dut, ADDR, addr)
+    for k in (3, 2, 1, 0):
+        await strobe(dut, DATA, (word >> (8 * k)) & 0xFF)
+    await strobe(dut, WRITE)
+
+
+async def view_word(dut):
+    word = 0
+    for k in range(4):
+        dut.ui_in.value = k
+        dut.uio_in.value = VIEW
+        await ClockCycles(dut.clk, 4)
+        word |= int(dut.uo_out.value) << (8 * k)
+    dut.uio_in.value = 0
+    await ClockCycles(dut.clk, 4)
+    return word
+
+
+async def mem_read(dut, addr):
+    await strobe(dut, ADDR, addr)
+    await strobe(dut, READ)
+    return await view_word(dut)
+
+
+@cocotb.test()
+async def test_mem_word_roundtrip(dut):
+    """Both 16-bit halves (one macro each) keep their own data at every address bit."""
+    await reset(dut)
+    words = {0x00: 0x12345678, 0x01: 0xFFFF0000, 0x80: 0x0000FFFF, 0xFF: 0xDEADBEEF, 0x55: 0xA5A55A5A}
+    for a, w in words.items():
+        await mem_write(dut, a, w)
+    for a, w in words.items():
+        got = await mem_read(dut, a)
+        assert got == w, f"mem[{a:#04x}] = {got:#010x}, wrote {w:#010x}"
+
+
+@cocotb.test()
+async def test_mem_chase_follows_pointers(dut):
+    """CHASE feeds the macro output straight back into its address: the engine's fetch-ahead path."""
+    await reset(dut)
+    chain = {0x10: 0x20, 0x20: 0x30, 0x30: 0xF0, 0xF0: 0xF0}  # ends in a self-loop at 0xF0
+    for a, nxt in chain.items():
+        await mem_write(dut, a, 0xC0DE0000 | (a << 8) | nxt)
+    await mem_read(dut, 0x10)  # prime: rdata = mem[0x10]
+    dut.uio_in.value = CHASE
+    await ClockCycles(dut.clk, 10)  # synchronizer + 3 hops, then it sits on the self-loop
+    dut.uio_in.value = 0
+    await ClockCycles(dut.clk, 4)
+    got = await view_word(dut)  # rdata holds the last word read
+    assert got == 0xC0DEF0F0, f"chase ended on {got:#010x}, expected the self-loop word 0xc0def0f0"
+
+
+@cocotb.test()
+async def test_uart_still_works_with_mem_view_off(dut):
+    await reset(dut)
+    await mem_write(dut, 0x00, 0xFFFFFFFF)
+    await send(dut, 0x5A)
+    assert await receive_byte(dut) == 0x5A

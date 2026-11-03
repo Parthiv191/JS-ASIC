@@ -19,6 +19,7 @@ project:
   source_files:
     - "project.v"
     - "uart_tx.v"
+    - "prog_mem.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
@@ -34,23 +35,23 @@ pinout:
   ui[7]: "DATA7"
 
   # Outputs
-  uo[0]: "TX"
-  uo[1]: "BUSY"
-  uo[2]: ""
-  uo[3]: ""
-  uo[4]: ""
-  uo[5]: ""
-  uo[6]: ""
-  uo[7]: ""
+  uo[0]: "TX (VIEW: MEM_BIT0)"
+  uo[1]: "BUSY (VIEW: MEM_BIT1)"
+  uo[2]: "VIEW: MEM_BIT2"
+  uo[3]: "VIEW: MEM_BIT3"
+  uo[4]: "VIEW: MEM_BIT4"
+  uo[5]: "VIEW: MEM_BIT5"
+  uo[6]: "VIEW: MEM_BIT6"
+  uo[7]: "VIEW: MEM_BIT7"
 
   # Bidirectional pins
   uio[0]: "SEND"
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
-  uio[5]: ""
-  uio[6]: ""
+  uio[1]: "MEM_ADDR"
+  uio[2]: "MEM_DATA"
+  uio[3]: "MEM_WRITE"
+  uio[4]: "MEM_READ"
+  uio[5]: "MEM_CHASE"
+  uio[6]: "MEM_VIEW"
   uio[7]: ""
 
 # Do not change!

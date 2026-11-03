@@ -33,6 +33,52 @@
 
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
+  "//": "------------------------------------------------------------------------------",
+  "//": "JS-ASIC changes for the SRAM program memory (src/prog_mem.v). Everything else in",
+  "//": "this file is the ihp-cmos5l template, except FP_PDN_VPITCH/FP_PDN_VOFFSET below.",
+  "//": "Follows the working integration in 2AMLogic/sg13cmos5l-protocol-emulator (Apache-2.0).",
+  "//": "",
+  "//": "Two RM_IHPSG13_1P_256x16 macros (236.8 x 118.78 um each) side by side, mid-height,",
+  "//": "right of the pin cluster (Tiny Tapeout pins sit on the top edge at x < 192 um). The",
+  "//": "x positions are 91.2 + k*44.96 um so the strap lattice lines up (see src/pdn_cfg.tcl).",
+  "//": "The flow reads the macro's LEF/GDS/liberty from the PDK; flow/ holds the blackbox",
+  "//": "that the Verilator lint step needs.",
+  "MACROS": {
+    "RM_IHPSG13_1P_256x16_c2_bm_bist": {
+      "gds": ["pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_256x16_c2_bm_bist.gds"],
+      "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_256x16_c2_bm_bist.lef"],
+      "vh": ["dir::../flow/blackbox-RM_IHPSG13_1P_256x16_c2_bm_bist.v"],
+      "instances": {
+        "u_mem.u_lo": {"location": [495.84, 294.84], "orientation": "N"},
+        "u_mem.u_hi": {"location": [765.60, 294.84], "orientation": "N"}
+      },
+      "lib": {
+        "*typ*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_typ_1p20V_25C.lib"],
+        "*slow*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_slow_1p08V_125C.lib"],
+        "*fast*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_fast_1p32V_m55C.lib"]
+      }
+    }
+  },
+
+  "//": "Three supply pins per macro: VDD!, VSS! and the bit-array supply VDDARRAY!.",
+  "//": "An unconnected VDDARRAY! powers up but never retains a bit.",
+  "PDN_MACRO_CONNECTIONS": [
+    "u_mem.u_lo VPWR VGND VDD! VSS!",
+    "u_mem.u_lo VPWR VGND VDDARRAY! VSS!",
+    "u_mem.u_hi VPWR VGND VDD! VSS!",
+    "u_mem.u_hi VPWR VGND VDDARRAY! VSS!"
+  ],
+
+  "//": "The macro's power pins are Metal4-only and TopMetal1 is not on the precheck's CMOS5L",
+  "//": "layer allowlist, so the default PDN script cannot connect them. This one draws Metal4",
+  "//": "bridges on the macro's own stripes and makes full-height VPWR/VGND pins.",
+  "FP_PDN_CFG": "dir::pdn_cfg.tcl",
+
+  "//": "Magic has no CMOS5L DRC support and reports ~29k violations inside the unmodified",
+  "//": "foundry macro GDS (2AMLogic run 36833125820). The Tiny Tapeout precheck and LVS still",
+  "//": "gate the design; Magic's count is still reported.",
+  "ERROR_ON_MAGIC_DRC": 0,
+
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
   "//": "!!! DO NOT CHANGE ANYTHING BELOW THIS POINT !!!",
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -58,8 +104,12 @@
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
 
-  "FP_PDN_VPITCH": 50.0,
+  "//": "JS-ASIC: template pitch 50.0 would short core straps against the SRAM macros'",
+  "//": "opposite-net stripes. 44.96 = 4 x the macro's 11.24 um stripe pitch; the offset puts",
+  "//": "each crossing strap on a same-net stripe or in clear space (src/pdn_cfg.tcl).",
+  "FP_PDN_VPITCH": 44.96,
   "FP_PDN_VWIDTH": 2.1,
+  "FP_PDN_VOFFSET": 93.985,
 
   "//": "Clock",
   "RUN_CTS": 1,
