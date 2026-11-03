@@ -165,6 +165,8 @@ class Description:
             raise ValueError("xfer needs a lane or a line")
         if isinstance(lane, LineRef):
             self._line(lane)
+        elif not 0 <= lane.index < len(self.lanes) or self.lanes[lane.index].name != lane.name:
+            raise ValueError(f"unknown lane {lane!r}")
         self._choice(src, SRCS, "src")
         self._choice(dst, DSTS, "dst")
         self._add("xfer", owner, n=n, lane=lane, prof=self._prof(prof), src=src, dst=dst,
@@ -231,7 +233,7 @@ class Description:
         return ref
 
     def _prof(self, ref: ProfRef | None) -> ProfRef | None:
-        if ref is not None and (not isinstance(ref, ProfRef) or ref.index > len(self.profiles)
+        if ref is not None and (not isinstance(ref, ProfRef) or not 1 <= ref.index <= len(self.profiles)
                                 or self.profiles[ref.index - 1].name != ref.name):
             raise ValueError(f"unknown profile {ref!r}")
         return ref

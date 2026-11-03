@@ -42,7 +42,8 @@ class EngineTrace:
     halted: bool
     idle: bool
     tx_left: int
-    cycle_tick: list[int]
+    cycle_tick: list[int]  # tick of every clock enable, also after HALT (the clock keeps running);
+    #                         engine cycle c (1-based) ran in tick cycle_tick[c - 1]
 
     @property
     def violations(self) -> list[Event]:

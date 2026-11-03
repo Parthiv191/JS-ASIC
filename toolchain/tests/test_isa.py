@@ -1,5 +1,5 @@
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 from emu.isa import (
     Dst, Instr, Op, Owner, Src, decode, encode, role_if_operand, role_mask,
@@ -41,10 +41,9 @@ def test_unknown_opcode_raises():
         decode(31 << 27)
 
 
-@pytest.mark.parametrize("n", [1, 8, 16])
-@pytest.mark.parametrize("src", list(Src))
-@pytest.mark.parametrize("dst", list(Dst))
-@pytest.mark.parametrize("msb", [False, True])
+@given(st.integers(1, 16), st.sampled_from(list(Src)), st.sampled_from(list(Dst)), st.booleans())
+@example(1, Src.ZERO, Dst.DISCARD, False)
+@example(16, Src(max(Src)), Dst(max(Dst)), True)
 def test_xfer_operand_roundtrip(n, src, dst, msb):
     assert unpack_xfer(xfer_operand(n, src, dst, msb)) == (n, src, dst, msb)
 

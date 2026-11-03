@@ -10,6 +10,16 @@ updated.
 r2 changes: program depth 64 (team draft), `CRC` and `FZ` opcodes, the `IRQ` flag on `MARK`,
 branch on timeout (`BR TO`), duplex lanes, the `src = FZ` source, and §8.
 
+Implementation status (toolchain, 2026-11-02). The encodings of every r2 feature exist in
+`emu.isa`; the DSL, compiler and model reach them in these tasks of the plan:
+
+| Feature | Lands in |
+|---|---|
+| `COND`, `HOLD`, unclocked `XFER`, `BR TO` (the model raises on `BR TO` until then) | Task 7 |
+| Clocked and duplex lanes (`data2`) | Task 8 |
+| `CRC`, `MARK` with `IRQ` | Task 9 |
+| `FZ`, `src = FZ` | Task 20 |
+
 ## 1. Constants
 
 | Name | Value | Meaning |
@@ -133,7 +143,7 @@ The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics,
 | `R2-branch` | `BR Z/NZ` may only test registers whose value is the same in every role ("clean"): written by `XFER dst`, `LI`, `ALU` over clean inputs, or `CRC GET` from a clean CRC state, outside role blocks. `POP`, `RAW GET`, and every write inside a role block taint the register. The CRC state is tracked like a fifth register: `FEED` of a tainted register, or any `CRC` op inside a role block, taints it. Taint is a forward dataflow over the CFG: tainted on any incoming path means tainted. `RAW JPIN` and `BR TO` are only legal inside a role block. |
 | `R3-timed-in-role` | Role blocks (`only(...)`) contain no timed steps. |
 | `R3-raw-drive` | `RAW SET/REL` on a PP line only inside a role block whose mask ⊆ {line owner}. |
-| `R3-escape` | No branch leaves a role block or enters one from outside. |
+| `R3-escape` | No branch leaves a role block or enters one from outside. A branch inside a block may target the block's `ROLE_IF`, its body, or its exit (the pc after the block, where every role resumes; when blocks are adjacent this is the next block's `ROLE_IF`, so that role check still runs). |
 | `R3-fz` | `FZ` only inside a role block. |
 | `S-*` | Structure: labels resolve, names exist, field ranges, table sizes, no nested role blocks, program length ≤ the target's program depth (`S-range`), `data2` only on a clocked lane, duplex `n ≤ 8`, CRC config in range. |
 

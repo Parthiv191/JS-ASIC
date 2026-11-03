@@ -94,3 +94,22 @@ def test_with_profiles_scales_nom_only():
     out = img.with_profiles({"BIT": 1.1})
     assert out.profiles[1] == Profile("BIT", 18, 22, 22)
     assert img.profiles[1].nom == 20  # original untouched
+
+
+def test_rejects_profile_ref_index_zero():
+    """Index 0 is the reserved IDLE profile; a ProfRef that names it is not a user profile."""
+    from emu.desc import ProfRef
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a")
+    d.profile("P", nom=8)
+    with pytest.raises(ValueError, match="unknown profile"):
+        d.hold(ln, 0, owner="a", prof=ProfRef("P", 0))
+
+
+def test_rejects_unknown_lane_ref():
+    from emu.desc import LaneRef
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a")
+    p = d.profile("P", nom=8)
+    with pytest.raises(ValueError, match="unknown lane"):
+        d.xfer(8, LaneRef("nope", 5), owner="a", prof=p)

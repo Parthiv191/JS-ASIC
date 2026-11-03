@@ -159,3 +159,54 @@ def test_s_rejects_program_over_depth():
     assert rules(nops(65)) == {"S-range"}
     compile_desc(nops(64), check_timing=False)
     compile_desc(nops(65), check_timing=False, prog_depth=128)
+
+
+def test_encode_failure_without_diagnostic_is_an_internal_error(monkeypatch):
+    """compiler.lower must never turn an undiagnosed encode failure into a NOP word."""
+    import emu.compiler as compiler
+
+    def boom(ins):
+        raise ValueError("field does not fit")
+    monkeypatch.setattr(compiler, "encode", boom)
+    d, pp, od, p = base()
+    d.nop()
+    with pytest.raises(AssertionError, match="without a diagnostic"):
+        compiler.lower(d)
+
+
+def test_r3_allows_early_exit_to_block_end():
+    """The pc after a block is where every other role resumes, so jumping there is an early exit."""
+    d, pp, od, p = base()
+    with d.only("a"):
+        d.li("r0", 1)
+        d.br("exit", cond="z", reg="r0")
+        d.nop()
+    d.label("exit")
+    d.halt()
+    compile_desc(d, check_timing=False)
+
+
+def test_r3_allows_exit_onto_adjacent_block_guard():
+    """With adjacent blocks, a's exit pc is b's ROLE_IF, so b's role check still runs."""
+    d, pp, od, p = base()
+    with d.only("a"):
+        d.li("r0", 1)
+        d.br("blk_b", cond="z", reg="r0")
+    d.label("blk_b")
+    with d.only("b"):
+        d.nop()
+    d.halt()
+    compile_desc(d, check_timing=False)
+
+
+def test_r3_rejects_branch_into_another_blocks_body():
+    d, pp, od, p = base()
+    with d.only("a"):
+        d.li("r0", 1)
+        d.br("in_b", cond="z", reg="r0")
+    with d.only("b"):
+        d.nop()
+        d.label("in_b")
+        d.nop()
+    d.halt()
+    assert rules(d) == {"R3-escape"}

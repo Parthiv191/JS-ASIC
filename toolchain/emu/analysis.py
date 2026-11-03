@@ -81,7 +81,10 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
         t = state[pc]
         ins = instrs[pc]
         inblock = _in_block(low, pc)
-        if ins.op == Op.BR and BrCond(ins.prof & 3) != BrCond.ALWAYS and not inblock and t >> (ins.pin & 3) & 1:
+        cond = BrCond(ins.prof & 3) if ins.op == Op.BR else None
+        if cond == BrCond.TO and not inblock:
+            diags.add("R2-branch", pc, "BR TO outside a role block")
+        elif cond in (BrCond.Z, BrCond.NZ) and not inblock and t >> (ins.pin & 3) & 1:
             diags.add("R2-branch", pc, f"branch on r{ins.pin & 3}, whose value can differ between roles")
         if ins.op == Op.RAW and ins.prof == RawOp.JPIN and not inblock:
             diags.add("R2-branch", pc, "raw pin branch outside a role block")
@@ -270,9 +273,11 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
         if s.op == Op.HOLD or (s.op == Op.XFER and not s.clocked):
             P = p.nom
             for a, lo, hi in tuples:
-                if drift(ppm, a + s.n * P) + Q + 1 >= P // 2:
-                    diags.add("T1-sample", pc, f"last sample of slot length {P} at anchor distance {a} "
-                                               f"misses its slot under {ppm} ppm drift")
+                dr = drift(ppm, a + s.n * P)
+                if dr + Q + 1 >= P // 2:
+                    diags.add("T1-sample", pc, f"last sample of slot length {P} at anchor distance {a}: "
+                                               f"needs drift {dr} + QUANT {Q} + 1 = {dr + Q + 1} < P//2 = {P // 2} "
+                                               f"({ppm} ppm)")
         # T2: accumulated windows of CHK unclocked XFER
         if s.op == Op.XFER and not s.clocked and s.chk:
             for a, lo, hi in tuples:

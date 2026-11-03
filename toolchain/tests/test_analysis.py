@@ -167,3 +167,77 @@ def test_t5_rejects_owner_overrun():
     d.hold(ln, 0, owner="a", prof=p)
     d.halt()
     assert diag_rules(d) == {"T5-overrun"}
+
+
+def _with_br_to(d):
+    """Lower `d` and turn its single BR into BR TO (the DSL has no name for TO until Task 7)."""
+    from dataclasses import replace
+
+    from emu.compiler import lower
+    from emu.isa import BrCond, Op
+    low = lower(d)
+    pc = next(i for i, ins in enumerate(low.instrs) if ins.op == Op.BR)
+    low.instrs[pc] = replace(low.instrs[pc], prof=int(BrCond.TO), pin=0)
+    return low
+
+
+def test_r2_rejects_br_to_outside_block():
+    """isa-v0 §5 R2: BR TO is only legal inside a role block, whatever r0 holds."""
+    from emu.analysis import check_branches
+    d, ln, p = two_party()
+    d.label("x")
+    d.li("r0", 0)  # clean register: the taint check alone would accept this
+    d.br("x", cond="z", reg="r0")
+    d.halt()
+    assert {x.rule for x in check_branches(d, _with_br_to(d))} == {"R2-branch"}
+
+
+def test_r2_accepts_br_to_inside_block():
+    from emu.analysis import check_branches
+    d, ln, p = two_party()
+    with d.only("a"):
+        d.label("x")
+        d.li("r0", 0)
+        d.br("x", cond="z", reg="r0")
+    d.halt()
+    assert check_branches(d, _with_br_to(d)) == []
+
+
+def test_t1_message_names_the_real_bound():
+    """At 0 ppm a 4-cycle slot still fails: QUANT + 1 = 2 is not < 4//2. The message must say so."""
+    d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=d.profile("P", nom=4))
+    d.halt()
+    with pytest.raises(CompileError) as e:
+        compile_desc(d)
+    (msg,) = [x.msg for x in e.value.diags if x.rule == "T1-sample"]
+    assert "drift 0 + QUANT 1 + 1 = 2" in msg and "P//2 = 2" in msg
+
+
+@pytest.mark.parametrize("P,ok", [(5, False), (6, True)])
+def test_t1_shortest_hold_slot_at_zero_ppm(P, ok):
+    """Even without drift a follower needs QUANT + 1 = 2 < P//2, so the shortest followed slot is 6."""
+    d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=d.profile("P", nom=P))
+    d.halt()
+    assert (diag_rules(d) == set()) == ok
+
+
+@pytest.mark.parametrize("ppm,ok", [(20000, False), (10000, True)])
+def test_t1_sixteen_bit_unclocked_frame(ppm, ok):
+    """P=16 after a 1P start bit: the last sample is at A + 16P = 272.
+    2%: ceil(5.44) + QUANT + 1 = 8, not < 8. 1%: 3 + 2 = 5 < 8."""
+    from descs import slack
+    d = Description("t", parties=("a", "b"), tolerance_ppm=ppm)
+    ln = d.line("l", owner="a", idle=1)
+    s = slack(16, ppm)
+    bit = d.profile("BIT", nom=16, min=16 - s, max=16 + s)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.xfer(16, ln, owner="a", prof=bit)
+    d.halt()
+    assert ("T1-sample" not in diag_rules(d)) == ok

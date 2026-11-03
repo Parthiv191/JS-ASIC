@@ -169,6 +169,8 @@ class Engine:
 
     def _op_br(self, ins: Instr) -> Gen:
         cond = BrCond(ins.prof & 3)
+        if cond == BrCond.TO:
+            raise NotImplementedError(f"BR TO needs the timeout flag from Task 7 (pc {self.pc})")
         if cond == BrCond.ALWAYS:
             taken = True
         else:

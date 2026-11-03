@@ -1,3 +1,5 @@
+import pytest
+
 from emu.compiler import compile_desc
 from emu.desc import Description
 from emu.image import LineCfg
@@ -126,3 +128,37 @@ def test_resolve_contention_and_od():
     assert resolve([pp, od], [[None, None], [None, None]]) == ([1, 1], [])
     assert resolve([pp, od], [[1, None], [None, 0]]) == ([1, 0], [])
     assert resolve([pp, od], [[1, 0], [0, None]]) == ([0, 0], [0])
+
+
+def test_br_to_is_not_run_as_nz():
+    """BR TO has no engine semantics until Task 7; it must not silently test a register."""
+    from dataclasses import replace
+
+    import pytest
+
+    from emu.isa import BrCond, decode, encode
+
+    def b(d, l):
+        d.li("r0", 1)
+        d.label("x")
+        d.br("x", cond="nz", reg="r0")
+        d.halt()
+    image = img(b)
+    words = list(image.words)
+    words[1] = encode(replace(decode(words[1]), prof=int(BrCond.TO)))
+    with pytest.raises(NotImplementedError, match="BR TO"):
+        run(Engine(replace(image, words=words), Role.P0), 5)
+
+
+@pytest.mark.parametrize("op,a,b,want", [
+    ("and", 0x0F0, 0x03C, 0x030),
+    ("ne", 0x0F0, 0x0F0, 0), ("ne", 0x0F0, 0x0F1, 1),
+    ("lt", 0x011, 0x011, 0), ("lt", 0x011, 0x010, 0), ("lt", 0x010, 0x011, 1),
+    ("eq", 0x011, 0x010, 0), ("eq", 0x011, 0x011, 1),
+])
+def test_alu_compare_and_mask_ops(op, a, b, want):
+    def prog(d, l):
+        d.li("r0", a)
+        d.alu(op, "r1", "r0", b)
+        d.halt()
+    assert run(Engine(img(prog), Role.P0), 5).regs[1] == want

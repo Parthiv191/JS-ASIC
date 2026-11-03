@@ -164,6 +164,8 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
         if s.kind in BRANCHES:
             t = ins.operand if s.kind == "br" else ins.operand & 0x7FF
             here, there = span_of(pc), span_of(t)
+            # here.end is the block's exit, where every role resumes, so `<=` allows an early exit.
+            # With adjacent blocks it is the next block's ROLE_IF, so that role check still runs.
             if here is not None and not (here.start <= t <= here.end or t == here.role_if_pc):
                 err("R3-escape", s, "branch leaves its role block")
             if here is None and there is not None:
@@ -192,8 +194,9 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     for ins in instrs:
         try:
             words.append(encode(ins))
-        except ValueError:
-            words.append(0)  # already diagnosed
+        except ValueError as e:
+            assert diags, f"encode failed without a diagnostic: {ins} ({e})"
+            words.append(0)  # already diagnosed; compile_desc refuses the image
     debug = {}
     for p, ins in enumerate(instrs):
         st = desc.steps[pc_step[p]]
