@@ -10,12 +10,17 @@ updated.
 r2 changes: program depth 64 (team draft), `CRC` and `FZ` opcodes, the `IRQ` flag on `MARK`,
 branch on timeout (`BR TO`), duplex lanes, the `src = FZ` source, and §8.
 
-Implementation status (toolchain, 2026-11-02). The encodings of every r2 feature exist in
+r3 notes (2026-11-03), no encoding change:
+- The SRAM program memory and its fetch timing (§1). The §4 costs are unchanged.
+- R3-fz requires a block for a single party (§5).
+- An open item on `T2-window` at an anchor (§6).
+
+Implementation status (toolchain, 2026-11-03). The encodings of every r2 feature exist in
 `emu.isa`; the DSL, compiler and model reach them in these tasks of the plan:
 
 | Feature | Lands in |
 |---|---|
-| `COND`, `HOLD`, unclocked `XFER`, `BR TO` (the model raises on `BR TO` until then) | Task 7 |
+| `COND`, `HOLD`, unclocked `XFER`, `BR TO`. The R2-branch rule for `BR TO` is already in, and the model raises on `BR TO` until Task 7. | Task 7 |
 | Clocked and duplex lanes (`data2`) | Task 8 |
 | `CRC`, `MARK` with `IRQ` | Task 9 |
 | `FZ`, `src = FZ` | Task 20 |
@@ -31,10 +36,25 @@ Implementation status (toolchain, 2026-11-02). The encodings of every r2 feature
 | Registers | 4 × 16 bit | `r0..r3`. |
 | Profiles | 16 | Timing-table entries `(min, nom, max)`, 16-bit cycle counts. Entry 0 is `IDLE` = unbounded. |
 | Lanes | 16 | Lane table entries for `XFER`. |
-| `PROG_DEPTH` | 64 words | Program memory per image (team draft). Branch targets stay 12-bit, so a deeper (SRAM) program memory needs no re-encode. The compiler takes the depth as a parameter. |
+| `PROG_DEPTH` | 64 words | Program memory per image (team draft). Branch targets stay 12-bit, so a deeper (SRAM) program memory needs no re-encode. The compiler takes the depth as a parameter. An engine on the SRAM program memory (below) has 256 words. |
 | CRC | 16-bit state | One CRC unit per engine, configured in the image header (§4.4). |
 | FIFOs | 4 × 16 bit (RTL) | TX (host → engine) and RX (engine → host). The model's FIFOs are unbounded; Phase 5 checks depth. |
 | `INF` | `0xFFFF` | A profile `max` of `INF` means no timeout. |
+
+**SRAM program memory.** Two `RM_IHPSG13_1P_256x16` macros give 256 words × 32 bits
+(`src/prog_mem.v`; CI run 41584775180 passed harden, precheck and gate-level tests on
+CMOS5L). A read returns its word one cycle after the address. The engine hides that latency
+by **fetch-ahead**: in the cycle it executes an instruction, it already presents the next pc.
+That next pc is always known by then:
+- Branch targets, `ROLE_IF` skip counts and `abort_pc` are immediates or header fields.
+- Branch conditions read registers, the `to` flag or synchronized pins, which are already
+  valid in that cycle.
+- A stalled instruction holds its address, and the macro holds its output.
+
+The issue slot of §4 already keeps the next instruction from starting in the cycle its
+predecessor completed. So every cost in §4 holds unchanged. The CHASE test in `test/test.py`
+drives the macro's address from its own output every cycle, which is this path, and it meets
+timing at 20 ns.
 
 ## 2. Roles, owners, lines
 
@@ -132,7 +152,7 @@ Without IRQ, a `MARK` logs `MARK(id)`. With IRQ, it logs `IRQ(id)` instead, latc
 
 ### 4.6 `FZ` and `src = FZ`
 
-The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics, the auto-tokens and the fixed cycle costs (`FZ_NEXT_CYCLES`, `FZ_END_CYCLES`) are specified in `bus-fuzzer.md`. `FZ` is legal only inside a role block (R3-fz). An `XFER` with `src = FZ` drives the next staged byte (0 once the stage is exhausted). It is legal anywhere, because only the owner reads `src`.
+The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics, the auto-tokens and the fixed cycle costs (`FZ_NEXT_CYCLES`, `FZ_END_CYCLES`, checked against the SRAM macro in bus-fuzzer.md §3.1) are specified in `bus-fuzzer.md`. `FZ` is legal only inside a role block for a single party (R3-fz). There is one fuzz unit, attached to one engine; an `FZ` on an engine without it is an error. An `XFER` with `src = FZ` drives the next staged byte (0 once the stage is exhausted). It is legal anywhere, because only the owner reads `src`.
 
 ## 5. Well-formedness rules (compiler)
 
@@ -144,7 +164,7 @@ The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics,
 | `R3-timed-in-role` | Role blocks (`only(...)`) contain no timed steps. |
 | `R3-raw-drive` | `RAW SET/REL` on a PP line only inside a role block whose mask ⊆ {line owner}. |
 | `R3-escape` | No branch leaves a role block or enters one from outside. A branch inside a block may target the block's `ROLE_IF`, its body, or its exit (the pc after the block, where every role resumes; when blocks are adjacent this is the next block's `ROLE_IF`, so that role check still runs). |
-| `R3-fz` | `FZ` only inside a role block. |
+| `R3-fz` | `FZ` only inside a role block whose mask is exactly one party, and the same party for every `FZ` in the description. There is one fuzz unit, and its SRAM does one access per cycle. |
 | `S-*` | Structure: labels resolve, names exist, field ranges, table sizes, no nested role blocks, program length ≤ the target's program depth (`S-range`), `data2` only on a clocked lane, duplex `n ≤ 8`, CRC config in range. |
 
 ## 6. Timing-compatibility rules (compiler)
@@ -159,6 +179,12 @@ The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics,
 | `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. |
 | `T5-watch` | A follower must already be executing a step when its first observation happens: the owner's event for COND (`start_f + ceil(d·(A+nom)) ≤ event + EDGE_LAT`), the first edge of a clocked XFER (`≤ H + EDGE_LAT`), or the first sample of HOLD / unclocked XFER (`≤ nom//2 + EDGE_LAT`). `start_r` is computed per role as the previous timed step's completion offset for that role + 1 + that role's untimed cycles in between (max over paths; an untimed loop makes it unbounded). |
 | `T5-overrun` | The owner of a bounded step must start in time: `start_o ≤ max(planned_offset, 1)`, where the planned offset is `nom` for COND and 0 for HOLD and XFER. |
+
+**Open item (plan decision D2, needed for Task 7).** Take a `CHK` unclocked `XFER` that starts right at an anchor (`A = 0`). Its boundary-0 window is `[0, 0]`, and `T2-window` asks it to contain `0 ± QUANT`. Since `0 > −1`, the step is rejected. This follows the rule as written; it is not an analyzer bug. Two ways to change it:
+- Give the window at an anchor `±QUANT` slack in T2. The engine's check already widens every window by `QUANT` (§4).
+- Skip boundary 0 when `A = 0`.
+
+Until D2 is decided, such a step does not compile.
 
 Untimed cycles count each instruction's cost from §4: one per untimed instruction, `n` for `RAW DELAY n`, and the fixed `FZ` costs.
 
@@ -238,7 +264,10 @@ where they land.
 | 4 | 3-bit delay (max 7) | 16-bit profiles. |
 | 5 | 5-bit bit counts against 16-bit shift registers | `n−1` in 4 bits: 1..16. |
 | 6 | LDI extension unspecified | `LI` zero-extends 12 bits. |
-| 7 | Number of state machines undecided | The model runs any number of engines. The chip count (2 or 3; a monitor needs its own) is a Phase 6 area decision. |
+| 7 | Number of state machines undecided | The model runs any number of engines. The chip count (2 or 3; a monitor needs its own) is a Phase 6 area decision, bounded by the macro limit below. |
 
 The draft's open area question also applies here: a 32-bit word makes 64 words in flops
-about 2× the draft's ~6K cells. A 64×64 SRAM macro is the candidate (Phase 6).
+about 2× the draft's ~6K cells. The SRAM answer is now tested (§1): two
+`RM_IHPSG13_1P_256x16` macros per engine. The power grid allows at most 4 macros on the 6x4
+die, or 3 if the untested slot under the pin cluster fails. They are shared between the
+engines' program memories and the fuzzer's storage. That split is plan decision D1.

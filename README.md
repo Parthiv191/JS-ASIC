@@ -1,42 +1,48 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
-# Tiny Tapeout Verilog Project Template
+# Role-switching protocol emulator
 
-- [Read the documentation for project](docs/info.md)
+A Tiny Tapeout chip for the IHP SG13CMOS5L shuttle (6x4 tiles), built for the
+Jane Street ASIC design competition. Each bus protocol is written once, as an
+owner-labelled description. The same program then runs in any role: controller,
+target or monitor. A learning bus fuzzer mutates the messages it sends and keeps
+the ones that make a device respond in new ways.
 
-## What is Tiny Tapeout?
+Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
 
-Tiny Tapeout is an educational project that aims to make it easier and cheaper than ever to get your digital and analog designs manufactured on a real chip.
+## Status (2026-11-03)
 
-To learn more and get started, visit https://tinytapeout.com.
+- **On the chip today:** a bring-up design. It has a fixed UART transmitter and
+  a trial harness for the program memory, a 256 × 32 SRAM built from two IHP
+  `RM_IHPSG13_1P_256x16` macros. CI hardens it on the CMOS5L template and passes
+  precheck and gate-level tests. The protocol engine replaces both later.
+- **Toolchain:** the ISA encoding, the description compiler with its
+  well-formedness and timing rules, and the untimed reference model are done.
+  Timed operations come next (plan Task 7).
+- **Open decisions:** how the SRAM macros are split between engines and the
+  fuzzer, plus two smaller ones. The die takes at most 4, and the fourth slot is
+  untested. They are listed in the plan's "Open decisions" section.
 
-## Set up your Verilog project
+## Layout
 
-1. Add your Verilog files to the `src` folder.
-2. Edit the [info.yaml](info.yaml) and update information about your project, paying special attention to the `source_files` and `top_module` properties. If you are upgrading an existing Tiny Tapeout project, check out our [online info.yaml migration tool](https://tinytapeout.github.io/tt-yaml-upgrade-tool/).
-3. Edit [docs/info.md](docs/info.md) and add a description of your project.
-4. Adapt the testbench to your design. See [test/README.md](test/README.md) for more information.
+| Path | Contents |
+|---|---|
+| `src/` | Verilog (`project.v`, `uart_tx.v`, `prog_mem.v`), LibreLane config, custom PDN script |
+| `test/` | cocotb tests, RTL and gate-level ([test/README.md](test/README.md)) |
+| `flow/` | blackbox of the SRAM macro for the lint step |
+| `toolchain/` | Python ISA, compiler and reference model ([toolchain/README.md](toolchain/README.md)) |
+| `docs/design/isa-v0.md` | the cycle-level ISA contract |
+| `docs/design/bus-fuzzer.md` | the learning bus fuzzer design |
+| `docs/superpowers/plans/` | the implementation plan, its phases and open decisions |
 
-The GitHub action will automatically build the ASIC files using [LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/).
+## Tiny Tapeout
 
-## Enable GitHub actions to build the results page
-
-- [Enabling GitHub Pages](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part)
-
-## Resources
+The GitHub actions build the ASIC files with
+[LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/), run the
+precheck and the gate-level tests, and publish the
+[results page](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part).
 
 - [FAQ](https://tinytapeout.com/faq/)
 - [Digital design lessons](https://tinytapeout.com/digital_design/)
-- [Learn how semiconductors work](https://tinytapeout.com/siliwiz/)
-- [Join the community](https://tinytapeout.com/discord)
 - [Build your design locally](https://www.tinytapeout.com/guides/local-hardening/)
-
-## What next?
-
-- [Submit your design to the next shuttle](https://app.tinytapeout.com/).
-- Edit [this README](README.md) and explain your design, how it works, and how to test it.
-- Share your project on your social network of choice:
-  - LinkedIn [#tinytapeout](https://www.linkedin.com/search/results/content/?keywords=%23tinytapeout) [@TinyTapeout](https://www.linkedin.com/company/100708654/)
-  - Mastodon [#tinytapeout](https://chaos.social/tags/tinytapeout) [@matthewvenn](https://chaos.social/@matthewvenn)
-  - X (formerly Twitter) [#tinytapeout](https://twitter.com/hashtag/tinytapeout) [@tinytapeout](https://twitter.com/tinytapeout)
-  - Bluesky [@tinytapeout.com](https://bsky.app/profile/tinytapeout.com)
+- [Join the community](https://tinytapeout.com/discord)

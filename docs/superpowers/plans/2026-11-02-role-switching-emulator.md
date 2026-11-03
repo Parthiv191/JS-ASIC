@@ -17,19 +17,51 @@
   - Seven phases.
   - Tasks 1–6 keep their numbers, plus the code amendments A1–A2 below.
   - New Task 9 (CRC + IRQ). r1 Tasks 9–16 become 10–17. New Task 18 (mutation testing) and Phase 3 (Tasks 19–23).
+- **r3 (2026-11-03):** hardware findings and audit follow-ups. No task is renumbered.
+  - The r2 amendments A1–A2 are done (`a56f526`).
+  - Audit follow-ups (`8456129`):
+    - DSL validation of profile and lane refs.
+    - A guard: the model raises on `BR TO`.
+    - The R2-branch rule for `BR TO`, which lands early from Task 7.
+    - An encode-failure guard.
+    - Clearer T1 messages and the missing tests.
+  - CI moved to the CMOS5L template (`04562f0`); see Global Constraints.
+  - SRAM program-memory trial (`a20ad41`, `a200102`): two `RM_IHPSG13_1P_256x16` macros as a 256 × 32 memory. CI run 41584775180 passed harden, precheck and gate-level tests.
+    - The trial turned up the 4-macro limit and the reset convention below.
+    - It showed fetch-ahead hides the macro's read latency, so the ISA costs are unchanged (isa-v0 §1).
+  - The fuzzer design is mapped onto the macro and its cycle costs re-checked (bus-fuzzer.md §2.1, §3.1).
+  - R3-fz now requires a single-party block.
+  - New section: Open decisions D1–D3.
 
 ## Global Constraints
 
-- Target: IHP sg13g2 CMOS5L via Tiny Tapeout, **6x4 tiles** (design for 6x4 from day one; 8x4 only if announced).
+- Target: IHP SG13CMOS5L (130 nm) via Tiny Tapeout, **6x4 tiles** (die 1289.28 × 710.64 µm; design for 6x4 from day one, 8x4 only if announced). This is the Jane Street ASIC design competition's March 2027 CMOS5L shuttle.
+  - Template: `TinyTapeout/ttihp-verilog-template`, branch `cmos5l`.
+  - CI: `tt-gds-action@ihp-cmos5l` with `pdk: ihp-sg13cmos5l`.
 - Pins: clk, rst_n, 8 inputs, 8 outputs, 8 bidirectional. Protocol lines use the 8 bidirectional pins.
 - Clock: operate at 48 MHz; harden at `CLOCK_PERIOD = 20` ns (50 MHz); 40 MHz fallback.
 - Submission due **January 18, 2027**; RTL freeze around January 4, 2027. Week numbers follow the team sheet: week 1 starts Oct 26, 2026.
 - Terminology: "controller"/"target", never master/slave.
 - Toolchain language: Python (pairs with the existing cocotb tests). RTL language: Verilog (existing repo).
 - `SYNC_LAT = 2`, `EDGE_LAT = 3`, `QUANT = 1`, 8 lines, 4×16-bit registers, 16 profiles, 16 lanes (isa-v0 §1).
-- Program memory: `PROG_DEPTH = 64` words × 32 bits per image (team draft), with 12-bit branch targets. The 64×64 SRAM macro is the candidate; flops cost about 2× the draft's ~6K cells.
+- Program memory: `PROG_DEPTH = 64` words × 32 bits per image (team draft), with 12-bit branch targets. In flops this costs about 2× the draft's ~6K cells. On SRAM, an engine gets 256 words from two macros (`src/prog_mem.v`). The macro's one-cycle read latency is hidden by fetch-ahead, so no ISA cost changes (isa-v0 §1).
+- SRAM macro: `RM_IHPSG13_1P_256x16_c2_bm_bist`, proven on this template by CI run 41584775180.
+  - Size and behaviour: 236.8 × 118.78 µm, 256 × 16 bits, single port. One access per cycle; read data comes one cycle later and holds until the next read.
+  - Pins: `A_DLY` must be tied high, and `VDDARRAY!` must be connected, or the array keeps no data.
+  - Power: the pins are Metal4-only, so the PDN is the custom `src/pdn_cfg.tcl`, from 2AMLogic under Apache-2.0. It puts three conditions on placement:
+    1. Each macro's x is 91.2 + 44.96k µm.
+    2. No macro covers the power-pin strap at x = 366.6–370.7 µm.
+    3. Macros never overlap in x, because their power bridges run to the core's top and bottom edges.
+  - That allows **at most 4 macros on the 6x4 die**, at x = 91.2, 405.92, 675.68 and 945.44. The trial uses 495.84 and 765.60.
+  - **The fourth slot is unproven.** It is the one at x = 91.2, left of the power-pin strap; every other legal position lies to the right. Its bridges run up into the Tiny Tapeout pin cluster on the top edge (x < 192 µm). 2AMLogic's single macro sits at exactly that x on a 2x2 die and passes precheck, but it is untested on this die. If it fails, the limit is **3**.
+  - A wider die (8x4) fits more; not checked.
+  - Simulation uses the PDK's behavioural models (`test/sram/`) with `-DFUNCTIONAL`.
+- Reset: every flop resets through its own `RESET_B` pin. Reset asserts asynchronously from `rst_n` and releases through a two-flop synchronizer (`src/project.v`). With a synchronous reset, synthesis can build the reset logic as `q | !q`. Gate-level simulation reads that as X at power-up, though silicon reads it as 1; this failed CI run 41580430296.
 - FIFOs 4 × 16 bit (RTL), CRC state 16 bit.
-- Fuzz unit: 32 slots × 32-byte corpus, 1024-bit bitmap, 32-byte staging, 8 findings, `FZ_NEXT_CYCLES = 48`, `FZ_END_CYCLES = 40` (bus-fuzzer.md).
+- Fuzz unit: one unit attached to one engine.
+  - Sizes: a 32-byte corpus slot, 1024-bit bitmap, 32-byte staging and 8 findings.
+  - Cycle costs: `FZ_NEXT_CYCLES = 48` and `FZ_END_CYCLES = 40`, checked against the macro in bus-fuzzer.md §3.1.
+  - Slot count: the model defaults to 32 slots. The chip's count follows D1: 28 under A, 12 under C.
 - Area: aim for about half utilization (team finding: routing runs out before space).
 - The toolchain has zero runtime dependencies; dev deps are pinned in `toolchain/pyproject.toml`.
 - Never cut (proposal §14.5): three-role UART, SPI and I2C; the monitor log; the formal harness for those; a clean harden.
@@ -43,6 +75,29 @@
 4. **Back-to-back frames with zero idle**, and payload extremes (0x00, 0xFF, n = 1, n = 16, MSB-first). Expected: the follower catches the next start edge, and data is exact. Tests: Task 10 `test_uart_back_to_back_frames`, Task 7 `test_xfer_widths_and_order`.
 5. **Fuzzer fingerprint nondeterminism.** The same input to the same device, under in-tolerance jitter (reset phase offsets, clock ratios inside `tolerance_ppm`), must give the same fingerprint. Otherwise the bitmap fills with noise and the corpus floods with duplicates. Test: Task 22 `test_fingerprint_stable_under_in_tolerance_jitter`.
 
+## Open decisions
+
+These need the user. Work that depends on them waits.
+
+**D1. How the SRAM macros are split** (blocks the fuzzer memory map, the chip's slot count, and the engine count). The die takes at most 4, one of them in an unproven slot. Each engine on SRAM takes 2 macros.
+
+| Option | Program memory | Fuzzer storage |
+|---|---|---|
+| **A** (recommended) | 1 engine on SRAM (256 words). Other engines get small flop memories, e.g. 32 words at roughly 10% of the die each. | 2 macros: 28 slots plus the bitmap; the full learning loop |
+| **B** | 2 engines on SRAM | None on chip: the host-driven loop (Task 23, Phase 5) |
+| **C** | 1 engine on SRAM | 1 macro: 12 slots plus the bitmap, and 1 macro spare |
+| **D** | Rework `src/pdn_cfg.tcl` so macros can stack | More macros. Unproven, and each attempt costs a 35–45-minute CI run |
+
+The reason for A: fuzzing a real device needs one engine on fast memory, the one in the controller role. The other engines mainly serve cross-role self-tests and monitoring, where small programs are enough.
+
+Two checks come before freezing D1:
+- **A and B both need all 4 macros, including the unproven slot at x = 91.2** (Global Constraints). A CI harden with a macro there settles it. If only 3 fit, C is the only option.
+- **Engine area.** Synthesize the engine (Phase 5) to see how much area flop memories really leave.
+
+**D2. `T2-window` at an anchor** (blocks Task 7). A `CHK` unclocked `XFER` that starts right at an anchor is rejected at boundary 0 (isa-v0 §6, open item). This is the rule working as written, not an analyzer bug (audit item MATH-03). The choice is between ±`QUANT` slack at an anchor, skipping boundary 0 when `A = 0`, or keeping the rule.
+
+**D3. Phase order.** Keep the plan's order (Phase 2 before Phase 3), or go straight from Phase 1 to Phase 3 if on-chip fuzzing comes first. Phase 3 touches two Phase 2 files, so those would start as stubs: `emu/fuzz/randdesc.py` (Task 17) and the `emu/fuzz/__main__.py` CLI (Task 15). The cost is losing Phase 2's model bug-hunting before the fuzzer relies on the model.
+
 ---
 
 ## Phases
@@ -53,8 +108,8 @@
 | **2. Verification fuzz loop** | 3–5 (Nov 9–29) | Test-case format, oracles, functional coverage, coverage-guided campaign (corpus energy, operator bandit, generator-weight feedback), shrinker, regression corpus + CI, random descriptions (well- and ill-formed), mutation testing of the oracles (Tasks 11–18) | Clean `--iters 5000` run across `uart,spi,rand`; every planted mutant killed or documented as equivalent |
 | **3. Learning bus fuzzer (model)** | 5–6 (Nov 23 – Dec 6) | `FuzzUnit`, `FZ` ops and `src=FZ` in the engine and compiler, devices with planted behaviour, learning-vs-baseline and target-role experiments, host-driven loop (Tasks 19–23) | `docs/verification/bus-fuzzer-experiments.md` shows learning beating the no-feedback baseline on partial-progress devices; host-driven and on-chip loops agree |
 | **4. I2C and protocol extensions** | 6–7 (Nov 30 – Dec 13) | COND START/STOP, OD readback in followed steps, clock stretching, CHOICE (removes the fuzzer's fixed-length limit), ARB, I2C in all roles; stretch: MEASURE, CODEC, USB-LS showpiece, margin sweep | I2C passes cross-role tests in the model |
-| **5. Engine RTL, co-simulation, FPGA** | 4–10 (Nov 16 – Jan 3), RTL in parallel | Verilog engine, `isa_defs.vh` generated from `emu.isa`, image loader, top level replacing the hardcoded UART, Verilator backend for the fuzz runner (RTL vs model at step boundaries), planted RTL bugs, sigrok cross-checks, SymbiYosys harness, host link, Basys 3 bring-up, host-driven bus fuzzer on real parts | RTL passes the regression corpus plus N differential iterations; I2C sensor and fuzzer demo on the Basys 3 |
-| **6. Fuzz unit RTL, area and timing** | 8–10 (Dec 14 – Jan 3) | Fuzz unit in Verilog diffed against `FuzzUnit`, SRAM macro decision (program memory + corpus), engine count (2 or 3), harden at 20 ns with recorded area/slack | Fuzz unit RTL matches the model; harden clean at the frozen feature set |
+| **5. Engine RTL, co-simulation, FPGA** | 4–10 (Nov 16 – Jan 3), RTL in parallel | Verilog engine with fetch-ahead from `src/prog_mem.v`, `isa_defs.vh` generated from `emu.isa`, image loader, top level replacing the hardcoded UART and the SRAM trial harness, an engine synthesis for the D1 area estimate, Verilator backend for the fuzz runner (RTL vs model at step boundaries), planted RTL bugs, sigrok cross-checks, SymbiYosys harness, host link, Basys 3 bring-up, host-driven bus fuzzer on real parts | RTL passes the regression corpus plus N differential iterations; I2C sensor and fuzzer demo on the Basys 3 |
+| **6. Fuzz unit RTL, area and timing** | 8–10 (Dec 14 – Jan 3) | Fuzz unit in Verilog diffed against `FuzzUnit`; the macro split (D1) frozen with measured area (the macro and its PDN are already proven, r3); engine count (2 or 3); harden at 20 ns with recorded area/slack | Fuzz unit RTL matches the model; harden clean at the frozen feature set |
 | **7. Harden of record, submission** | 11–12 (Jan 4–17) | Timing/DRC/LVS clean harden, full GL regression, host library, self-test, writeup (including how AI was used and checked), demos | Submitted before Jan 18 |
 
 Phases 4–7 get their own detailed plans when they start, because their task boundaries depend on Phase 1–3 findings and on the first harden numbers.
@@ -212,13 +267,13 @@ These change code that Tasks 1 and 3 already committed. Run them once, before Ta
 
 **A2 (Task 3, `emu/compiler.py`, `tests/test_compiler.py`).** `compile_desc(desc, *, check_timing=True, prog_depth=PROG_DEPTH)` and `lower(desc, prog_depth=PROG_DEPTH)`. A program longer than `prog_depth` words fails `S-range`.
 
-- [ ] **Step 1: Tests**:
+- [x] **Step 1: Tests**:
   - `test_r2_opcode_allocation` asserts the A1 values.
   - `test_s_rejects_program_over_depth`: 65 NOPs → `{"S-range"}`; 64 NOPs compile; 65 NOPs with `prog_depth=128` compile.
-- [ ] **Step 2: Run** `python -m pytest tests/test_isa.py tests/test_compiler.py -q` → the two new tests FAIL (missing names, and 65 words accepted against the old depth of 4096).
-- [ ] **Step 3: Implement** A1 and A2.
-- [ ] **Step 4: Run** the full suite → PASS, except the uncommitted Task 7 RED tests.
-- [ ] **Step 5: Commit** `feat(toolchain): r2 ISA amendments (64-word programs, CRC/FZ/IRQ/TO codes)`.
+- [x] **Step 2: Run** `python -m pytest tests/test_isa.py tests/test_compiler.py -q` → the two new tests FAIL (missing names, and 65 words accepted against the old depth of 4096).
+- [x] **Step 3: Implement** A1 and A2.
+- [x] **Step 4: Run** the full suite → PASS, except the uncommitted Task 7 RED tests.
+- [x] **Step 5: Commit** `feat(toolchain): r2 ISA amendments (64-word programs, CRC/FZ/IRQ/TO codes)`.
 
 ### Task 7: Timed ops: COND, HOLD, unclocked XFER, timeout flag
 
@@ -234,7 +289,8 @@ These change code that Tasks 1 and 3 already committed. Run them once, before Ta
   Plus r2:
   - `test_br_to_taken_after_follow_timeout`: bounded COND without ABORT, owner image scaled ×3, then `only("b"): br("late", cond="to")` → `MARK` at `late` in engines 1 and 2, not in 0.
   - `test_to_flag_cleared_by_next_timed_step`.
-  - In `test_analysis.py`: `test_r2_rejects_br_to_outside_block` → `{"R2-branch"}`.
+  - In `test_analysis.py`, `test_r2_rejects_br_to_outside_block` → `{"R2-branch"}` and `test_r2_accepts_br_to_inside_block` already landed in r3 (`8456129`). They build the `BR TO` word by hand until the DSL gains `"to"`. The model's guard (`test_br_to_is_not_run_as_nz`) gets replaced by the real `BR TO` here.
+  - **Before Step 3:** decision D2 (`T2-window` at an anchor). If it adds slack, add a T2 test at `A = 0`.
 - [ ] **Step 2: Run** `python -m pytest tests/test_engine_timed.py tests/test_analysis.py -q` → FAIL (NotImplementedError for COND/HOLD/XFER; unknown branch condition `to`).
 - [ ] **Step 3: Implement.** **Step 4: Run** the full suite → PASS.
 - [ ] **Step 5: Commit** `feat(model): COND, HOLD, unclocked XFER and branch on timeout`.
@@ -480,6 +536,9 @@ Design: `docs/design/bus-fuzzer.md`. The model's `FuzzUnit` is the golden model 
 - Attributes: `armed: bool`, `fingerprint: int`, `findings: list[Finding(kind: "new"|"hang", slot, iteration, data: bytes)]`, `stats: dict` (iterations, saves, evictions, bitmap fill).
 - `lfsr_step(s) -> int`: 16-bit Galois, right shift, poly `0xB400`.
 - Fingerprint: CRC-16/CCITT-FALSE over the token bytes since `next()`.
+- `slots` stays 32 by default. The chip's value follows D1 (28 under A, 12 under C), and Task 22 runs at it too.
+- Masked point ops pick their position in bounded time (bus-fuzzer.md §3.1). Eviction takes the lowest energy, which in RTL means a comparator tree or a kept minimum, not a scan.
+- **Before Step 1:** decide how a hang finding keeps its input (bus-fuzzer.md §5, open item).
 
 - [ ] **Step 1: Tests**:
   - `test_lfsr_known_states_and_period`: from 1, the next three states are `0xB400, 0x5A00, 0x2D00`, and the period is 65535.
@@ -507,6 +566,7 @@ Design: `docs/design/bus-fuzzer.md`. The model's `FuzzUnit` is the golden model 
   - `test_auto_tokens_fold_followed_values_and_buckets`: a known reply gives a known fingerprint, computed with `FuzzUnit.tok` by hand in the test.
   - `test_abort_while_armed_records_hang`.
   - `test_r3_rejects_fz_outside_block`.
+  - `test_r3_rejects_fz_in_two_party_block` (`only("a", "b")`) and `test_r3_rejects_fz_in_blocks_of_different_parties`: one unit, one owner (isa-v0 §5, r3).
   - `test_t5_counts_fz_cycles`: `fz.next` in the follower's block before a COND with nom = 40 → `T5-watch`.
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5: Commit** `feat(model): FZ instructions and fuzz-sourced transfers`.
@@ -543,7 +603,7 @@ Devices are ordinary descriptions run in the `P1` role. Their logic branches on 
 - [ ] **Step 1: Tests**:
   - `test_bus_fuzz_deterministic_per_seed`.
   - `test_fingerprint_stable_under_in_tolerance_jitter`: the same 50 inputs to `spi_hidden_reg`, with phases 0–7 and clock ratios inside `tolerance_ppm`, give the same fingerprints as with no jitter.
-  - `test_learning_beats_baseline_on_unlock` (slow): 5 seeds × 3000 iterations. With feedback the unlock is found in every seed; the baseline finds it in at most 1.
+  - `test_learning_beats_baseline_on_unlock` (slow): 5 seeds × 3000 iterations. With feedback the unlock is found in every seed; the baseline finds it in at most 1. Run it at the chip's slot count from D1 as well as at 32 (r3).
   - `test_magic16_control_no_advantage` (slow): neither finds it within budget. This shows that learning needs partial feedback.
   - `test_spi_hang_found_as_hang` (slow).
   - `test_target_role_fuzzing_finds_host_parser_bug` (slow).
