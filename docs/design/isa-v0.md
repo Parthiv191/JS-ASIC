@@ -31,6 +31,10 @@ Task 7 follow-ups (2026-11-04, from the second audit), no encoding change:
   outside role blocks (`R3-escape`), and every register counts as role-dependent there (R2).
 - A bounded COND without `ABORT` must be followed by an unbounded COND (`T5-timeout`).
 
+Correction (2026-11-04): §1 said the CHASE test shows the fetch-ahead path meets timing. It
+covers only the memory part of that path; §1 now gives the measured slack and what is left to
+check.
+
 Implementation status (toolchain, 2026-11-04). The encodings of every r2 feature exist in
 `emu.isa`; the DSL, compiler and model reach them in these tasks of the plan:
 
@@ -68,9 +72,24 @@ That next pc is always known by then:
 - A stalled instruction holds its address, and the macro holds its output.
 
 The issue slot of §4 already keeps the next instruction from starting in the cycle its
-predecessor completed. So every cost in §4 holds unchanged. The CHASE test in `test/test.py`
-drives the macro's address from its own output every cycle, which is this path, and it meets
-timing at 20 ns.
+predecessor completed. So every cost in §4 holds unchanged.
+
+Whether the whole fetch-ahead path fits in one 20 ns cycle is **not yet shown**. The CHASE
+test in `test/test.py` feeds the macro's output back to its address through one multiplexer
+every cycle, which is only the memory part of the path. At the slow corner (1.08 V, 125 °C;
+post-route STA of CI run 41584775180):
+
+| CHASE path, times from the clock edge | ns |
+|---|---|
+| Macro output valid (5.41 of it inside the macro) | 6.08 |
+| Address arrives at the second macro, after the multiplexer and routing | 7.47 |
+| Address required by: next edge at 20, plus clock skew 0.47, minus setup 0.04 | 20.44 |
+| **Slack** | **12.97** |
+
+The engine's next-pc logic replaces that multiplexer: decode, the branch condition and the
+pc multiplexer must fit in about 13 ns. Phase 5 synthesizes it early to check. If it does
+not fit, the fallback is an instruction register with a one-cycle bubble on taken branches,
+which changes the §4 costs and the timing rules.
 
 ## 2. Roles, owners, lines
 
