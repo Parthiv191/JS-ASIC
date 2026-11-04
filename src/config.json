@@ -74,10 +74,14 @@
   "//": "bridges on the macro's own stripes and makes full-height VPWR/VGND pins.",
   "FP_PDN_CFG": "dir::pdn_cfg.tcl",
 
-  "//": "Magic has no CMOS5L DRC support and reports ~29k violations inside the unmodified",
-  "//": "foundry macro GDS (2AMLogic run 36833125820). The Tiny Tapeout precheck and LVS still",
-  "//": "gate the design; Magic's count is still reported.",
+  "//": "Magic DRC is informational here; sign-off is the precheck's KLayout deck (the PDK's",
+  "//": "magic README: magic for interactive work, klayout for final sign-off). Read without",
+  "//": "flattening, the SRAM GDS gives ~29k Magic errors per macro, all inside the macro (run",
+  "//": "41910413971). The PDK's libs.tech/magic/read_sram_gds.tcl flattens these cells because",
+  "//": "they are ambiguous to magic; MAGIC_GDS_FLATGLOB applies the same list. It only affects",
+  "//": "the Magic.DRC step, not the GDS that is streamed out.",
   "ERROR_ON_MAGIC_DRC": 0,
+  "MAGIC_GDS_FLATGLOB": ["lvsres_*", "*_CELL_SUB", "VIA_M1_*", "VIA_M2_*", "RSC_*", "*_CELL_CORNER", "*_BITKIT_CORNER"],
 
   "//": "Slew and load into the macros. Hold fixing (after CTS) puts weak delay cells on the",
   "//": "address and data nets, and one driver feeds the same pin on both macros. Run cc3339f",
