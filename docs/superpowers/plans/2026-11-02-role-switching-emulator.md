@@ -33,6 +33,7 @@
   - R3-fz now requires a single-party block.
   - New section: Open decisions D1–D3.
 - **r3, 2026-11-04:** D2 decided (the rule stays). Task 7 done, plus follow-ups from the second audit; see its notes.
+- **r3, 2026-11-04:** the UART half of Task 10 is pulled ahead of Task 8 and done; see its notes. The SPI half still waits for Task 8.
 
 ## Global Constraints
 
@@ -379,6 +380,22 @@ Helper used by tests (and by Task 11): `run_roles(desc, perm, payload, clocks=No
   - `test_description_size`: prints instruction counts for the G0 note; asserts UART ≤ 8 words and every registered protocol ≤ `PROG_DEPTH`.
 - [ ] **Step 2–4:** FAIL → implement → PASS. A failure here usually means an isa-v0 rule is wrong. Fix the spec and the model together, and note the change in the commit.
 - [ ] **Step 5: Commit** `feat(protocols): UART and full-duplex SPI in every role`.
+
+**UART half done (2026-11-04)**, pulled ahead of Task 8. `emu/protocols/{__init__,uart}.py` and the UART tests in `tests/test_protocols.py`. Notes:
+- No isa-v0 rule changed. The description ran clean on the first try in all six role assignments, at ±2% drift with sub-cycle phase offsets, at the shortest bit T1 accepts at 2% (10 cycles), back to back (start edges exactly 10 bit times apart, payloads 0x00, 0xFF, 0x55, 0xAA and random), and through a framing error.
+- Two interface changes from the spec above:
+  - `payload(rng, n, **params)` takes the build parameters, since the word width depends on `data_bits`.
+  - `run_roles` also takes `glitches`.
+- Tests beyond Step 1:
+  - A low stop bit logs LEVEL and ABORT on both followers, which pick up the next start bit with no data lost.
+  - Every point of `space` compiles, so the fuzzer can draw from it.
+  - `get` names the known protocols on a miss.
+- Mutation checks:
+  - A window with no slack fails all eight drift cases and none of the no-drift ones.
+  - Taking `ABORT` off the stop bit fails only the framing test.
+  - A slack of 1 instead of 2 still passes at 16 cycles per bit: the window grows by a cycle per bit (6%), which already covers 2%.
+- `tests/descs.py` now builds its UART from the library, and takes `slack` from there.
+- **Gate G0, UART half.** One 7-word image serves tx, rx and the monitor: `ROLE_IF`, then a tx-only `POP`, then `COND fall`, `HOLD 0`, `XFER 8`, `HOLD 1` and `BR`. Hand-written per-role programs with the same instructions would be 5 words for tx (`POP`, `HOLD 0`, `XFER`, `HOLD 1`, `BR`) and 5 for rx (`COND` in place of `POP`), with the monitor reusing rx. That is 10 words in two images, against 7 words in one. The I2C half stays a Phase 4 entry criterion.
 
 **Phase 1 exit:** `python -m pytest -q` is green.
 

@@ -18,8 +18,9 @@ Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
   precheck and gate-level tests. The protocol engine replaces both later.
 - **Toolchain:** the ISA encoding, the description compiler with its
   well-formedness and timing rules, and the reference model with its timed
-  operations (`COND`, `HOLD`, unclocked `XFER`) are done. Clocked and duplex
-  lanes come next (plan Task 8).
+  operations (`COND`, `HOLD`, unclocked `XFER`) are done. A UART runs in every
+  role assignment from one 7-word description (`toolchain/emu/protocols`).
+  Clocked and duplex lanes come next (plan Task 8).
 - **Open decisions:** how the SRAM macros are split between engines and the
   fuzzer (the die takes at most 4, and the fourth slot is untested), and the
   phase order. They are listed in the plan's "Open decisions" section.

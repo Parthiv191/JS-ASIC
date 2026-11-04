@@ -1,29 +1,11 @@
-"""Shared UART/SPI-shaped descriptions for tests (the protocol library lands in emu.protocols)."""
-import math
-
+"""Shared descriptions for tests. UART is the library one; SPI moves to emu.protocols in Task 10."""
 from emu.desc import Description
 from emu.isa import INF
-
-
-def slack(nom, ppm):
-    return math.ceil(2 * ppm * nom / 1e6) + 1
+from emu.protocols import slack, uart  # noqa: F401  (slack is re-exported for tests)
 
 
 def uart_like(P, ppm=20000):
-    d = Description("u", parties=("tx", "rx"), tolerance_ppm=ppm)
-    line = d.line("line", owner="tx", idle=1)
-    s = slack(P, ppm)
-    bit = d.profile("BIT", nom=P, min=P - s, max=P + s)
-    d.abort_to("frame")
-    d.label("frame")
-    with d.only("tx"):
-        d.pop("r0")
-    d.cond("fall", line, owner="tx")
-    d.hold(line, 0, owner="tx", prof=bit, abort=True)
-    d.xfer(8, line, owner="tx", prof=bit, src="r0", dst="fifo", check=True)
-    d.hold(line, 1, owner="tx", prof=bit, abort=True)
-    d.br("frame")
-    return d
+    return uart.build(bit_cycles=P, tolerance_ppm=ppm)
 
 
 def spi_like(H, ppm=20000):

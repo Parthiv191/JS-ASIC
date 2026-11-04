@@ -31,6 +31,11 @@ Task 7 follow-ups (2026-11-04, from the second audit), no encoding change:
   outside role blocks (`R3-escape`), and every register counts as role-dependent there (R2).
 - A bounded COND without `ABORT` must be followed by an unbounded COND (`T5-timeout`).
 
+Task 10, UART half (2026-11-04), no change: one UART description (`emu.protocols.uart`)
+runs as specified in all six role assignments. It also runs clean at ±2% drift, at the
+shortest bit T1 accepts (10 cycles), back to back, and through a framing error that aborts
+and re-syncs.
+
 Correction (2026-11-04): §1 said the CHASE test shows the fetch-ahead path meets timing. It
 covers only the memory part of that path; §1 now gives the measured slack and what is left to
 check.
