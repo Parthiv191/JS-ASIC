@@ -15,12 +15,19 @@ r3 notes (2026-11-03), no encoding change:
 - R3-fz requires a block for a single party (§5).
 - An open item on `T2-window` at an anchor (§6).
 
-Implementation status (toolchain, 2026-11-03). The encodings of every r2 feature exist in
+Task 7 notes (2026-11-04), no encoding change:
+- Decision D2: `T2-window` at an anchor stays as written (§6).
+- `T2-window` for a COND checks the lower bound only when `min > 0`, matching EARLY (§4.1, §6).
+- Spelled out in §4: the synchronizer's reset state, where the window re-anchors after a
+  timeout or an abort, and that RESYNC moves only the sampling anchor.
+- T1 measured against the model (§6).
+
+Implementation status (toolchain, 2026-11-04). The encodings of every r2 feature exist in
 `emu.isa`; the DSL, compiler and model reach them in these tasks of the plan:
 
 | Feature | Lands in |
 |---|---|
-| `COND`, `HOLD`, unclocked `XFER`, `BR TO`. The R2-branch rule for `BR TO` is already in, and the model raises on `BR TO` until Task 7. | Task 7 |
+| `COND`, `HOLD`, unclocked `XFER`, `BR TO` | Done (Task 7) |
 | Clocked and duplex lanes (`data2`) | Task 8 |
 | `CRC`, `MARK` with `IRQ` | Task 9 |
 | `FZ`, `src = FZ` | Task 20 |
@@ -101,12 +108,12 @@ Reserved opcodes: `CHOICE = 16`, `ARB = 17`, `WAIT_ANY = 18`, `CODEC = 19`. Code
 
 - `now` counts engine cycles from reset; it advances only on cycles where the engine's clock enable is high.
 - Untimed instructions (`NOP LI ALU BR ROLE_IF PUSH POP MARK RAW HALT CRC`) take exactly one cycle. `POP` with an empty FIFO stalls until a word arrives, then takes its cycle. `RAW DELAY n` takes `n` cycles (`n ≥ 1`). `ROLE_IF` takes one cycle and, if the role is not in the mask, skips the next `count` instructions, which then take no time. `FZ` costs are fixed per sub-op (§4.6).
-- The engine samples its synchronized inputs every cycle, whatever it is executing. `edge(L)` means the synchronized value of `L` differs from the previous cycle's. Edges that happen while an untimed instruction is running are not latched.
+- The engine samples its synchronized inputs every cycle, whatever it is executing. `edge(L)` means the synchronized value of `L` differs from the previous cycle's. Edges that happen while an untimed instruction is running are not latched. At reset the synchronizer holds the bus's reset state, each line at its idle level, so an engine whose clock is a fraction of a cycle behind still sees an edge made in the owner's first cycle. The RTL's input flops reset to the line's idle level.
 - **Timeline register `tb`.** Timed steps (`COND HOLD XFER`) are scheduled against `tb`, not against instruction count, so untimed instructions between steps do not move wire timing. An owner acts at the planned time. A follower keeps `tb` as its estimate of the owner's timeline and re-anchors it whenever it observes an owner event: `tb := detect_cycle − EDGE_LAT`.
 - **Issue slot and overrun.** An instruction cannot start in the cycle its predecessor completed, so a timed step may begin one cycle after its planned start (`tb`) and an action planned *at the step's start* (offset 0) then happens in that cycle. The timeline does not move: later actions stay at their planned times and `tb` advances from the planned start. Any other action that happens after its planned cycle logs `OVERRUN(now − planned)` and is performed immediately. `IDLE` steps never overrun. A follower that reaches a planned sample point late also logs `OVERRUN`.
-- **Window accumulation.** Each follower keeps an anchor (cycle of the last re-anchoring event) and the accumulated `(min, nom, max)` of every HOLD/XFER bit since then. An edge check compares `e − anchor` against the accumulated `[min − QUANT, max + QUANT]`.
+- **Window accumulation.** Each follower keeps an anchor (cycle of the last re-anchoring event) and the accumulated `(min, nom, max)` of every HOLD/XFER bit since then. An edge check compares `e − anchor` against the accumulated `[min − QUANT, max + QUANT]`. A COND that times out without ABORT re-anchors at its new `tb`, and an abort re-anchors at `now`. RESYNC (§4.3) moves only the sampling anchor, never this one.
 - **Timeout flag `to`.** Every timed step clears `to` when it starts and sets it if it logs `TIMEOUT` and has no ABORT. `BR TO` jumps iff `to` is set. An owner never times out, so `to` differs between roles and `BR TO` is legal only inside a role block (R2-branch).
-- **Abort.** A fatal follow failure on a step with `ABORT` logs `ABORT(pc)`, releases OD lines, sets `tb := now`, and jumps to the image's `abort_pc`.
+- **Abort.** A fatal follow failure on a step with `ABORT` logs `ABORT(pc)`, releases OD lines, sets `tb := now` (re-anchoring the window there), and jumps to the image's `abort_pc`.
 
 ### 4.1 `COND kind, line, owner, prof`
 
@@ -174,17 +181,21 @@ The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics,
 | Rule | Check |
 |---|---|
 | `T1-sample` | For every follower sample of slot `k` (HOLD: `k = 0`, `P = nom`; unclocked XFER: last bit): `ceil(d·(A + (k+1)·P)) + QUANT + 1 < P // 2`. |
-| `T2-window` | For a bounded COND, and for the accumulated edge windows of `CHK` steps: `min ≤ nom − ceil(d·(A + nom)) − QUANT` and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. |
+| `T2-window` | For a bounded COND, and for the accumulated edge windows of `CHK` steps: `min ≤ nom − ceil(d·(A + nom)) − QUANT` and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. For a COND the lower bound applies only when `min > 0`, since the engine checks EARLY only then (§4.1). |
 | `T3-latency` | Clocked XFER, clock followers: `H − ceil(d·H) ≥ 2`. If a data line's owner is not the clock owner (including a duplex `data2`): `H ≥ EDGE_LAT + 1 + ceil(d·2H)`. For bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`, where `L` is the cycle (relative to the step's `tb`) at which that data owner starts the step: its previous-step completion offset + 1 + the untimed cycles it runs in between. |
 | `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. |
 | `T5-watch` | A follower must already be executing a step when its first observation happens: the owner's event for COND (`start_f + ceil(d·(A+nom)) ≤ event + EDGE_LAT`), the first edge of a clocked XFER (`≤ H + EDGE_LAT`), or the first sample of HOLD / unclocked XFER (`≤ nom//2 + EDGE_LAT`). `start_r` is computed per role as the previous timed step's completion offset for that role + 1 + that role's untimed cycles in between (max over paths; an untimed loop makes it unbounded). |
 | `T5-overrun` | The owner of a bounded step must start in time: `start_o ≤ max(planned_offset, 1)`, where the planned offset is `nom` for COND and 0 for HOLD and XFER. |
 
-**Open item (plan decision D2, needed for Task 7).** Take a `CHK` unclocked `XFER` that starts right at an anchor (`A = 0`). Its boundary-0 window is `[0, 0]`, and `T2-window` asks it to contain `0 ± QUANT`. Since `0 > −1`, the step is rejected. This follows the rule as written; it is not an analyzer bug. Two ways to change it:
-- Give the window at an anchor `±QUANT` slack in T2. The engine's check already widens every window by `QUANT` (§4).
-- Skip boundary 0 when `A = 0`.
-
-Until D2 is decided, such a step does not compile.
+**D2: a `CHK` unclocked `XFER` at an anchor (decided 2026-11-04: the rule stays).** When the
+step starts right at an anchor (`A = 0`), its boundary-0 window is `[0, 0]`, which cannot contain
+`0 ± QUANT`, so the step is rejected. The rejection is what keeps the engine from false alarms.
+Right after an anchor the owner drives bit 0 in the issue slot, a cycle late, and a follower can
+measure that edge 2 cycles out, past the engine's `0 ± QUANT` window. Slack in T2 alone, or
+skipping boundary 0 in the compiler alone, would accept steps that raise those alarms. A
+description drops `check` on that step or puts a timed step first, such as the start-bit `HOLD`
+UART uses; the compiler's message says so. If a protocol ever needs the shape, skip boundary 0
+in the engine and the compiler together.
 
 Untimed cycles count each instruction's cost from §4: one per untimed instruction, `n` for `RAW DELAY n`, and the fixed `FZ` costs.
 
@@ -192,9 +203,19 @@ Completion offsets, relative to the step's end `tb` (used by T3/T5): COND do 0, 
 
 The rules are conservative static bounds. **The fuzz loop is the arbiter:** any accepted program that the model runs, in tolerance, into a false alarm, a data mismatch or a hang is a compiler-rule bug or a model bug. Either way it becomes a regression case.
 
+**T1 against the model (Task 7).** A sweep over sub-cycle phases and ±2% clock rates found no
+failure in any frame T1 accepts. It also found few in the frames T1 rejects: at 0 ppm the model
+samples an 8-bit frame cleanly down to `P = 2` (T1 accepts `P ≥ 6`), and at 2% the only failure
+was `P = 2`, which T5-watch rejects too (T1 accepts `P ≥ 10`). So the rule is sound and
+conservative by about `QUANT + 1` cycles. Odd periods lose a cycle to `P // 2`: at 2% the same
+frame passes at `P = 10` and fails at `P = 11`. v0 keeps the rule, since the shortest accepted
+slot is far below real protocol rates (UART at 115200 baud is 434 cycles at 50 MHz). The sweep
+covered 8 phases, 2 clock ratios and up to 8 values, so it is evidence, not a proof;
+`test_engine_timed.py` pins the accepted boundaries.
+
 ## 7. Model-only observability
 
-The reference model also emits, per engine: a `StepRecord(pc, op, mode, value, tick)` for every completed timed step, every violation/MARK/IRQ/ABORT event, every follower sample point (used for margin coverage), and every conditional branch outcome. Phase 5 decides which of these the RTL event log exposes. The co-simulation compares at step boundaries.
+The reference model also emits, per engine: a `StepRecord(pc, op, mode, value, cycle, tb)` for every completed timed step, every violation/MARK/IRQ/ABORT event, every follower sample point (used for margin coverage), and every conditional branch outcome. Phase 5 decides which of these the RTL event log exposes. The co-simulation compares at step boundaries.
 
 ## 8. Mapping from the team ISA draft
 

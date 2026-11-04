@@ -113,3 +113,12 @@ def test_rejects_unknown_lane_ref():
     p = d.profile("P", nom=8)
     with pytest.raises(ValueError, match="unknown lane"):
         d.xfer(8, LaneRef("nope", 5), owner="a", prof=p)
+
+
+def test_br_to_takes_no_register():
+    d = Description("t", parties=("a", "b"))
+    d.label("x")
+    d.br("x", cond="to")
+    assert d.steps[-1].args == {"target": "x", "cond": "to", "reg": None}
+    with pytest.raises(ValueError, match="reg"):
+        d.br("x", cond="to", reg="r0")

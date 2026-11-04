@@ -12,10 +12,12 @@ from typing import Iterator
 
 from ..image import Image
 from ..isa import (
-    F_REG, REG_MASK, SYNC_LAT, AluOp, BrCond, Instr, Op, Owner, RawOp, Role, unpack_role_if,
+    EDGE_LAT, F_ABORT, F_CHK, F_REG, F_RESYNC, INF, QUANT, REG_MASK, SYNC_LAT, AluOp, BrCond,
+    CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, reg_of, unpack_role_if, unpack_xfer,
 )
 
 VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE"})
+BIG = 1 << 40  # upper edge of an accumulated window that contains an unbounded step
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,8 @@ class StepRecord:
     op: str
     mode: str          # "do" | "follow"
     value: int | None
-    cycle: int
+    cycle: int         # completion cycle
+    tb: int            # timeline register after the step
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,9 @@ class Engine:
         self.pc = 0
         self.regs = [0, 0, 0, 0]
         self.tb = 0
+        self.to = False            # timeout flag (isa-v0 §4)
+        self.anchor = 0            # cycle of the last re-anchoring event (COND, clocked XFER, abort)
+        self.acc = (0, 0, 0)       # accumulated (nom, min, max) of HOLD/XFER bits since the anchor
         self.now = -1
         self.drv: list[int | None] = [
             ln.idle if ln.kind == "pp" and self.role != Role.MON and int(ln.owner) == int(self.role) else None
@@ -88,6 +94,14 @@ class Engine:
         self._proc = self._run()
 
     # ------------------------------------------------------------------ clocking
+    def preload(self, wire: list[int]) -> None:
+        """Start the synchronizer from the bus's reset state, as the RTL's input flops reset to
+        the idle level. An edge made before this engine's first cycle (a sub-cycle phase
+        offset) is then still seen."""
+        w = list(wire[: len(self.lines)])
+        self._pipe = [w] * SYNC_LAT
+        self.inp = w
+
     def cycle(self, wire: list[int]) -> None:
         """Advance one engine cycle with the current (unsynchronized) wire values."""
         if self.halted:
@@ -122,6 +136,36 @@ class Engine:
     def wait_until(self, t: int) -> Gen:
         while self.now < t:
             yield
+
+    def _record(self, ins: Instr, mode: str, value: int | None = None) -> None:
+        self.records.append(StepRecord(self.pc, ins.op.name, mode, value, self.now, self.tb))
+
+    def _reanchor(self, at: int) -> None:
+        self.anchor = at
+        self.acc = (0, 0, 0)
+
+    def _accumulate(self, prof, n: int) -> None:
+        nom, lo, hi = self.acc
+        self.acc = (nom + n * prof.nom, lo + n * prof.min,
+                    min(BIG, hi + (BIG if prof.max == INF else n * prof.max)))
+
+    def _late(self, planned: int, slot0: bool) -> None:
+        """OVERRUN for an owner action after its planned cycle. The issue slot lets an action
+        planned at a step's start (offset 0) happen one cycle late."""
+        late = self.now - planned
+        if late > (1 if slot0 else 0):
+            self.log("OVERRUN", measured=late)
+
+    def _abort(self) -> None:
+        """Fatal follow failure on a step with ABORT: log, release OD lines, restart the
+        timeline at `now`, jump to the abort vector. The step still ends in this cycle."""
+        self.log("ABORT", measured=self.pc)
+        for i, ln in enumerate(self.lines):
+            if ln.kind == "od":
+                self.drv[i] = None
+        self.tb = self.now
+        self._reanchor(self.now)
+        self.pc = self.image.abort_pc
 
     # ------------------------------------------------------------------ interpreter
     def _run(self) -> Gen:
@@ -169,13 +213,14 @@ class Engine:
 
     def _op_br(self, ins: Instr) -> Gen:
         cond = BrCond(ins.prof & 3)
-        if cond == BrCond.TO:
-            raise NotImplementedError(f"BR TO needs the timeout flag from Task 7 (pc {self.pc})")
         if cond == BrCond.ALWAYS:
             taken = True
         else:
-            zero = self.regs[ins.pin & 3] == 0
-            taken = zero if cond == BrCond.Z else not zero
+            if cond == BrCond.TO:
+                taken = self.to
+            else:
+                zero = self.regs[ins.pin & 3] == 0
+                taken = zero if cond == BrCond.Z else not zero
             self.branches.append(Branch(self.pc, taken))
         self.pc = ins.operand if taken else self.pc + 1
         yield
@@ -221,4 +266,160 @@ class Engine:
                 yield
             return
         self.pc = nxt
+        yield
+
+    # ------------------------------------------------------------------ timed steps (isa-v0 §4.1-4.3)
+    def _op_cond(self, ins: Instr) -> Gen:
+        p = self.image.profiles[ins.prof]
+        kind = CondKind(ins.operand)
+        if kind not in (CondKind.FALL, CondKind.RISE):
+            raise NotImplementedError(f"COND {kind.name} lands in Phase 4 (pc {self.pc})")
+        level = 1 if kind == CondKind.RISE else 0
+        self.to = False
+        if self.does(ins):
+            planned = self.tb + p.nom
+            yield from self.wait_until(planned)
+            if p.bounded:
+                self._late(planned, slot0=p.nom == 0)
+            self.drive(ins.pin, level)
+            self.tb = self.now
+            self._reanchor(self.now)
+            self._record(ins, "do")
+            self.pc += 1
+            yield
+            return
+        while True:
+            if self.edge(ins.pin) and self.inp[ins.pin] == level:
+                e = self.now - EDGE_LAT
+                m = e - self.tb
+                if p.min > 0 and m < p.min - QUANT:
+                    self.log("EARLY", measured=m, lo=p.min, hi=p.max)
+                self.tb = e
+                self._reanchor(e)
+                break
+            if p.bounded and self.now - EDGE_LAT > self.tb + p.max + QUANT:
+                self.log("TIMEOUT", measured=self.now - EDGE_LAT - self.tb, lo=p.min, hi=p.max)
+                if ins.flags & F_ABORT:
+                    self._abort()
+                    yield
+                    return
+                self.to = True
+                self.tb += p.nom
+                self._reanchor(self.tb)
+                break
+            self.idle = not p.bounded  # waiting forever on the other party
+            yield
+        self._record(ins, "follow")
+        self.pc += 1
+        yield
+
+    def _op_hold(self, ins: Instr) -> Gen:
+        p = self.image.profiles[ins.prof]
+        level = ins.operand & 1
+        self.to = False
+        planned = self.tb
+        if self.does(ins):
+            yield from self.wait_until(planned)
+            if ins.prof != 0:  # IDLE steps never overrun
+                self._late(planned, slot0=True)
+            self.drive(ins.pin, level)
+            self.tb = planned + p.nom
+            self._accumulate(p, 1)
+            self._record(ins, "do", level)
+            self.pc += 1
+            yield
+            return
+        at = planned + p.nom // 2 + EDGE_LAT  # the midpoint of the owner's slot
+        if self.now > at:
+            self.log("OVERRUN", measured=self.now - at)
+        yield from self.wait_until(at)
+        v = self.inp[ins.pin]
+        self.samples.append(Sample(self.pc, ins.pin, self.now, p.nom))
+        if v != level:
+            self.log("LEVEL", measured=v)
+            if ins.flags & F_ABORT:
+                self._abort()
+                yield
+                return
+        self.tb = planned + p.nom
+        self._accumulate(p, 1)
+        self._record(ins, "follow", v)
+        self.pc += 1
+        yield
+
+    def _op_xfer(self, ins: Instr) -> Gen:
+        p = self.image.profiles[ins.prof]
+        lane = self.image.lanes[ins.pin]
+        if lane.clk is not None:
+            raise NotImplementedError(f"clocked XFER lands in Task 8 (pc {self.pc})")
+        n, src, dst, msb = unpack_xfer(ins.operand)
+        if src == Src.FZ:
+            raise NotImplementedError(f"XFER src=FZ lands in Task 20 (pc {self.pc})")
+        self.to = False
+        line, P, mask = lane.data, p.nom, (1 << n) - 1
+
+        def pos(k: int) -> int:  # value bit carried by wire slot k
+            return n - 1 - k if msb else k
+
+        if self.does(ins):
+            if src == Src.FIFO:
+                while not self.tx:
+                    self.idle = True
+                    yield
+                v = self.tx.popleft()
+            elif src == Src.ZERO:
+                v = 0
+            elif src == Src.ONES:
+                v = mask
+            else:
+                v = self.regs[reg_of(src)]
+            v &= mask
+            base = self.tb
+            for k in range(n):
+                planned = base + k * P
+                yield from self.wait_until(planned)
+                self._late(planned, slot0=k == 0)
+                self.drive(line, v >> pos(k) & 1)
+                if k < n - 1:
+                    yield
+            self.tb = base + n * P
+            mode = "do"
+        else:
+            _, acc_lo, acc_hi = self.acc
+            a, ak, v, k = self.tb, 0, 0, 0
+            fresh = True  # this cycle's edge has not been looked at yet
+            while True:
+                if fresh and self.edge(line):
+                    # an edge seen before sample k sits at boundary k
+                    e = self.now - EDGE_LAT
+                    m = e - self.anchor
+                    lo = acc_lo + k * p.min - QUANT
+                    hi = min(BIG, acc_hi + (BIG if p.max == INF else k * p.max)) + QUANT
+                    inside = lo <= m <= hi
+                    if ins.flags & F_CHK and not inside:
+                        self.log("EDGE", measured=m, lo=lo, hi=hi)
+                    if ins.flags & F_RESYNC and inside:
+                        a, ak = e, k
+                fresh = False
+                at = a + (k - ak) * P + P // 2 + EDGE_LAT
+                if self.now >= at:
+                    if self.now > at:
+                        self.log("OVERRUN", measured=self.now - at)
+                    self.samples.append(Sample(self.pc, line, self.now, P))
+                    v |= self.inp[line] << pos(k)
+                    k += 1
+                    if k == n:
+                        break
+                    continue
+                yield
+                fresh = True
+            self.tb = a + (n - ak) * P
+            mode = "follow"
+            if dst == Dst.FIFO:
+                self.rx.append(v)
+        if dst >= Dst.R0:
+            self.regs[reg_of(dst)] = v & REG_MASK
+        self._accumulate(p, n)
+        self._record(ins, mode, v)
+        self.pc += 1
         yield

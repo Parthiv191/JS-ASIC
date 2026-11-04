@@ -286,8 +286,11 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                     m = drift(ppm, nominal) + Q
                     wlo, whi = lo + j * p.min, min(BIG, hi + (BIG if p.max == INF else j * p.max))
                     if wlo > nominal - m or whi < nominal + m:
+                        hint = ("; a CHK XFER that starts right at an anchor has no window for its first "
+                                "edge (isa-v0 §6, D2): drop check on this step, or put a timed step such "
+                                "as a start-bit HOLD first") if a == 0 and j == 0 else ""
                         diags.add("T2-window", pc, f"edge window [{wlo},{whi}] at boundary {j} does not "
-                                                   f"contain {nominal}±{m}")
+                                                   f"contain {nominal}±{m}{hint}")
                         break
         # T2 for clocked CHK (clock phase) and T3
         if s.clocked:
@@ -343,7 +346,8 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
         if p.bounded or p.min > 0:
             late = max(p.nom, o_hi)
             m_lo, m_hi = event - dr - Q, late + dr + Q
-            if p.min > m_lo or (p.bounded and p.max < m_hi):
+            # the engine checks EARLY only when min > 0 (isa-v0 §4.1)
+            if (p.min > 0 and p.min > m_lo) or (p.bounded and p.max < m_hi):
                 diags.add("T2-window", pc, f"window [{p.min},{p.max}] does not contain [{m_lo},{m_hi}]")
         return
     # HOLD / XFER: the owner's first action is at offset 0 (issue slot allows 1)

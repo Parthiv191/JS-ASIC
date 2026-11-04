@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..image import Image, LineCfg
-from ..isa import Role
+from ..isa import SYNC_LAT, Role
 from .bus import resolve
 from .engine import Branch, Engine, Event, Sample, StepRecord
 
@@ -95,6 +95,11 @@ class System:
         started = [False] * len(self.engines)
         quiescent = False
         last_glitch = max((g.start + g.length for g in self.glitches), default=0)
+        # An idle follower may still have an edge crossing its synchronizer: only stop once
+        # every engine has had SYNC_LAT + 1 cycles since the last wire edge.
+        gap = max(-(-s.clock[1] // s.clock[0]) for s in self.specs)
+        settle = (SYNC_LAT + 1) * gap
+        last_edge = -settle - 1
         tick = 0
         while tick < max_ticks:
             if self._pushes:
@@ -108,10 +113,14 @@ class System:
                     wire[g.wire] = g.value
             for w in cont:
                 contention.append((tick, w))
+            if tick == 0:
+                for e in self.engines:
+                    e.preload(wire)
             if prev is not None:
                 for i in range(n):
                     if wire[i] != prev[i]:
                         edges[i].append(tick)
+                        last_edge = tick
             prev = wire
             for i, (e, s) in enumerate(zip(self.engines, self.specs)):
                 if enabled(s, tick):
@@ -120,7 +129,7 @@ class System:
                     started[i] = True
             tick += 1
             if (stop_when_quiescent and all(started) and not self._pushes and tick >= last_glitch
-                    and all(e.idle for e in self.engines)):
+                    and tick - last_edge > settle and all(e.idle for e in self.engines)):
                 quiescent = True
                 break
         return Trace(

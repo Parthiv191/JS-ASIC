@@ -1,0 +1,255 @@
+import random
+
+import pytest
+
+from emu.compiler import compile_desc
+from emu.desc import Description
+from emu.isa import EDGE_LAT, Role
+from emu.model.system import Glitch
+
+from simutil import kinds, run_sys
+
+P = 16
+
+
+def frame(n=8, msb=False, check=False, resync=False, dst="fifo", src="fifo", tail=None, ppm=20000):
+    """COND fall (IDLE) · HOLD 0 (start) · XFER n · HOLD 1 (stop) · [tail] · HALT."""
+    d = Description("f", parties=("a", "b"), tolerance_ppm=ppm)
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    d.abort_to("end")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit, abort=True)
+    d.xfer(n, ln, owner="a", prof=bit, src=src, dst=dst, msb_first=msb, check=check, resync=resync)
+    d.hold(ln, 1, owner="a", prof=bit, abort=True)
+    if tail:
+        tail(d)
+    d.label("end")
+    d.halt()
+    return d
+
+
+def test_follower_tb_matches_owner_tb_equal_clocks():
+    t = run_sys(compile_desc(frame()), tx={0: [0xA5]})
+    owner, foll, mon = (t.engines[i].records for i in range(3))
+    # COND, start-bit HOLD, XFER, stop-bit HOLD
+    assert [r.mode for r in owner] == ["do"] * 4 and [r.mode for r in foll] == ["follow"] * 4
+    assert [r.tb for r in owner] == [r.tb for r in foll] == [r.tb for r in mon]
+    cond_o, cond_f = owner[0], foll[0]
+    assert cond_f.cycle == cond_o.cycle + EDGE_LAT  # detection latency is compensated in tb
+    assert all(not et.events for et in t.engines)
+
+
+def window_desc():
+    d = Description("w", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    win = d.profile("W", nom=20, min=16, max=24)
+    d.abort_to("end")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.cond("rise", ln, owner="a", prof=win, abort=True)
+    d.mark(7)
+    d.label("end")
+    d.halt()
+    return compile_desc(d)
+
+
+def test_cond_window_early_and_timeout():
+    img = window_desc()
+    early = run_sys(img, images={0: img.with_profiles({"W": 0.5})})
+    assert "EARLY" in kinds(early, 1) and "EARLY" in kinds(early, 2)
+    assert "MARK" in kinds(early, 1)  # EARLY is logged, not fatal
+    late = run_sys(img, images={0: img.with_profiles({"W": 3.0})})
+    for i in (1, 2):
+        assert kinds(late, i)[:2] == ["TIMEOUT", "ABORT"]
+        assert "MARK" not in kinds(late, i)  # jumped to the abort vector past the MARK
+    assert kinds(late, 0) == ["MARK"]  # the owner itself is unaware
+
+
+def test_hold_level_mismatch_logs_level_and_aborts():
+    img = compile_desc(frame())
+    # stop bit (slot 9: ticks 145..160) sampled at mid-slot; force it low around the sample
+    t = run_sys(img, tx={0: [0x00]}, glitches=[Glitch(0, 146, 12, 0)])
+    for i in (1, 2):
+        assert "LEVEL" in kinds(t, i) and "ABORT" in kinds(t, i)
+
+
+@pytest.mark.parametrize("n", [1, 8, 16])
+@pytest.mark.parametrize("msb", [False, True])
+@pytest.mark.parametrize("pattern", ["zeros", "ones", "random"])
+def test_xfer_widths_and_order(n, msb, pattern):
+    """n = 16 runs at 1%: at 2% T1 rejects it (last sample at A + 16P = 272, ceil(0.02*272)
+    + QUANT + 1 = 8, not < P//2 = 8; test_analysis.test_t1_sixteen_bit_unclocked_frame).
+    At 1% the stop bit is the last sample: ceil(0.01*288) + 2 = 5 < 8."""
+    mask = (1 << n) - 1
+    v = {"zeros": 0, "ones": mask, "random": random.Random(n * 3 + msb).getrandbits(n)}[pattern]
+    t = run_sys(compile_desc(frame(n=n, msb=msb, ppm=10000 if n == 16 else 20000)), tx={0: [v]})
+    assert t.engines[1].rx == [v] and t.engines[2].rx == [v]
+    owner_xfer = [r for r in t.engines[0].records if r.op == "XFER"][0]
+    assert owner_xfer.value == v
+    assert all(not et.events for et in t.engines)
+
+
+def test_xfer_wire_order_msb_vs_lsb():
+    t_lsb = run_sys(compile_desc(frame(n=8, msb=False)), tx={0: [0x01]})
+    t_msb = run_sys(compile_desc(frame(n=8, msb=True)), tx={0: [0x01]})
+    # Slot s is on the wire at ticks 1 + sP .. sP + P: slot 0 is the start bit, slots 1-8
+    # the data, slot 9 the stop bit (as in test_hold_level_mismatch_logs_level_and_aborts).
+    # LSB-first 0x01 is high in slot 1, right after the start bit; MSB-first in slot 8.
+    assert t_lsb.wire_edges[0][:2] == [1, 1 + P]
+    assert t_msb.wire_edges[0][:2] == [1, 1 + 8 * P]
+
+
+def test_xfer_check_flags_stretched_bit():
+    img = compile_desc(frame(check=True))
+    t = run_sys(img, tx={0: [0x55]}, images={0: img.with_profiles({"BIT": 1.5})})
+    assert "EDGE" in kinds(t, 1) and "EDGE" in kinds(t, 2)
+
+
+def test_xfer_resync_recovers_drift():
+    """Follower clock 4% slow over 16 bits drifts ~10 cycles past an 8-cycle half bit."""
+    def run(resync):
+        img = compile_desc(frame(n=16, resync=resync), check_timing=False)
+        return run_sys(img, roles=(Role.P0, Role.P1), tx={0: [0x5555]}, clocks={1: (24, 25)})
+    assert run(True).engines[1].rx == [0x5555]
+    assert run(False).engines[1].rx != [0x5555]
+
+
+def test_xfer_fifo_stall_logs_overrun():
+    t = run_sys(compile_desc(frame()), roles=(Role.P0, Role.P1), tx={0: [0x3C]}, push_at=200)
+    assert "OVERRUN" in kinds(t, 0)
+
+
+def test_xfer_dst_fifo_only_in_follow_mode():
+    t = run_sys(compile_desc(frame()), tx={0: [0x42]})
+    assert t.engines[0].rx == [] and t.engines[1].rx == [0x42] and t.engines[2].rx == [0x42]
+
+
+def test_xfer_dst_reg_written_in_all_roles():
+    t = run_sys(compile_desc(frame(dst="r1", tail=lambda d: d.push("r1"))), tx={0: [0x99]})
+    assert [et.rx for et in t.engines] == [[0x99]] * 3
+
+
+# ---------------------------------------------------------------- r2: branch on timeout
+def late_desc(second_cond=False):
+    """COND fall · HOLD 0 · bounded COND rise (no ABORT) · [COND fall IDLE] · only(b, mon): BR TO.
+
+    MARK 1 when the rise came in time, MARK 2 when the follower timed out.
+    """
+    d = Description("to", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    win = d.profile("W", nom=20, min=16, max=24)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.cond("rise", ln, owner="a", prof=win)
+    if second_cond:
+        d.cond("fall", ln, owner="a")
+    with d.only("b", "mon"):
+        d.br("late", cond="to")
+        d.mark(1)
+        d.br("done")
+        d.label("late")
+        d.mark(2)
+    d.label("done")
+    d.halt()
+    return compile_desc(d)
+
+
+def marks(trace, i):
+    return [e.measured for e in trace.engines[i].events if e.kind == "MARK"]
+
+
+def test_br_to_taken_after_follow_timeout():
+    img = late_desc()
+    on_time = run_sys(img)
+    assert [marks(on_time, i) for i in range(3)] == [[], [1], [1]]
+    late = run_sys(img, images={0: img.with_profiles({"W": 3.0})})
+    assert [marks(late, i) for i in range(3)] == [[], [2], [2]]
+    for i in (1, 2):
+        assert kinds(late, i) == ["TIMEOUT", "MARK"]  # no ABORT: the step completes, `to` is set
+
+
+def test_to_flag_cleared_by_next_timed_step():
+    img = late_desc(second_cond=True)
+    t = run_sys(img, images={0: img.with_profiles({"W": 3.0})})
+    for i in (1, 2):
+        assert "TIMEOUT" in kinds(t, i)
+        assert marks(t, i) == [1]  # the COND fall after the timeout cleared `to`
+
+
+# ---------------------------------------------------------------- T1 against the model
+@pytest.mark.parametrize("phase", range(4))
+@pytest.mark.parametrize("value", [0xA5, 0x5A])
+def test_shortest_accepted_slot_runs_clean_at_every_phase(phase, value):
+    """At 0 ppm T1 accepts slots from P = 6 (test_analysis). Every engine runs at 1/4 of
+    the tick rate, so a follower offset by 1-3 ticks sees each edge a fraction of a cycle
+    later than the owner made it. Every such phase must still sample every bit."""
+    d = Description("p6", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=6)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit, abort=True)
+    d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
+    d.hold(ln, 1, owner="a", prof=bit, abort=True)
+    d.halt()
+    t = run_sys(compile_desc(d), tx={0: [value]}, clocks={i: (1, 4) for i in range(3)},
+                phases={1: phase, 2: phase})
+    assert t.engines[1].rx == [value] and t.engines[2].rx == [value]
+    assert all(not et.events for et in t.engines)
+
+
+def test_cond_with_min_zero_runs_clean():
+    """Model side of test_analysis.test_t2_accepts_cond_with_min_zero: no EARLY check
+    when min = 0, and the edge arrives well before max."""
+    d = Description("m0", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    soon = d.profile("SOON", nom=1, min=0, max=11)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.cond("rise", ln, owner="a", prof=soon, abort=True)
+    d.halt()
+    t = run_sys(compile_desc(d))
+    assert all(not et.events for et in t.engines)
+
+
+@pytest.mark.parametrize("phase", range(0, 8, 3))
+@pytest.mark.parametrize("ratios", [((50, 400), (49, 400)), ((49, 400), (50, 400))], ids=["slow", "fast"])
+def test_t1_boundary_at_2pct_runs_clean(ratios, phase):
+    """At 2% T1 accepts this frame from P = 10 (P = 9 fails: ceil(0.02*90) + 2 = 4, not < 4).
+    The follower runs 2% slower or faster than the owner, at sub-cycle phase offsets."""
+    d = Description("p10", parties=("a", "b"), tolerance_ppm=20000)
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=10)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit, abort=True)
+    d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
+    d.hold(ln, 1, owner="a", prof=bit, abort=True)
+    d.halt()
+    img = compile_desc(d)
+    owner, foll = ratios
+    for v in (0xA5, 0x5A, 0x01):
+        t = run_sys(img, roles=(Role.P0, Role.P1), tx={0: [v]}, clocks={0: owner, 1: foll},
+                    phases={1: phase})
+        assert t.engines[1].rx == [v] and not t.engines[1].violations
+
+
+def test_follower_samples_at_slot_midpoints():
+    """isa-v0 §4.2-4.3: a follower samples slot s at its tb + s*P + P//2 + EDGE_LAT. Equal clocks:
+    the COND anchors at 0, so the 10 slots (start, 8 data, stop) are sampled at 11 + 16s."""
+    t = run_sys(compile_desc(frame()), tx={0: [0xA5]})
+    for i in (1, 2):
+        assert [s.cycle for s in t.engines[i].samples] == [P // 2 + EDGE_LAT + s * P for s in range(10)]
+
+
+@pytest.mark.parametrize("scale", [14 / 16, 18 / 16], ids=["at-min", "at-max"])
+def test_xfer_check_accepts_edges_at_the_window_limits(scale):
+    """BIT is (14, 16, 18). An owner whose bits last exactly min or max puts boundary k at
+    14 + 14k or 18 + 18k from the anchor, inside the window [min - QUANT, max + QUANT].
+    RESYNC follows the edges, so the data is right too."""
+    img = compile_desc(frame(check=True, resync=True))
+    t = run_sys(img, tx={0: [0x55]}, images={0: img.with_profiles({"BIT": scale})})
+    for i in (1, 2):
+        assert t.engines[i].rx == [0x55] and not t.engines[i].violations

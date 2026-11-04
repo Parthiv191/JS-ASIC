@@ -10,18 +10,19 @@ the ones that make a device respond in new ways.
 
 Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
 
-## Status (2026-11-03)
+## Status (2026-11-04)
 
 - **On the chip today:** a bring-up design. It has a fixed UART transmitter and
   a trial harness for the program memory, a 256 × 32 SRAM built from two IHP
   `RM_IHPSG13_1P_256x16` macros. CI hardens it on the CMOS5L template and passes
   precheck and gate-level tests. The protocol engine replaces both later.
 - **Toolchain:** the ISA encoding, the description compiler with its
-  well-formedness and timing rules, and the untimed reference model are done.
-  Timed operations come next (plan Task 7).
+  well-formedness and timing rules, and the reference model with its timed
+  operations (`COND`, `HOLD`, unclocked `XFER`) are done. Clocked and duplex
+  lanes come next (plan Task 8).
 - **Open decisions:** how the SRAM macros are split between engines and the
-  fuzzer, plus two smaller ones. The die takes at most 4, and the fourth slot is
-  untested. They are listed in the plan's "Open decisions" section.
+  fuzzer (the die takes at most 4, and the fourth slot is untested), and the
+  phase order. They are listed in the plan's "Open decisions" section.
 
 ## Layout
 

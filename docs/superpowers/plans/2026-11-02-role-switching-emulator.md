@@ -32,6 +32,7 @@
   - The fuzzer design is mapped onto the macro and its cycle costs re-checked (bus-fuzzer.md §2.1, §3.1).
   - R3-fz now requires a single-party block.
   - New section: Open decisions D1–D3.
+- **r3, 2026-11-04:** D2 decided (the rule stays). Task 7 done; see its notes.
 
 ## Global Constraints
 
@@ -94,7 +95,7 @@ Two checks come before freezing D1:
 - **A and B both need all 4 macros, including the unproven slot at x = 91.2** (Global Constraints). A CI harden with a macro there settles it. If only 3 fit, C is the only option.
 - **Engine area.** Synthesize the engine (Phase 5) to see how much area flop memories really leave.
 
-**D2. `T2-window` at an anchor** (blocks Task 7). A `CHK` unclocked `XFER` that starts right at an anchor is rejected at boundary 0 (isa-v0 §6, open item). This is the rule working as written, not an analyzer bug (audit item MATH-03). The choice is between ±`QUANT` slack at an anchor, skipping boundary 0 when `A = 0`, or keeping the rule.
+**D2. `T2-window` at an anchor: decided 2026-11-04, the rule stays.** A `CHK` unclocked `XFER` that starts right at an anchor is rejected at boundary 0 (isa-v0 §6). The rejection prevents a false alarm: the owner drives bit 0 a cycle late (issue slot), and the follower can measure it 2 cycles out, past the engine's `0 ± QUANT`. Slack in T2 alone, or skipping boundary 0 in the compiler alone, would be unsafe. A description drops `check` on that step or puts a timed step first; the compiler's message says so.
 
 **D3. Phase order.** Keep the plan's order (Phase 2 before Phase 3), or go straight from Phase 1 to Phase 3 if on-chip fuzzing comes first. Phase 3 touches two Phase 2 files, so those would start as stubs: `emu/fuzz/randdesc.py` (Task 17) and the `emu/fuzz/__main__.py` CLI (Task 15). The cost is losing Phase 2's model bug-hunting before the fuzzer relies on the model.
 
@@ -281,7 +282,7 @@ These change code that Tasks 1 and 3 already committed. Run them once, before Ta
 
 **Interfaces — Produces:** `StepRecord(pc, op, mode, value, cycle, tb)`. `Engine.to: bool` (isa-v0 §4). The follower's window anchor resets only on COND (do or follow) and clocked XFER; HOLD and unclocked XFER accumulate whoever performs them, matching `analysis._advance`. An `XFER` with `src = FZ` raises `NotImplementedError` until Task 20.
 
-- [ ] **Step 1: Tests** (the r1 set, already in `test_engine_timed.py`):
+- [x] **Step 1: Tests** (the r1 set, already in `test_engine_timed.py`):
   - `test_follower_tb_matches_owner_tb_equal_clocks`. `test_cond_window_early_and_timeout`. `test_hold_level_mismatch_logs_level_and_aborts`.
   - `test_xfer_widths_and_order`, `test_xfer_wire_order_msb_vs_lsb`. `test_xfer_check_flags_stretched_bit`. `test_xfer_resync_recovers_drift`.
   - `test_xfer_fifo_stall_logs_overrun`. `test_xfer_dst_fifo_only_in_follow_mode`. `test_xfer_dst_reg_written_in_all_roles`.
@@ -290,10 +291,24 @@ These change code that Tasks 1 and 3 already committed. Run them once, before Ta
   - `test_br_to_taken_after_follow_timeout`: bounded COND without ABORT, owner image scaled ×3, then `only("b"): br("late", cond="to")` → `MARK` at `late` in engines 1 and 2, not in 0.
   - `test_to_flag_cleared_by_next_timed_step`.
   - In `test_analysis.py`, `test_r2_rejects_br_to_outside_block` → `{"R2-branch"}` and `test_r2_accepts_br_to_inside_block` already landed in r3 (`8456129`). They build the `BR TO` word by hand until the DSL gains `"to"`. The model's guard (`test_br_to_is_not_run_as_nz`) gets replaced by the real `BR TO` here.
-  - **Before Step 3:** decision D2 (`T2-window` at an anchor). If it adds slack, add a T2 test at `A = 0`.
-- [ ] **Step 2: Run** `python -m pytest tests/test_engine_timed.py tests/test_analysis.py -q` → FAIL (NotImplementedError for COND/HOLD/XFER; unknown branch condition `to`).
-- [ ] **Step 3: Implement.** **Step 4: Run** the full suite → PASS.
-- [ ] **Step 5: Commit** `feat(model): COND, HOLD, unclocked XFER and branch on timeout`.
+  - **Before Step 3:** decision D2 (`T2-window` at an anchor). Decided: the rule stays. `test_t2_rejects_chk_xfer_at_anchor` pins it and its message; two more tests pin the accepted workarounds.
+- [x] **Step 2: Run** `python -m pytest tests/test_engine_timed.py tests/test_analysis.py -q` → FAIL (NotImplementedError for COND/HOLD/XFER; unknown branch condition `to`).
+- [x] **Step 3: Implement.** **Step 4: Run** the full suite → PASS.
+- [x] **Step 5: Commit** `feat(model): COND, HOLD, unclocked XFER and branch on timeout`.
+
+**Done (2026-11-04).** Notes:
+- Two r1 tests were wrong against the spec and are fixed:
+  - `test_follower_tb_matches_owner_tb_equal_clocks` expected 3 records; the frame has 4 timed steps.
+  - `test_xfer_wire_order_msb_vs_lsb` was one slot off from the slot numbering in `test_hold_level_mismatch_logs_level_and_aborts`.
+- `n = 16` in `test_xfer_widths_and_order` runs at 1%, as the r2 note planned.
+- Also landed:
+  - The COND `min = 0` fix in T2 (audit item 6.2).
+  - The D2 message and tests.
+  - A sweep of T1 against the model (isa-v0 §6: sound, conservative by about `QUANT + 1`).
+  - Tests that pin the follower's sample points and the CHK window's limits; mutation checks showed both were unguarded.
+- Model changes outside the engine:
+  - `System` loads each engine's synchronizer with the tick-0 wire, so a sub-cycle phase offset no longer hides the owner's first edge.
+  - Quiescence waits `(SYNC_LAT + 1)` cycles after the last wire edge, because a follower waiting on an unbounded COND counts as idle.
 
 ### Task 8: Clocked XFER and duplex lanes
 

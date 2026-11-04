@@ -169,38 +169,22 @@ def test_t5_rejects_owner_overrun():
     assert diag_rules(d) == {"T5-overrun"}
 
 
-def _with_br_to(d):
-    """Lower `d` and turn its single BR into BR TO (the DSL has no name for TO until Task 7)."""
-    from dataclasses import replace
-
-    from emu.compiler import lower
-    from emu.isa import BrCond, Op
-    low = lower(d)
-    pc = next(i for i, ins in enumerate(low.instrs) if ins.op == Op.BR)
-    low.instrs[pc] = replace(low.instrs[pc], prof=int(BrCond.TO), pin=0)
-    return low
-
-
 def test_r2_rejects_br_to_outside_block():
-    """isa-v0 §5 R2: BR TO is only legal inside a role block, whatever r0 holds."""
-    from emu.analysis import check_branches
+    """isa-v0 §5 R2: BR TO is only legal inside a role block; `to` differs between roles."""
     d, ln, p = two_party()
     d.label("x")
-    d.li("r0", 0)  # clean register: the taint check alone would accept this
-    d.br("x", cond="z", reg="r0")
+    d.br("x", cond="to")
     d.halt()
-    assert {x.rule for x in check_branches(d, _with_br_to(d))} == {"R2-branch"}
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
 def test_r2_accepts_br_to_inside_block():
-    from emu.analysis import check_branches
     d, ln, p = two_party()
     with d.only("a"):
         d.label("x")
-        d.li("r0", 0)
-        d.br("x", cond="z", reg="r0")
+        d.br("x", cond="to")
     d.halt()
-    assert check_branches(d, _with_br_to(d)) == []
+    assert diag_rules(d, check_timing=False) == set()
 
 
 def test_t1_message_names_the_real_bound():
@@ -241,3 +225,54 @@ def test_t1_sixteen_bit_unclocked_frame(ppm, ok):
     d.xfer(16, ln, owner="a", prof=bit)
     d.halt()
     assert ("T1-sample" not in diag_rules(d)) == ok
+
+
+def test_t2_accepts_cond_with_min_zero():
+    """The engine checks EARLY only when min > 0 (isa-v0 §4.1), so a COND with min = 0 needs
+    no lower margin. nom = 1 used to fail: window [0,11] does not contain [-1,3]."""
+    d, ln, p = two_party()
+    soon = d.profile("SOON", nom=1, min=0, max=11)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    d.cond("rise", ln, owner="a", prof=soon)
+    d.halt()
+    assert diag_rules(d) == set()
+
+
+def test_t2_still_checks_cond_max_when_min_is_zero():
+    d, ln, p = two_party()
+    soon = d.profile("SOON", nom=1, min=0, max=2)  # needs max >= 1 + drift 1 + QUANT 1 = 3
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    d.cond("rise", ln, owner="a", prof=soon)
+    d.halt()
+    assert diag_rules(d) == {"T2-window"}
+
+
+# ---------------------------------------------------------------- D2: CHK XFER at an anchor
+def _xfer_at_anchor(start_hold, check):
+    d, ln, p = two_party()
+    d.cond("fall", ln, owner="a")
+    if start_hold:
+        d.hold(ln, 0, owner="a", prof=p)
+    d.xfer(8, ln, owner="a", prof=p, check=check)
+    d.halt()
+    return d
+
+
+def test_t2_rejects_chk_xfer_at_anchor():
+    """Decision D2 (isa-v0 §6): kept. Right after an anchor the owner drives bit 0 a cycle
+    late (issue slot), and the follower can measure that edge 2 cycles out, past the engine's
+    0 ± QUANT window. The message names the two ways around it."""
+    with pytest.raises(CompileError) as e:
+        compile_desc(_xfer_at_anchor(start_hold=False, check=True))
+    (msg,) = [x.msg for x in e.value.diags if x.rule == "T2-window"]
+    assert "boundary 0" in msg and "drop check" in msg and "start-bit HOLD" in msg
+
+
+def test_t2_accepts_xfer_at_anchor_without_check():
+    assert diag_rules(_xfer_at_anchor(start_hold=False, check=False)) == set()
+
+
+def test_t2_accepts_chk_xfer_after_start_hold():
+    assert diag_rules(_xfer_at_anchor(start_hold=True, check=True)) == set()

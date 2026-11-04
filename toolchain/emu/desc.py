@@ -20,7 +20,7 @@ SRCS = ("zero", "ones", "fifo") + REGS
 DSTS = ("discard", "fifo") + REGS
 COND_KINDS = ("fall", "rise")
 ALU_OPS = ("add", "sub", "and", "or", "xor", "shl", "shr", "eq", "ne", "lt")
-BR_CONDS = ("always", "z", "nz")
+BR_CONDS = ("always", "z", "nz", "to")
 MON = "mon"
 SHARED = "shared"
 
@@ -184,8 +184,8 @@ class Description:
 
     def br(self, target: str, cond: str = "always", reg: str | None = None) -> None:
         self._choice(cond, BR_CONDS, "branch condition")
-        if (cond == "always") != (reg is None):
-            raise ValueError("br: reg is required for z/nz and not allowed for always")
+        if (cond in ("z", "nz")) == (reg is None):
+            raise ValueError("br: reg is required for z/nz and not allowed for always/to")
         self._add("br", None, target=target, cond=cond, reg=None if reg is None else self._reg(reg))
 
     def push(self, ra: str) -> None:

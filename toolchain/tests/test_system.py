@@ -95,3 +95,37 @@ def test_contention_reported():
     image = raw_image(lambda d, ln: d.raw_delay(100))
     trace = System([EngineSpec(image, Role.P0), EngineSpec(image, Role.P0)]).run(5)
     assert trace.contention and trace.contention[0] == (0, 0)
+
+
+def test_quiescence_waits_for_an_edge_in_flight():
+    """A follower waiting on an unbounded COND counts as idle. The run must still not stop
+    while the owner's last edge is crossing the follower's synchronizer."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a")  # owner: COND at cycle 0, ROLE_IF at 1, HALT at 2
+    with d.only("b"):
+        d.mark(1)
+    d.halt()
+    image = compile_desc(d)
+    trace = System([EngineSpec(image, Role.P0), EngineSpec(image, Role.P1)]).run(10_000)
+    assert trace.quiescent
+    assert [e.kind for e in trace.engines[1].events] == ["MARK"]
+
+
+def test_sub_cycle_phase_follower_sees_owner_edge_at_cycle_0():
+    """Engines leave reset together; a follower whose clock is a fraction of a cycle behind
+    starts after the owner's first drive is on the wire. Its synchronizer starts from the
+    bus's reset state (the tick-0 wire), as the RTL's input flops reset to the idle level,
+    so the edge is still seen."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a")
+    with d.only("b"):
+        d.mark(1)
+    d.halt()
+    image = compile_desc(d)
+    trace = System([EngineSpec(image, Role.P0, clock=(1, 4)),
+                    EngineSpec(image, Role.P1, clock=(1, 4), phase=1)]).run(1000)
+    assert [e.kind for e in trace.engines[1].events] == ["MARK"]
+    (rec,) = trace.engines[1].records
+    assert rec.tb == -1  # seen a cycle sooner than at phase 0: the QUANT the windows allow

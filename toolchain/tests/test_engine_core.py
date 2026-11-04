@@ -130,24 +130,16 @@ def test_resolve_contention_and_od():
     assert resolve([pp, od], [[1, 0], [0, None]]) == ([0, 0], [0])
 
 
-def test_br_to_is_not_run_as_nz():
-    """BR TO has no engine semantics until Task 7; it must not silently test a register."""
-    from dataclasses import replace
-
-    import pytest
-
-    from emu.isa import BrCond, decode, encode
-
+def test_br_to_tests_the_timeout_flag_not_a_register():
+    """BR TO reads `to` (isa-v0 §4), never a register: r0 is nonzero, `to` is clear."""
     def b(d, l):
         d.li("r0", 1)
-        d.label("x")
-        d.br("x", cond="nz", reg="r0")
+        with d.only("a"):
+            d.label("x")
+            d.br("x", cond="to")
         d.halt()
-    image = img(b)
-    words = list(image.words)
-    words[1] = encode(replace(decode(words[1]), prof=int(BrCond.TO)))
-    with pytest.raises(NotImplementedError, match="BR TO"):
-        run(Engine(replace(image, words=words), Role.P0), 5)
+    e = run(Engine(img(b), Role.P0), 10)
+    assert e.halted and [x.taken for x in e.branches] == [False]
 
 
 @pytest.mark.parametrize("op,a,b,want", [
