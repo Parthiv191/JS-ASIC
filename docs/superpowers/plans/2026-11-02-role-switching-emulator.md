@@ -32,7 +32,7 @@
   - The fuzzer design is mapped onto the macro and its cycle costs re-checked (bus-fuzzer.md §2.1, §3.1).
   - R3-fz now requires a single-party block.
   - New section: Open decisions D1–D3.
-- **r3, 2026-11-04:** D2 decided (the rule stays). Task 7 done; see its notes.
+- **r3, 2026-11-04:** D2 decided (the rule stays). Task 7 done, plus follow-ups from the second audit; see its notes.
 
 ## Global Constraints
 
@@ -309,6 +309,19 @@ These change code that Tasks 1 and 3 already committed. Run them once, before Ta
 - Model changes outside the engine:
   - `System` loads each engine's synchronizer with the tick-0 wire, so a sub-cycle phase offset no longer hides the owner's first edge.
   - Quiescence waits `(SYNC_LAT + 1)` cycles after the last wire edge, because a follower waiting on an unbounded COND counts as idle.
+
+**Follow-ups from the second audit (2026-11-04).** Three of its findings were real defects, reproduced in the model:
+- The owner of an `XFER` stores its `src`, not the wire. On an open-drain line that differs from the followers', so R2 now taints that `dst`. Readback stays in Phase 4.
+- A bounded COND without `ABORT` let a timed-out follower carry on off the owner's timeline, logging `OVERRUN` on every following step. New rule `T5-timeout`.
+- `ABORT` on an unclocked `XFER` did nothing. With `CHK` it now aborts on an out-of-window edge; without `CHK` it is an error (`S-flags`).
+
+Also:
+- The abort path is now in the checks. R2 taints every register at the abort target. `T5-abort` requires the target to re-sync each role that can abort. `R3-escape` keeps the target out of role-block bodies.
+- The compiler warns (`CompileWarning`) on `ABORT` without `abort_to`.
+- `line()` requires an owner, and `_halt` lost its dead loop.
+- Two tests now pin decisions with model evidence:
+  - `test_chk_xfer_at_anchor_raises_the_false_alarm_t2_prevents` (D2).
+  - `test_idle_cond_accepts_an_early_start_edge_from_a_fast_transmitter`, which shows why COND checks EARLY only when `min > 0`.
 
 ### Task 8: Clocked XFER and duplex lanes
 

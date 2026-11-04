@@ -37,6 +37,7 @@ def spi_like(H, ppm=20000):
     hd = d.profile("CS_HD", nom=H, min=1, max=INF)
     out_l = d.lane("out", data=mosi, clk=sck)
     in_l = d.lane("in", data=miso, clk=sck)
+    d.abort_to("txn")
     d.label("txn")
     with d.only("ctrl"):
         d.pop("r0")

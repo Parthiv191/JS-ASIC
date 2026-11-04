@@ -210,3 +210,46 @@ def test_r3_rejects_branch_into_another_blocks_body():
         d.nop()
     d.halt()
     assert rules(d) == {"R3-escape"}
+
+
+# ---------------------------------------------------------------- audit follow-ups
+def test_r3_rejects_abort_target_inside_a_role_block():
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    d.abort_to("inside")
+    with d.only("a"):
+        d.nop()
+        d.label("inside")
+        d.nop()
+    d.halt()
+    with pytest.raises(CompileError) as e:
+        compile_desc(d, check_timing=False)
+    assert {x.rule for x in e.value.diags} == {"R3-escape"}
+
+
+def test_s_rejects_abort_on_unclocked_xfer_without_check():
+    """An out-of-window edge (CHK) is the only fatal failure of an unclocked XFER."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    p = d.profile("P", nom=16, min=14, max=18)
+    d.abort_to("end")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    d.xfer(8, ln, owner="a", prof=p, abort=True)
+    d.label("end")
+    d.halt()
+    with pytest.raises(CompileError) as e:
+        compile_desc(d)
+    assert {x.rule for x in e.value.diags} == {"S-flags"}
+
+
+def test_abort_without_abort_to_warns():
+    from emu.compiler import CompileWarning
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    p = d.profile("P", nom=16, min=14, max=18)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p, abort=True)
+    d.halt()
+    with pytest.warns(CompileWarning, match="abort_to"):
+        compile_desc(d)

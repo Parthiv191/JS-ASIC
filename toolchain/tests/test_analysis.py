@@ -276,3 +276,94 @@ def test_t2_accepts_xfer_at_anchor_without_check():
 
 def test_t2_accepts_chk_xfer_after_start_hold():
     assert diag_rules(_xfer_at_anchor(start_hold=True, check=True)) == set()
+
+
+# ---------------------------------------------------------------- audit follow-ups
+def test_r2_rejects_branch_on_open_drain_xfer_dst():
+    """On an open-drain line another device can pull a 1 low. The owner stores what it sent and
+    the followers what they read, so the value can differ between roles (isa-v0 §4.3)."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", kind="od", owner="a", idle=1)
+    p = d.profile("P", nom=16, min=14, max=18)
+    d.label("x")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    d.xfer(8, ln, owner="a", prof=p, dst="r0")
+    d.br("x", cond="nz", reg="r0")
+    d.halt()
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
+
+
+def test_r2_taints_registers_at_the_abort_target():
+    """A role that aborts restarts at the abort target while the others carry on, so a counter
+    kept across frames can differ between roles (b aborts before its increment)."""
+    d, ln, p = two_party()
+    d.abort_to("top")
+    d.li("r0", 0)
+    d.label("top")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p, abort=True)
+    d.alu("add", "r0", "r0", 1)
+    d.alu("ne", "r1", "r0", 3)
+    d.br("top", cond="nz", reg="r1")
+    d.halt()
+    assert diag_rules(d) == {"R2-branch"}
+
+
+def _cond_then(next_step, abort=False):
+    d, ln, p = two_party()
+    w = d.profile("W", nom=10, min=8, max=100)
+    d.abort_to("end")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    d.cond("rise", ln, owner="a", prof=w, abort=abort)
+    next_step(d, ln, p)
+    d.label("end")
+    d.halt()
+    return d
+
+
+def test_t5_rejects_a_timed_step_after_a_cond_that_can_time_out():
+    """A follower that times out finishes up to max - nom + QUANT + EDGE_LAT + 1 cycles late and
+    no longer shares the owner's timeline; the model then logs OVERRUN on the next steps."""
+    d = _cond_then(lambda d, ln, p: d.hold(ln, 1, owner="a", prof=p))
+    assert diag_rules(d) == {"T5-timeout"}
+
+
+def test_t5_accepts_an_idle_cond_after_a_cond_that_can_time_out():
+    d = _cond_then(lambda d, ln, p: d.cond("fall", ln, owner="a"))
+    assert diag_rules(d) == set()
+
+
+def test_t5_accepts_a_timed_step_after_a_cond_with_abort():
+    d = _cond_then(lambda d, ln, p: d.hold(ln, 1, owner="a", prof=p), abort=True)
+    assert diag_rules(d) == set()
+
+
+def test_t5_rejects_an_abort_target_that_starts_with_a_hold():
+    d, ln, p = two_party()
+    d.abort_to("mid")
+    d.cond("fall", ln, owner="a")
+    d.label("mid")
+    d.hold(ln, 0, owner="a", prof=p, abort=True)
+    d.halt()
+    assert diag_rules(d) == {"T5-abort"}
+
+
+def test_t5_rejects_an_abort_target_whose_first_cond_the_aborting_role_owns():
+    """b aborts on a's HOLD; at the target b would drive its own edge into a's frame."""
+    d = Description("t", parties=("a", "b"))
+    la = d.line("la", owner="a", idle=1)
+    lb = d.line("lb", owner="b", idle=1)
+    p = d.profile("P", nom=16, min=14, max=18)
+    d.abort_to("x")
+    d.cond("fall", la, owner="a")
+    d.hold(la, 0, owner="a", prof=p, abort=True)
+    d.label("x")
+    d.cond("fall", lb, owner="b")
+    d.halt()
+    assert diag_rules(d) == {"T5-abort"}
+
+
+def test_t5_accepts_uart_abort_to_frame_start():
+    assert diag_rules(uart_like(16)) == set()

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
-    EDGE_LAT as E, F_CHK, F_REG, INF, QUANT as Q, BrCond, Dst, Instr, Op, Owner, RawOp, Role,
+    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, NUM_REGS, QUANT as Q, BrCond, Dst, Instr, Op, Owner, RawOp, Role,
     unpack_role_if, unpack_xfer,
 )
 
@@ -74,6 +74,10 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
     diags = _Diags(desc, low)
     if not instrs:
         return []
+    img = low.image
+    od_lanes = {i for i, la in enumerate(img.lanes) if img.lines[la.data].kind == "od"}
+    abort_pc = img.abort_pc if any(_aborts(ins) for ins in instrs) else None
+    all_tainted = (1 << NUM_REGS) - 1
     state: dict[int, int] = {0: 0}
     work = [0]
     while work:
@@ -88,17 +92,25 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
             diags.add("R2-branch", pc, f"branch on r{ins.pin & 3}, whose value can differ between roles")
         if ins.op == Op.RAW and ins.prof == RawOp.JPIN and not inblock:
             diags.add("R2-branch", pc, "raw pin branch outside a role block")
-        out = _taint(ins, t, inblock)
-        for s in successors(instrs, pc):
+        out = _taint(ins, t, inblock, od_lanes)
+        edges = [(s, out) for s in successors(instrs, pc)]
+        if abort_pc is not None and _aborts(ins) and abort_pc < len(instrs):
+            # only the roles that fail jump: every register may now differ between roles
+            edges.append((abort_pc, all_tainted))
+        for s, o in edges:
             old = state.get(s)
-            new = out if old is None else old | out
+            new = o if old is None else old | o
             if new != old:
                 state[s] = new
                 work.append(s)
     return diags.list()
 
 
-def _taint(ins: Instr, t: int, inblock: bool) -> int:
+def _aborts(ins: Instr) -> bool:
+    return ins.op in (Op.COND, Op.HOLD, Op.XFER) and bool(ins.flags & F_ABORT)
+
+
+def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int] = frozenset()) -> int:
     def put(reg: int, tainted: bool) -> int:
         return t | (1 << reg) if tainted else t & ~(1 << reg)
 
@@ -115,7 +127,8 @@ def _taint(ins: Instr, t: int, inblock: bool) -> int:
     if ins.op == Op.XFER:
         dst = unpack_xfer(ins.operand)[2]
         if dst >= Dst.R0:
-            return put(int(dst) - 4, inblock)
+            # on an open-drain line the owner stores what it sent, the followers what they read
+            return put(int(dst) - 4, inblock or ins.pin in od_lanes)
     return t
 
 
@@ -131,6 +144,7 @@ class _Step:
     clk_owner: Role | None = None
     cpha: int = 0
     chk: bool = False
+    abort: bool = False
 
     def does(self, r: Role) -> bool:
         return r != Role.MON and (self.owner == Owner.SHARED or int(self.owner) == int(r))
@@ -150,7 +164,7 @@ def _steps(low: Lowered) -> dict[int, _Step]:
         if ins.op not in (Op.COND, Op.HOLD, Op.XFER):
             continue
         prof = img.profiles[ins.prof] if ins.prof < len(img.profiles) else img.profiles[0]
-        kw = {}
+        kw = {"abort": bool(ins.flags & F_ABORT)}
         if ins.op == Op.XFER:
             kw["n"] = unpack_xfer(ins.operand)[0]
             kw["chk"] = bool(ins.flags & F_CHK)
@@ -304,12 +318,29 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T3-latency", pc, f"half period {H} < EDGE_LAT + 1 + drift: a data owner that "
                                             f"follows the clock cannot launch in time")
 
+    # an abort restarts only the roles that fail: they must re-sync on the other party's next event
+    aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}
+    apc = low.image.abort_pc
+    for r in sorted(aborting):
+        for pc in gaps(instrs, timed, apc, r):
+            s = steps[pc]
+            if not (s.op == Op.COND and not s.prof.bounded and not s.does(r)):
+                diags.add("T5-abort", pc, f"{r.name} can abort and restart at pc {apc}; the first timed "
+                                          f"step it reaches there must be an unbounded COND it follows, "
+                                          f"so it waits for the other party's next event")
+
     # pairwise checks: predecessor timed step (or reset) -> next timed step
     preds: list[tuple[_Step | None, int]] = [(None, 0)] + [(s, pc + 1) for pc, s in steps.items()]
     for prev, start in preds:
         per_role = {r: gaps(instrs, timed, start, r) for r in ROLES}
         for nxt_pc in set().union(*per_role.values()):
             s = steps[nxt_pc]
+            if (prev is not None and prev.op == Op.COND and prev.prof.bounded and not prev.abort
+                    and not (s.op == Op.COND and not s.prof.bounded)):
+                late = prev.prof.max - prev.prof.nom + Q + E + 1
+                diags.add("T5-timeout", prev.pc, f"a follower that times out here finishes up to {late} "
+                                                 f"cycles late, off the owner's timeline; the next timed "
+                                                 f"step (pc {nxt_pc}) must be an unbounded COND, or add abort")
             if s.owner_role is None:
                 continue  # SHARED steps: Phase 4 (ARB)
             st = {}

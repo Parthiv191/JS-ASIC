@@ -4,7 +4,7 @@ import pytest
 
 from emu.compiler import compile_desc
 from emu.desc import Description
-from emu.isa import EDGE_LAT, Role
+from emu.isa import EDGE_LAT, QUANT, Role
 from emu.model.system import Glitch
 
 from simutil import kinds, run_sys
@@ -12,7 +12,8 @@ from simutil import kinds, run_sys
 P = 16
 
 
-def frame(n=8, msb=False, check=False, resync=False, dst="fifo", src="fifo", tail=None, ppm=20000):
+def frame(n=8, msb=False, check=False, resync=False, dst="fifo", src="fifo", tail=None, ppm=20000,
+          abort=False):
     """COND fall (IDLE) · HOLD 0 (start) · XFER n · HOLD 1 (stop) · [tail] · HALT."""
     d = Description("f", parties=("a", "b"), tolerance_ppm=ppm)
     ln = d.line("l", owner="a", idle=1)
@@ -20,7 +21,8 @@ def frame(n=8, msb=False, check=False, resync=False, dst="fifo", src="fifo", tai
     d.abort_to("end")
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
-    d.xfer(n, ln, owner="a", prof=bit, src=src, dst=dst, msb_first=msb, check=check, resync=resync)
+    d.xfer(n, ln, owner="a", prof=bit, src=src, dst=dst, msb_first=msb, check=check, resync=resync,
+           abort=abort)
     d.hold(ln, 1, owner="a", prof=bit, abort=True)
     if tail:
         tail(d)
@@ -188,11 +190,13 @@ def test_shortest_accepted_slot_runs_clean_at_every_phase(phase, value):
     later than the owner made it. Every such phase must still sample every bit."""
     d = Description("p6", parties=("a", "b"), tolerance_ppm=0)
     ln = d.line("l", owner="a", idle=1)
+    d.abort_to("end")
     bit = d.profile("BIT", nom=6)
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
     d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
     d.hold(ln, 1, owner="a", prof=bit, abort=True)
+    d.label("end")
     d.halt()
     t = run_sys(compile_desc(d), tx={0: [value]}, clocks={i: (1, 4) for i in range(3)},
                 phases={1: phase, 2: phase})
@@ -205,11 +209,13 @@ def test_cond_with_min_zero_runs_clean():
     when min = 0, and the edge arrives well before max."""
     d = Description("m0", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
+    d.abort_to("end")
     bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
     soon = d.profile("SOON", nom=1, min=0, max=11)
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit)
     d.cond("rise", ln, owner="a", prof=soon, abort=True)
+    d.label("end")
     d.halt()
     t = run_sys(compile_desc(d))
     assert all(not et.events for et in t.engines)
@@ -222,11 +228,13 @@ def test_t1_boundary_at_2pct_runs_clean(ratios, phase):
     The follower runs 2% slower or faster than the owner, at sub-cycle phase offsets."""
     d = Description("p10", parties=("a", "b"), tolerance_ppm=20000)
     ln = d.line("l", owner="a", idle=1)
+    d.abort_to("end")
     bit = d.profile("BIT", nom=10)
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
     d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
     d.hold(ln, 1, owner="a", prof=bit, abort=True)
+    d.label("end")
     d.halt()
     img = compile_desc(d)
     owner, foll = ratios
@@ -253,3 +261,50 @@ def test_xfer_check_accepts_edges_at_the_window_limits(scale):
     t = run_sys(img, tx={0: [0x55]}, images={0: img.with_profiles({"BIT": scale})})
     for i in (1, 2):
         assert t.engines[i].rx == [0x55] and not t.engines[i].violations
+
+
+# ---------------------------------------------------------------- audit follow-ups
+def test_chk_xfer_at_anchor_raises_the_false_alarm_t2_prevents():
+    """Decision D2 (isa-v0 §6). Right after an anchor the owner drives bit 0 in the issue slot,
+    one owner cycle after the COND edge. A follower 2% faster can count that gap as 2 of its
+    cycles: here the anchor falls just before one of the owner's 5-tick cycles (49/200 of the
+    tick rate) and the follower (50/200) samples every 4 ticks. The data is right, yet EDGE
+    fires against the boundary-0 window [-1, 1]. So T2 rejects the step."""
+    d = Description("d2", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    with d.only("a"):
+        d.raw_delay(11)  # moves the anchor onto a 5-tick owner cycle
+    d.cond("fall", ln, owner="a")
+    d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo", check=True)
+    d.hold(ln, 1, owner="a", prof=bit)
+    d.halt()
+    from emu.compiler import CompileError
+    with pytest.raises(CompileError, match="T2-window"):
+        compile_desc(d)
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1), tx={0: [0x01]},
+                clocks={0: (49, 200), 1: (50, 200)}, phases={1: 1})
+    assert t.engines[1].rx == [0x01]
+    assert [(e.kind, e.measured, e.lo, e.hi) for e in t.engines[1].events] == [("EDGE", 2, -1, 1)]
+
+
+def test_idle_cond_accepts_an_early_start_edge_from_a_fast_transmitter():
+    """Why COND checks EARLY only when min > 0 (isa-v0 §4.1). Back-to-back frames from a
+    transmitter 2% fast put each start edge 3-4 cycles before the receiver's expected end of
+    the stop bit. With min = 0 that is legal; checking m >= -QUANT would flag every frame."""
+    from descs import uart_like
+    data = list(range(1, 9))
+    t = run_sys(compile_desc(uart_like(16)), tx={0: data}, clocks={1: (49, 50), 2: (49, 50)})
+    for i in (1, 2):
+        recs = t.engines[i].records
+        early = [recs[j].tb - recs[j - 1].tb for j in range(1, len(recs)) if recs[j].op == "COND"]
+        assert min(early) < -QUANT
+        assert t.engines[i].rx == data and not t.engines[i].violations
+
+
+def test_xfer_check_with_abort_aborts_on_an_out_of_window_edge():
+    img = compile_desc(frame(check=True, abort=True))
+    t = run_sys(img, tx={0: [0x55]}, images={0: img.with_profiles({"BIT": 1.5})})
+    for i in (1, 2):
+        assert kinds(t, i) == ["EDGE", "ABORT"]  # jumped to the abort vector: no stop-bit LEVEL
+        assert t.engines[i].rx == []

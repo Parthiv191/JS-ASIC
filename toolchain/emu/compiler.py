@@ -4,6 +4,7 @@ Rule ids follow docs/design/isa-v0.md §5 (R*, S*) and §6 (T*, in analysis.py).
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 from .desc import MON, SHARED, Description, LaneRef, LineRef, Step
@@ -27,6 +28,10 @@ class Diagnostic:
 
     def __str__(self) -> str:
         return f"{self.loc}: [{self.rule}] step {self.index}: {self.msg}"
+
+
+class CompileWarning(UserWarning):
+    """A legal description whose behaviour is probably not what was meant."""
 
 
 class CompileError(Exception):
@@ -184,10 +189,13 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
 
     abort_pc = 0
     if desc.abort_label is not None:
+        anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
         if desc.abort_label in labels:
             abort_pc = labels[desc.abort_label]
+            if span_of(abort_pc) is not None:
+                err("R3-escape", anchor, f"abort target {desc.abort_label!r} is inside a role block; "
+                                         f"an abort would skip the block's role check")
         else:
-            anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
             err("S-label", anchor, f"unknown abort label {desc.abort_label!r}")
 
     words = []
@@ -212,6 +220,9 @@ def compile_desc(desc: Description, *, check_timing: bool = True,
                  prog_depth: int = PROG_DEPTH) -> Image:
     low = lower(desc, prog_depth)
     diags = list(low.diags)
+    if desc.abort_label is None and any(s.args.get("abort") for s in desc.steps):
+        warnings.warn(CompileWarning(f"{desc.name}: a step has abort but abort_to is not set, so an "
+                                     f"abort restarts the description at pc 0"), stacklevel=2)
     if not diags:
         from . import analysis  # imports this module; deferred to avoid a cycle
         diags += analysis.check_branches(desc, low)
@@ -250,6 +261,9 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
                                f"{_name(desc, ln.owner)!r}")
         if clk is not None and lines[clk].owner not in (Owner.P0, Owner.P1):
             err("R1-owner", s, f"clock line {lines[clk].name!r} needs a party owner")
+        if s.kind == "xfer" and clk is None and a["abort"] and not a["check"]:
+            err("S-flags", s, "abort on an unclocked xfer needs check: an out-of-window edge is its "
+                              "only fatal failure")
     if s.kind in ("raw_set", "raw_rel"):
         ln = lines[a["line"].index]
         if ln.kind == "pp":

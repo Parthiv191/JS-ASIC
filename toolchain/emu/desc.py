@@ -98,7 +98,7 @@ class Description:
         self._block: frozenset[str] | None = None
 
     # ---- declarations ---------------------------------------------------------------
-    def line(self, name: str, kind: str = "pp", owner: str = "", idle: int = 1) -> LineRef:
+    def line(self, name: str, kind: str = "pp", *, owner: str, idle: int = 1) -> LineRef:
         if kind not in ("pp", "od"):
             raise ValueError(f"line kind must be 'pp' or 'od', got {kind!r}")
         if owner not in self.parties + (SHARED,):

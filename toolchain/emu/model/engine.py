@@ -181,9 +181,8 @@ class Engine:
     def _halt(self) -> Gen:
         self.halted = True
         self.halt_cycle = self.now
-        while True:
-            self.idle = True
-            yield
+        self.idle = True
+        yield  # cycle() never resumes a halted engine
 
     def _op_halt(self, ins: Instr) -> Gen:
         yield from self._halt()
@@ -398,6 +397,10 @@ class Engine:
                     inside = lo <= m <= hi
                     if ins.flags & F_CHK and not inside:
                         self.log("EDGE", measured=m, lo=lo, hi=hi)
+                        if ins.flags & F_ABORT:
+                            self._abort()
+                            yield
+                            return
                     if ins.flags & F_RESYNC and inside:
                         a, ak = e, k
                 fresh = False

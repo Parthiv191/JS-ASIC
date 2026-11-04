@@ -22,6 +22,15 @@ Task 7 notes (2026-11-04), no encoding change:
   timeout or an abort, and that RESYNC moves only the sampling anchor.
 - T1 measured against the model (§6).
 
+Task 7 follow-ups (2026-11-04, from the second audit), no encoding change:
+- On an open-drain line the owner's `dst` can differ from the followers', so R2 treats it as
+  role-dependent (§4.3, §5).
+- An unclocked `XFER` with `CHK` and `ABORT` aborts on an out-of-window edge; `ABORT` without
+  `CHK` there is an error (§4.3, `S-flags`).
+- An abort restarts only the role that fails: the target must re-sync it (`T5-abort`), sit
+  outside role blocks (`R3-escape`), and every register counts as role-dependent there (R2).
+- A bounded COND without `ABORT` must be followed by an unbounded COND (`T5-timeout`).
+
 Implementation status (toolchain, 2026-11-04). The encodings of every r2 feature exist in
 `emu.isa`; the DSL, compiler and model reach them in these tasks of the plan:
 
@@ -113,7 +122,7 @@ Reserved opcodes: `CHOICE = 16`, `ARB = 17`, `WAIT_ANY = 18`, `CODEC = 19`. Code
 - **Issue slot and overrun.** An instruction cannot start in the cycle its predecessor completed, so a timed step may begin one cycle after its planned start (`tb`) and an action planned *at the step's start* (offset 0) then happens in that cycle. The timeline does not move: later actions stay at their planned times and `tb` advances from the planned start. Any other action that happens after its planned cycle logs `OVERRUN(now − planned)` and is performed immediately. `IDLE` steps never overrun. A follower that reaches a planned sample point late also logs `OVERRUN`.
 - **Window accumulation.** Each follower keeps an anchor (cycle of the last re-anchoring event) and the accumulated `(min, nom, max)` of every HOLD/XFER bit since then. An edge check compares `e − anchor` against the accumulated `[min − QUANT, max + QUANT]`. A COND that times out without ABORT re-anchors at its new `tb`, and an abort re-anchors at `now`. RESYNC (§4.3) moves only the sampling anchor, never this one.
 - **Timeout flag `to`.** Every timed step clears `to` when it starts and sets it if it logs `TIMEOUT` and has no ABORT. `BR TO` jumps iff `to` is set. An owner never times out, so `to` differs between roles and `BR TO` is legal only inside a role block (R2-branch).
-- **Abort.** A fatal follow failure on a step with `ABORT` logs `ABORT(pc)`, releases OD lines, sets `tb := now` (re-anchoring the window there), and jumps to the image's `abort_pc`.
+- **Abort.** A fatal follow failure on a step with `ABORT` logs `ABORT(pc)`, releases OD lines, sets `tb := now` (re-anchoring the window there), and jumps to the image's `abort_pc`. Only the role that fails jumps; the others carry on, so the target has to re-sync it (`T5-abort`, §6). `abort_pc` is 0 unless the description sets `abort_to`, and the compiler warns when a step has `ABORT` without it.
 
 ### 4.1 `COND kind, line, owner, prof`
 
@@ -127,11 +136,11 @@ Reserved opcodes: `CHOICE = 16`, `ARB = 17`, `WAIT_ANY = 18`, `CODEC = 19`. Code
 
 ### 4.3 `XFER n, lane, owner, src, dst, msb_first, prof`
 
-Every role writes the **wire value** of the transfer into a register `dst`, so all roles branch on the same value. A `dst = FIFO` push happens only in follow mode, so the host receives what the engine followed and gets no echo of what it sent. The owner takes `src` at step start, and a `FIFO` source stalls while empty. Bit `k` is `value >> k` (LSB first) or `value >> (n−1−k)` (MSB first).
+Every role writes the **wire value** of the transfer into a register `dst`, so all roles branch on the same value. On a push-pull line the owner's value is what it drove, which R1 makes the wire value. On an open-drain line another device can pull a 1 low, so until readback lands (Phase 4) the owner stores its `src` value and R2 treats the `dst` as role-dependent (§5). A `dst = FIFO` push happens only in follow mode, so the host receives what the engine followed and gets no echo of what it sent. The owner takes `src` at step start, and a `FIFO` source stalls while empty. Bit `k` is `value >> k` (LSB first) or `value >> (n−1−k)` (MSB first).
 
 **Unclocked lane** (bit period `P = nom`):
 - **Do:** drive bit `k` at `max(now, tb + k·P)`. `tb := tb + n·P`. Completes at the last bit's drive. The value is `src` masked to `n` bits.
-- **Follow:** sample bit `k` at `a + (k − ak)·P + P//2 + EDGE_LAT`, where `(a, ak)` is the anchor (initially `(tb, 0)`). An edge seen before sample `k` sits at boundary `k`. With CHK, an out-of-window edge logs `EDGE(m)`. With RESYNC, an in-window edge re-anchors `(a, ak) := (e, k)`. `tb := a + (n − ak)·P`. Completes at the last sample.
+- **Follow:** sample bit `k` at `a + (k − ak)·P + P//2 + EDGE_LAT`, where `(a, ak)` is the anchor (initially `(tb, 0)`). An edge seen before sample `k` sits at boundary `k`. With CHK, an out-of-window edge logs `EDGE(m)`, and with ABORT as well the engine aborts. With RESYNC, an in-window edge re-anchors `(a, ak) := (e, k)`. `tb := a + (n − ak)·P`. Completes at the last sample.
 
 **Clocked lane** (half period `H = nom`): bit `k` has a leading edge at `tb + (2k+1)H` (clock → `1−cpol`) and a trailing edge at `tb + (2k+2)H` (clock → `cpol`). `cpha = 0` captures on the leading edge and launches bit `k+1` on the trailing edge (bit 0 at step start). `cpha = 1` launches on the leading edge and captures on the trailing edge.
 - **Clock owner** (role = clock owner, not MON): generates the edges at the planned times. `tb := tb + 2nH`.
@@ -167,12 +176,12 @@ The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics,
 |---|---|
 | `R1-owner` | Every timed step has an owner that is a party, or `shared`. A step that drives a PP line (COND/HOLD line, XFER data line) must be owned by that line's owner. A lane's clock line must have a party owner. A duplex lane's `data2` line must have a party owner different from `data`'s. |
 | `R1-shared` | `shared` is only legal on OD lines. |
-| `R2-branch` | `BR Z/NZ` may only test registers whose value is the same in every role ("clean"): written by `XFER dst`, `LI`, `ALU` over clean inputs, or `CRC GET` from a clean CRC state, outside role blocks. `POP`, `RAW GET`, and every write inside a role block taint the register. The CRC state is tracked like a fifth register: `FEED` of a tainted register, or any `CRC` op inside a role block, taints it. Taint is a forward dataflow over the CFG: tainted on any incoming path means tainted. `RAW JPIN` and `BR TO` are only legal inside a role block. |
+| `R2-branch` | `BR Z/NZ` may only test registers whose value is the same in every role ("clean"): written by `XFER dst`, `LI`, `ALU` over clean inputs, or `CRC GET` from a clean CRC state, outside role blocks. `POP`, `RAW GET`, and every write inside a role block taint the register. The CRC state is tracked like a fifth register: `FEED` of a tainted register, or any `CRC` op inside a role block, taints it. Taint is a forward dataflow over the CFG: tainted on any incoming path means tainted. An `XFER dst` on an open-drain lane is tainted (the owner stores its `src`, §4.3). Every register is tainted at the abort target, since only the failing role jumps there. `RAW JPIN` and `BR TO` are only legal inside a role block. |
 | `R3-timed-in-role` | Role blocks (`only(...)`) contain no timed steps. |
 | `R3-raw-drive` | `RAW SET/REL` on a PP line only inside a role block whose mask ⊆ {line owner}. |
-| `R3-escape` | No branch leaves a role block or enters one from outside. A branch inside a block may target the block's `ROLE_IF`, its body, or its exit (the pc after the block, where every role resumes; when blocks are adjacent this is the next block's `ROLE_IF`, so that role check still runs). |
+| `R3-escape` | No branch leaves a role block or enters one from outside. A branch inside a block may target the block's `ROLE_IF`, its body, or its exit (the pc after the block, where every role resumes; when blocks are adjacent this is the next block's `ROLE_IF`, so that role check still runs). The abort target must not be inside a block's body. |
 | `R3-fz` | `FZ` only inside a role block whose mask is exactly one party, and the same party for every `FZ` in the description. There is one fuzz unit, and its SRAM does one access per cycle. |
-| `S-*` | Structure: labels resolve, names exist, field ranges, table sizes, no nested role blocks, program length ≤ the target's program depth (`S-range`), `data2` only on a clocked lane, duplex `n ≤ 8`, CRC config in range. |
+| `S-*` | Structure: labels resolve, names exist, field ranges, table sizes, no nested role blocks, program length ≤ the target's program depth (`S-range`), `data2` only on a clocked lane, duplex `n ≤ 8`, CRC config in range, `ABORT` on an unclocked `XFER` only with `CHK` (`S-flags`). |
 
 ## 6. Timing-compatibility rules (compiler)
 
@@ -186,6 +195,8 @@ The engine side of the learning bus fuzzer. The fuzz unit, the sub-op semantics,
 | `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. |
 | `T5-watch` | A follower must already be executing a step when its first observation happens: the owner's event for COND (`start_f + ceil(d·(A+nom)) ≤ event + EDGE_LAT`), the first edge of a clocked XFER (`≤ H + EDGE_LAT`), or the first sample of HOLD / unclocked XFER (`≤ nom//2 + EDGE_LAT`). `start_r` is computed per role as the previous timed step's completion offset for that role + 1 + that role's untimed cycles in between (max over paths; an untimed loop makes it unbounded). |
 | `T5-overrun` | The owner of a bounded step must start in time: `start_o ≤ max(planned_offset, 1)`, where the planned offset is `nom` for COND and 0 for HOLD and XFER. |
+| `T5-timeout` | A bounded COND without `ABORT` may be followed (on every path) only by an unbounded COND. A follower that times out finishes up to `max − nom + QUANT + EDGE_LAT + 1` cycles late with `tb := tb + nom`, so it no longer shares the owner's timeline, and only an event it waits for re-syncs it. |
+| `T5-abort` | For every role that can abort (a follower of a step with `ABORT`), the first timed step it reaches from `abort_pc` is an unbounded COND that it follows. |
 
 **D2: a `CHK` unclocked `XFER` at an anchor (decided 2026-11-04: the rule stays).** When the
 step starts right at an anchor (`A = 0`), its boundary-0 window is `[0, 0]`, which cannot contain

@@ -122,3 +122,9 @@ def test_br_to_takes_no_register():
     assert d.steps[-1].args == {"target": "x", "cond": "to", "reg": None}
     with pytest.raises(ValueError, match="reg"):
         d.br("x", cond="to", reg="r0")
+
+
+def test_line_requires_an_owner():
+    d = Description("t", parties=("a", "b"))
+    with pytest.raises(TypeError):
+        d.line("l")
