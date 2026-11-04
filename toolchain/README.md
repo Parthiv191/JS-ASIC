@@ -10,6 +10,9 @@ python3 -m venv ../.venv && ../.venv/bin/pip install -e ".[dev]"
 ../.venv/bin/python -m pytest          # unit, cross-role and regression tests
 ```
 
+CI runs the same tests on Python 3.11 and 3.12 (`.github/workflows/toolchain.yaml`).
+A `CompileWarning` fails the run, locally too (`pyproject.toml`).
+
 Status (2026-11-04): the ISA encoding, the DSL, the compiler with its
 R/S/T rules, and the engine and system model with the timed ops (`COND`,
 `HOLD`, unclocked `XFER`, `BR TO`) are done (plan Tasks 1–7 and the r2

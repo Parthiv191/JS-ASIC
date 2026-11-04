@@ -1,0 +1,26 @@
+name: toolchain
+on: [push, workflow_dispatch]
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the toolchain
+        run: pip install -e "toolchain[dev]"
+
+      # Compiler, timing rules and reference model (toolchain/tests). CompileWarning
+      # is an error here, as set in toolchain/pyproject.toml.
+      - name: Run pytest
+        working-directory: toolchain
+        run: python -m pytest -p no:cacheprovider -rfE

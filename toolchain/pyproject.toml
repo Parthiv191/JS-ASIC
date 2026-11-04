@@ -19,3 +19,4 @@ include = ["emu*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--color=no -q"
+filterwarnings = ["error::emu.compiler.CompileWarning"]
