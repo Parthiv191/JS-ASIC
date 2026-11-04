@@ -79,6 +79,16 @@
   "//": "gate the design; Magic's count is still reported.",
   "ERROR_ON_MAGIC_DRC": 0,
 
+  "//": "Slew and load into the macros. Hold fixing (after CTS) puts weak delay cells on the",
+  "//": "address and data nets, and one driver feeds the same pin on both macros. Run cc3339f",
+  "//": "had 18 max-slew violations (A_REN 1.31 ns vs a 0.595 ns limit) and 3 max-cap ones on",
+  "//": "A_DOUT. Design repair after global routing re-buffers those nets with the hold cells in",
+  "//": "place and real wire loads. The two *_CORNERS lists make any slew or cap violation fail",
+  "//": "the flow; the default [\"\"] matches no corner and only warns.",
+  "RUN_POST_GRT_DESIGN_REPAIR": 1,
+  "MAX_SLEW_VIOLATION_CORNERS": ["*"],
+  "MAX_CAP_VIOLATION_CORNERS": ["*"],
+
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
   "//": "!!! DO NOT CHANGE ANYTHING BELOW THIS POINT !!!",
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",

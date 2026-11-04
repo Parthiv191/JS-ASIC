@@ -7,6 +7,8 @@ on:
 jobs:
   gds:
     runs-on: ubuntu-24.04
+    # post-GRT design repair is marked experimental ("may result in hangs"); a normal run takes ~35 min
+    timeout-minutes: 120
     steps:
       - name: checkout repo
         uses: actions/checkout@v6

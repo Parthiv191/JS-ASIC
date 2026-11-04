@@ -91,6 +91,14 @@ post-route STA of CI run 41584775180):
 | Address required by: next edge at 20, plus clock skew 0.47, minus setup 0.04 | 20.44 |
 | **Slack** | **12.97** |
 
+Caveat on these numbers (found 2026-11-04 in run 41910413971, same RTL). The 7.47 includes
+1.08 ns in a hold-fix delay cell (`dlygate4sd3_1`). That cell drives the address pin of both
+macros, and the edge arrives at 0.83 ns against the macro's 0.595 ns slew limit. The 0.04
+setup time is read outside the macro's characterized slew range. The margin is large enough
+that the ~13 ns budget should stand. `src/config.json` now repairs these nets after global
+routing and fails the flow on any slew or cap violation; this table gets re-measured on the
+first run with that change.
+
 The engine's next-pc logic replaces that multiplexer: decode, the branch condition and the
 pc multiplexer must fit in about 13 ns. Phase 5 synthesizes it early to check. If it does
 not fit, the fallback is an instruction register with a one-cycle bubble on taken branches,
