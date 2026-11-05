@@ -44,14 +44,16 @@
   "//": "sit right of the power-pin strap at x = 366.6-370.7. Placed near the top edge, N",
   "//": "orientation: the signal pins are on the macro's bottom edge, so they face the logic",
   "//": "region below; the Tiny Tapeout pins (top edge, x < 192 um) stay clear.",
+  "//": "y = 483.84 leaves ~22 um above each macro after the 10 um row-cut halo: the VDDARRAY!",
+  "//": "bridges need cell rows above the macro to connect to (run 41975804926 failed at 502.74).",
   "MACROS": {
     "RM_IHPSG13_1P_512x32_c2_bm_bist": {
       "gds": ["pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_512x32_c2_bm_bist.gds"],
       "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x32_c2_bm_bist.lef"],
       "vh": ["dir::../flow/blackbox-RM_IHPSG13_1P_512x32_c2_bm_bist.v"],
       "instances": {
-        "u_mem.u_sram": {"location": [405.92, 502.74], "orientation": "N"},
-        "u_fmem.u_sram": {"location": [855.52, 502.74], "orientation": "N"}
+        "u_mem.u_sram": {"location": [405.92, 483.84], "orientation": "N"},
+        "u_fmem.u_sram": {"location": [855.52, 483.84], "orientation": "N"}
       },
       "lib": {
         "*typ*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_typ_1p20V_25C.lib"],
