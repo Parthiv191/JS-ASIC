@@ -77,39 +77,27 @@ module tt_um_prot_emu_SAP (
   );
 
   // ---- SRAM trial harness ----
-  reg  [AW-1:0] addr;
-  reg  [31:0]   wdata;
-  wire [31:0]   rdata_a, rdata_b;
-
-  always @(posedge clk or negedge rst_n_sync) begin
-    if (!rst_n_sync) begin
-      addr  <= {AW{1'b0}};
-      wdata <= 32'h0;
-    end else begin
-      if (rise[1]) addr  <= {addr[AW-9:0], ui_in};
-      if (rise[2]) wdata <= {wdata[23:0], ui_in};
-    end
-  end
-
+  // Each macro gets its own port (mem_port below): its own address, data and
+  // control flops, and a local register on its output. The real chip works the
+  // same way (one client per macro), and it keeps every macro pin's net short:
+  // run 41975807753 failed max slew/cap when one set of flops fed both macros
+  // ~450 um apart and A_DOUT ran to the output pins.
   wire mem_we = rise[3];
-  wire mem_re = rise[4] | chase;
+  wire mem_re = rise[4];
+  wire [31:0] rdata_a, rdata_b;
+  wire [AW-1:0] addr;   // u_fmem's address and data, shared with the flop memory below
+  wire [31:0]   wdata;
 
-  prog_mem #(.AW(AW)) u_mem (
-      .clk  (clk),
-      .en   (~sel & (mem_we | mem_re)),
-      .we   (mem_we),
-      .addr (chase ? rdata_a[AW-1:0] : addr),
-      .wdata(wdata),
-      .rdata(rdata_a)
+  mem_port #(.AW(AW)) u_mem (
+      .clk(clk), .rst_n(rst_n_sync), .sel_me(~sel), .ld_addr(rise[1]), .ld_data(rise[2]),
+      .wr(mem_we), .rd(mem_re), .chase(chase), .byte_in(ui_in), .rdata_q(rdata_a),
+      .addr_o(), .wdata_o()
   );
 
-  prog_mem #(.AW(AW)) u_fmem (
-      .clk  (clk),
-      .en   (sel & (mem_we | mem_re)),
-      .we   (mem_we),
-      .addr (chase ? rdata_b[AW-1:0] : addr),
-      .wdata(wdata),
-      .rdata(rdata_b)
+  mem_port #(.AW(AW)) u_fmem (
+      .clk(clk), .rst_n(rst_n_sync), .sel_me(sel), .ld_addr(rise[1]), .ld_data(rise[2]),
+      .wr(mem_we), .rd(mem_re), .chase(chase), .byte_in(ui_in), .rdata_q(rdata_b),
+      .addr_o(addr), .wdata_o(wdata)
   );
 
 `ifdef FLOP128
@@ -122,7 +110,7 @@ module tt_um_prot_emu_SAP (
   end
   always @(posedge clk or negedge rst_n_sync) begin
     if (!rst_n_sync) rdata_f <= 32'h0;
-    else if (sel & mem_re & ~mem_we) rdata_f <= fmem[chase ? rdata_f[6:0] : addr[6:0]];
+    else if (sel & mem_re) rdata_f <= fmem[addr[6:0]];
   end
 `else
   wire [31:0] rdata_f = 32'h0;
@@ -137,5 +125,65 @@ module tt_um_prot_emu_SAP (
 
   // List all unused inputs to prevent warnings
   wire _unused = &{ena, ui_in[7:3], rise[7:5], 1'b0};  // CHASE, VIEW and SEL are levels
+
+endmodule
+
+// One SRAM macro plus the flops that drive it. Address, data and control are
+// registered here, so the placer puts them next to the macro; the output is
+// captured by a local register (rdata_q). CHASE drives the macro's address from
+// its own output, combinationally: the engine's fetch-ahead path.
+module mem_port #(
+    parameter AW = 9
+) (
+    input  wire          clk,
+    input  wire          rst_n,
+    input  wire          sel_me,   // this macro is selected
+    input  wire          ld_addr,  // shift byte_in into the address
+    input  wire          ld_data,  // shift byte_in into the write data
+    input  wire          wr,       // write strobe
+    input  wire          rd,       // read strobe
+    input  wire          chase,    // level: read mem[dout] every cycle
+    input  wire [7:0]    byte_in,
+    output reg  [31:0]   rdata_q,
+    output wire [AW-1:0] addr_o,
+    output wire [31:0]   wdata_o
+);
+
+  reg [AW-1:0] addr;
+  reg [31:0]   wdata;
+  reg          en_q, we_q, chase_q, rd_d;
+  wire [31:0]  dout;
+
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      addr    <= {AW{1'b0}};
+      wdata   <= 32'h0;
+      en_q    <= 1'b0;
+      we_q    <= 1'b0;
+      chase_q <= 1'b0;
+      rd_d    <= 1'b0;
+      rdata_q <= 32'h0;
+    end else begin
+      if (sel_me & ld_addr) addr  <= {addr[AW-9:0], byte_in};
+      if (sel_me & ld_data) wdata <= {wdata[23:0], byte_in};
+      en_q    <= sel_me & (wr | rd | chase);
+      we_q    <= sel_me & wr;
+      chase_q <= sel_me & chase;
+      rd_d    <= en_q & ~we_q;
+      if (rd_d) rdata_q <= dout;
+    end
+  end
+
+  assign addr_o  = addr;
+  assign wdata_o = wdata;
+
+  prog_mem #(.AW(AW)) u_pm (
+      .clk  (clk),
+      .en   (en_q),
+      .we   (we_q),
+      .addr (chase_q ? dout[AW-1:0] : addr),
+      .wdata(wdata),
+      .rdata(dout)
+  );
 
 endmodule

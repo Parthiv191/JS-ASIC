@@ -52,8 +52,8 @@
       "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x32_c2_bm_bist.lef"],
       "vh": ["dir::../flow/blackbox-RM_IHPSG13_1P_512x32_c2_bm_bist.v"],
       "instances": {
-        "u_mem.u_sram": {"location": [405.92, 483.84], "orientation": "N"},
-        "u_fmem.u_sram": {"location": [855.52, 483.84], "orientation": "N"}
+        "u_mem.u_pm.u_sram": {"location": [405.92, 483.84], "orientation": "N"},
+        "u_fmem.u_pm.u_sram": {"location": [855.52, 483.84], "orientation": "N"}
       },
       "lib": {
         "*typ*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_typ_1p20V_25C.lib"],
@@ -66,10 +66,10 @@
   "//": "Three supply pins per macro: VDD!, VSS! and the bit-array supply VDDARRAY!.",
   "//": "An unconnected VDDARRAY! powers up but never retains a bit.",
   "PDN_MACRO_CONNECTIONS": [
-    "u_mem.u_sram VPWR VGND VDD! VSS!",
-    "u_mem.u_sram VPWR VGND VDDARRAY! VSS!",
-    "u_fmem.u_sram VPWR VGND VDD! VSS!",
-    "u_fmem.u_sram VPWR VGND VDDARRAY! VSS!"
+    "u_mem.u_pm.u_sram VPWR VGND VDD! VSS!",
+    "u_mem.u_pm.u_sram VPWR VGND VDDARRAY! VSS!",
+    "u_fmem.u_pm.u_sram VPWR VGND VDD! VSS!",
+    "u_fmem.u_pm.u_sram VPWR VGND VDDARRAY! VSS!"
   ],
 
   "//": "The macro's power pins are Metal4-only and TopMetal1 is not on the precheck's CMOS5L",
