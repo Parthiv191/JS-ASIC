@@ -91,6 +91,9 @@
   "//": "place and real wire loads. The two *_CORNERS lists make any slew or cap violation fail",
   "//": "the flow; the default [\"\"] matches no corner and only warns.",
   "RUN_POST_GRT_DESIGN_REPAIR": 1,
+  "//": "Experiment: buffer long nets so the macro pins (A_DOUT drives at most 64 fF) see short wires.",
+  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
+  "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
   "MAX_CAP_VIOLATION_CORNERS": ["*"],
 
