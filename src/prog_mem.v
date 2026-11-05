@@ -1,13 +1,13 @@
 `default_nettype none
 
-// SRAM experiment E1: one RM_IHPSG13_1P_512x32 macro = 512 words x 32 bits,
+// SRAM experiment E2: one RM_IHPSG13_1P_1024x32 macro = 1024 words x 32 bits,
 // so one 32-bit ISA word per access without pairing two 16-bit macros.
 //
 // Read latency is one cycle: `rdata` shows mem[addr] after the clock edge that
 // samples `en` (with `we` low), and holds that value until the next read.
 // Single port: a cycle either reads or writes. A write does not update `rdata`.
 module prog_mem #(
-    parameter AW = 9
+    parameter AW = 10
 ) (
     input  wire          clk,
     input  wire          en,     // access this cycle
@@ -17,7 +17,7 @@ module prog_mem #(
     output wire [31:0]   rdata
 );
 
-  RM_IHPSG13_1P_512x32_c2_bm_bist u_sram (
+  RM_IHPSG13_1P_1024x32_c2_bm_bist u_sram (
       .A_CLK      (clk),
       .A_MEN      (en),
       .A_WEN      (we),

@@ -1,6 +1,6 @@
 // ------------------------------------------------------
 //
-//		Copyright 2023 IHP PDK Authors
+//		Copyright 2025 IHP PDK Authors
 //
 //		Licensed under the Apache License, Version 2.0 (the "License");
 //		you may not use this file except in compliance with the License.
@@ -14,12 +14,12 @@
 //		See the License for the specific language governing permissions and
 //		limitations under the License.
 //		
-//		Generated on Wed Apr  2 16:02:47 2025		
+//		Generated on Thu Aug 21 20:48:28 2025		
 //
 // ------------------------------------------------------ 
 `timescale 1ns/10ps
 `celldefine
-module RM_IHPSG13_1P_512x32_c2_bm_bist (
+module RM_IHPSG13_1P_1024x32_c2_bm_bist (
     A_CLK,
     A_MEN,
     A_WEN,
@@ -43,7 +43,7 @@ module RM_IHPSG13_1P_512x32_c2_bm_bist (
     input A_MEN;
     input A_WEN;
     input A_REN;
-    input [8:0] A_ADDR;
+    input [9:0] A_ADDR;
     input [31:0] A_DIN;
     input A_DLY;
     output [31:0] A_DOUT;
@@ -53,7 +53,7 @@ module RM_IHPSG13_1P_512x32_c2_bm_bist (
     input A_BIST_MEN;
     input A_BIST_WEN;
     input A_BIST_REN;
-    input [8:0] A_BIST_ADDR;
+    input [9:0] A_BIST_ADDR;
     input [31:0] A_BIST_DIN;
     input [31:0] A_BIST_BM;
 
@@ -80,7 +80,7 @@ module RM_IHPSG13_1P_512x32_c2_bm_bist (
 
     SRAM_1P_behavioral_bm_bist #(
 	.P_DATA_WIDTH(32),
-	.P_ADDR_WIDTH(9)
+	.P_ADDR_WIDTH(10)
 	) i_SRAM_1P_behavioral_bm_bist (
                     .A_CLK(A_CLK),
                     .A_MEN(A_MEN),
@@ -107,14 +107,14 @@ module RM_IHPSG13_1P_512x32_c2_bm_bist (
     wire A_MEN_DELAY;
     wire A_WEN_DELAY;
     wire A_REN_DELAY;
-    wire [8:0] A_ADDR_DELAY;
+    wire [9:0] A_ADDR_DELAY;
     wire [31:0] A_DIN_DELAY;
     wire [31:0] A_BM_DELAY;
     wire A_BIST_CLK_DELAY;
     wire A_BIST_MEN_DELAY;
     wire A_BIST_WEN_DELAY;
     wire A_BIST_REN_DELAY;
-    wire [8:0] A_BIST_ADDR_DELAY;
+    wire [9:0] A_BIST_ADDR_DELAY;
     wire [31:0] A_BIST_DIN_DELAY;
     wire [31:0] A_BIST_BM_DELAY;
 
@@ -129,7 +129,7 @@ module RM_IHPSG13_1P_512x32_c2_bm_bist (
 
     SRAM_1P_behavioral_bm_bist #(
 	.P_DATA_WIDTH(32),
-	.P_ADDR_WIDTH(9)
+	.P_ADDR_WIDTH(10)
 	) i_SRAM_1P_behavioral_bm_bist (
                     .A_CLK(A_CLK_DELAY),
                     .A_MEN(A_MEN_DELAY),

@@ -9,7 +9,7 @@ SRC_DIR = $(PWD)/../src
 PROJECT_SOURCES = project.v uart_tx.v prog_mem.v
 
 # PDK behavioural models of the SRAM macro (simulation only, see sram/README.md)
-SRAM_MODELS = $(PWD)/sram/RM_IHPSG13_1P_512x32_c2_bm_bist.v $(PWD)/sram/RM_IHPSG13_1P_core_behavioral_bm_bist.v
+SRAM_MODELS = $(PWD)/sram/RM_IHPSG13_1P_1024x32_c2_bm_bist.v $(PWD)/sram/RM_IHPSG13_1P_core_behavioral_bm_bist.v
 
 ifneq ($(GATES),yes)
 

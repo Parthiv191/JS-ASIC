@@ -30,7 +30,7 @@ module tt_um_prot_emu_SAP (
     input  wire       rst_n     // reset_n - low to reset
 );
 
-  localparam AW = 9;
+  localparam AW = 10;
 
   // Reset asserts asynchronously and releases on a clock edge. Every flop
   // then resets through its own RESET_B pin, not through logic in front of D.

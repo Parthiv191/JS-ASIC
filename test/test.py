@@ -93,7 +93,7 @@ async def test_send_several_bytes(dut):
 # ui_in[1:0] of the last read word (ui_in[2] = 1: the flop memory, if built). uio_in[7] SEL
 # (level): 0 = program memory u_mem, 1 = fuzzer memory u_fmem.
 ADDR, DATA, WRITE, READ, CHASE, VIEW, SEL = (1 << i for i in range(1, 8))
-AW = 9  # must match project.v
+AW = 10  # must match project.v
 DEPTH = 1 << AW
 
 
