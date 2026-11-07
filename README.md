@@ -33,7 +33,7 @@ Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
 | `test/` | cocotb tests, RTL and gate-level ([test/README.md](test/README.md)) |
 | `flow/` | blackbox of the SRAM macro for the lint step |
 | `toolchain/` | Python ISA, compiler and reference model ([toolchain/README.md](toolchain/README.md)) |
-| `docs/design/isa-v0.md` | the cycle-level ISA contract |
+| `docs/design/isa.md` | the cycle-level ISA contract (v1) |
 | `docs/design/bus-fuzzer.md` | the learning bus fuzzer design |
 | `docs/superpowers/plans/` | the implementation plan, its phases and open decisions |
 
