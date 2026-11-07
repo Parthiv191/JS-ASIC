@@ -90,6 +90,11 @@
   "//": "place and real wire loads. The two *_CORNERS lists make any slew or cap violation fail",
   "//": "the flow; the default [\"\"] matches no corner and only warns.",
   "RUN_POST_GRT_DESIGN_REPAIR": 1,
+  "//": "Buffer every net longer than 120 um. One driver feeds the same pin on both macros, ~270 um",
+  "//": "apart, and run de24585 still failed max slew (A_REN 1.31 ns vs 0.595) and max cap on A_DOUT.",
+  "//": "The same setting cleared the last violations in the SRAM experiments (run 41994812789).",
+  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
+  "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
   "MAX_CAP_VIOLATION_CORNERS": ["*"],
 
