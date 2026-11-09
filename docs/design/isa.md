@@ -1,6 +1,6 @@
 # ISA v1: cycle-level contract
 
-Status: v1 r2 (2026-11-05), owner: verification role. This is the contract between the compiler, the Python
+Status: v1 (2026-11-05), owner: verification role. This is the contract between the compiler, the Python
 model (`toolchain/emu`), the fuzzer and the RTL. Where the RTL and the model disagree, this doc
 decides. Where it is silent, the model decides and this doc gets updated. Why each rule exists:
 `decisions.md`.
@@ -37,7 +37,7 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
 - **Step owner codes:** `0 P0`, `1 P1`, `2 SHARED` (OD only), `3` reserved.
   - An engine **does** a step iff `role ≠ MON` and (`owner == role` or `owner == SHARED`).
   - Otherwise it **follows** the step.
-- **Line config:** `kind ∈ {PP, OD}`, `owner ∈ {P0, P1, SHARED (OD only), SWITCHED (reserved,
+- **Line config:** `kind ∈ {PP (push-pull), OD (open-drain)}`, `owner ∈ {P0, P1, SHARED (OD only), SWITCHED (reserved,
   for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`.
   - `gated` (PP only): the owner drives the line only from its first owned step on it until
     the next STOP on a SELECT bus, or an abort; otherwise the line is released. For example, SPI
@@ -402,7 +402,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 | Rule | Check |
 |---|---|
 | `T1-sample` | Follower sample of slot `k`: `ceil(d·(A + (k+1)·P)) + QUANT + ISSUE < P//2` |
-| `T2-window` | A bounded COND, and the accumulated CHK windows: `min ≤ nom − ceil(d·(A + nom)) − QUANT` (COND: only if `min > 0`) and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. D2: a CHK unclocked XFER at `A = 0` is rejected; drop `check` or put a timed step first. |
+| `T2-window` | A bounded COND, and the accumulated CHK windows: `min ≤ nom − ceil(d·(A + nom)) − QUANT` (COND: only if `min > 0`) and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. The anchor rule: a CHK unclocked XFER at `A = 0` is rejected; drop `check` or put a timed step first. |
 | `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. |
 | `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. Stretch lanes: `H ≥ EDGE_LAT + 2`. `ldelay ≤ H − EDGE_LAT − 2`. |
 | `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample) |
@@ -473,5 +473,5 @@ plus every event, sample point and branch outcome. Co-simulation compares at ste
 against the RTL trace port (architecture §5).
 
 ## 8. History
-The v0 text (r2/r3 notes, Task 7 audit notes, the mapping from the PIO-style team draft) is in git
+The v0 text (review notes, the Task 7 audit, the mapping from the PIO-style team draft) is in git
 history: `isa-v0.md` at `de24585`.

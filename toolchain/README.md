@@ -2,8 +2,8 @@
 
 Python toolchain for the role-switching protocol emulator. It is the single
 reference for the ISA (`emu/isa.py`; the contract is `../docs/design/isa.md`),
-the description language and compiler, the cycle-level reference model and the
-coverage-guided fuzzer.
+the description language and compiler, and the cycle-level reference model. A
+coverage-guided fuzzer will live here too.
 
 ```sh
 python3 -m venv ../.venv && ../.venv/bin/pip install -e ".[dev]"

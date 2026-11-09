@@ -1,6 +1,6 @@
 # Chip spec: what the chip does
 
-Status: v1 r2 (2026-11-05), owner: verification role. Hardware: `architecture.md`. Instructions:
+Status: v1 (updated 2026-11-09), owner: verification role. Hardware: `architecture.md`. Instructions:
 `isa.md`. Why: `decisions.md`.
 
 ## 1. Purpose and challenge fit
@@ -19,6 +19,8 @@ emulator of UART, SPI and I2C. How the design covers that:
 | Open source, documented AI use | repo + `decisions.md` + the writeup |
 
 ## 2. Use cases
+
+Roles: P0 = party 0 (e.g. the controller), P1 = party 1 (e.g. the target), MON = monitor (isa §2).
 
 | Use | Example | Roles |
 |---|---|---|
@@ -39,15 +41,15 @@ emulator of UART, SPI and I2C. How the design covers that:
 
 One protocol runs at a time.
 
-## 4. Scope tiers and cut order (keeps us on track for Jan 18)
+## 4. Scope tiers, cut order and milestones (deadline Jan 18; we submit by Jan 17)
 
 | Tier | Contents | Rule |
 |---|---|---|
 | **Core (never cut)** | 2 engines + the ISA core; UART; SPI with CS (SELECT bus); I2C (START/STOP, let-go, readback, owner-side stretching, lead blocks, `BR ROLE`); MEASURE L1; capture log; host SPI; DBG_HALT + readback, SCRATCH, TESTMODE, LOOPBACK, GPIO override; verification (model co-sim, GL test, formal on small blocks) | must pass on the FPGA before Plus or Novel RTL starts |
 | **Novel** | on-chip fuzz unit | **gate: Core passes on the FPGA by Dec 15**, and the model shows learning beats the baseline. Otherwise ship the host-driven fuzzer (same algorithm). |
 | **Plus** | CRC unit; DBG_STEP, DBG_EXEC, BREAK_PC; standalone boot + REPORT; MEASURE L2 (`PROF`, autobaud) | after Core is verified, in that order |
-| **Stretch** | USB-LS (CODEC lane, SE0 bus), sniffer first | only if everything above is done and area allows |
-| **Later (no v1 hardware)** | clock divider (signals > 1.3 ms per profile), SWITCHED PP lines (full-speed SWD, USB device), WAIT_ANY/CHOICE, ARB, a 3-line TAP lane | reserved in the encoding |
+| **Stretch** | low-speed USB, sniffer first. It needs a CODEC lane (a line encoder/decoder) and the SE0 bus kind (USB's end-of-packet: both lines low); isa §4.7, §4.10 | only if everything above is done and area allows |
+| **Later (no v1 hardware)** | clock divider (signals > 1.3 ms per profile), SWITCHED push-pull (PP) lines (full-speed SWD, USB device), WAIT_ANY/CHOICE, ARB, a 3-line TAP lane | reserved in the encoding |
 
 **Cut order if behind:** Stretch → PROF → standalone/REPORT → Plus debug → CRC → fuzz-unit RTL
 (host-driven fuzzing stays) → never Core.
@@ -56,9 +58,9 @@ One protocol runs at a time.
 
 | Milestone | By | Done when |
 |---|---|---|
-| M1: first end-to-end chip | Nov 29 | one engine, host SPI and the program SRAM run a UART program; hardened, precheck and GL clean; co-sim passes on UART |
-| M2: Core complete | Dec 13 | the Core tier passes on the FPGA (the Dec 15 gate) |
-| Improvement rounds | Dec 14 – Jan 10 | Novel (if the gate passed), then Plus in the order above, then Stretch; each round ends submittable |
+| M1: first end-to-end chip | Nov 29 | one engine, host SPI and the program SRAM run a UART program; hardened, precheck and GL clean; co-sim passes on UART (so the model's UART path must be on ISA v1 first) |
+| M2: Core complete | Dec 13 | the Core tier passes on the FPGA. That meets the Dec 15 gate with two days to spare. |
+| Improvement rounds | from M2 to Jan 10 | Novel first if the gate is met (Core on the FPGA by Dec 15, and the model shows learning beats the baseline), then Plus in the order above, then Stretch. Each round ends submittable. |
 | Freeze and submit | Jan 11–17 | final harden, full GL regression, final docs; submit by Jan 17 |
 
 - Every merge keeps gds, precheck and the GL test green (and co-sim, once it exists). The
@@ -74,10 +76,12 @@ answer).
 
 | Protocol | Roles | Limits |
 |---|---|---|
-| UART 8N1 | tx, rx, mon (autobaud in Plus) | 794 baud to ~3.5 Mbaud (bit ≥ 14 cycles by T1). Back-to-back frames need bit ≥ 19 cycles (~2.6 Mbaud, T5-watch). At ≤ 1% drift, ~5 Mbaud. |
+| UART 8N1 | tx, rx, mon (autobaud in Plus) | 794 baud to ~3.5 Mbaud (bit ≥ 14 cycles, isa §6 rule T1). Back-to-back frames need bit ≥ 19 cycles (~2.6 Mbaud, isa §6 rule T5-watch). At ≤ 1% drift, ~5 Mbaud. |
 | SPI modes 0–3 | controller, target, mon; CS framing via SELECT | Controller: H ≥ 2 by rule; the real limit is the device. Target mode 3: H ≥ 6 (4.17 MHz) with one `BR ROLE` between bytes. Target mode 0: H ≥ 7 unrolled, ≥ 9 with a branch loop (~2.8 MHz). |
 | I2C | controller, target, mon; repeated START, NACK, mid-byte STOP, address match | 100 kHz (H = 250). Fast mode at H = 65 (≤ 385 kHz); with stretch tracking and a 300 ns rise time, the real rate is ~345 kHz. Data hold ~300 ns (`ldelay`). In Fast mode the repeated-START path allows at most ~1 instruction before `abort_pc`'s COND. **As target the chip doesn't stretch** (UNDERRUN sends 0xFF). |
-| Paper-checked (Later tier) | PS/2 host/MON, JTAG controller, SWD (OD, ≤ ~1 MHz), 1-Wire | fit the ISA (protocol review, 11-05) |
+| Paper-checked (Later tier) | PS/2 host/MON, JTAG controller, SWD (open-drain, ≤ ~1 MHz), 1-Wire | fit the ISA (protocol review, 11-05) |
+
+H = a clock half-period, in engine cycles.
 
 ## 6. Not on the chip
 

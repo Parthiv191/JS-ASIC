@@ -21,3 +21,7 @@ __pycache__/
 *.egg-info/
 .hypothesis/
 .pytest_cache/
+
+# personal Claude Code instructions (role files are handed out, never committed)
+CLAUDE.md
+CLAUDE.local.md

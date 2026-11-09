@@ -1,6 +1,6 @@
 # Chip architecture
 
-Status: v1 r3 (2026-11-05), owner: verification role. What the chip is for: `chip-spec.md`.
+Status: v1 (updated 2026-11-09), owner: verification role (§9: devOps role). What the chip is for: `chip-spec.md`.
 Instructions: `isa.md`. Why: `decisions.md`. Process: IHP CMOS5L via Tiny Tapeout, 8x4 tiles
 (core ~1.2M µm², scaled from 6x4's ~902K; the first 8x4 harden gives the exact figure), 50 MHz
 target. Tier tags (Core/Plus/…) as in chip-spec §4.
@@ -42,16 +42,16 @@ target. Tier tags (Core/Plus/…) as in chip-spec §4.
 | Until RUN (and during boot), every `uio` is an input. `uo_out` reset levels: MISO 0, IRQ 0, ERR 0, flash SCK 0, flash CS_N 1, flash MOSI 0, REPORT 1, ACT 0. | never fight a device; UART and flash idle correctly |
 | **LOOPBACK** (PIN_CTRL): `uio_oe` is forced to 0, and undriven lines read 1 inside the chip | self-test with no board and no pull-ups |
 | **TESTMODE** strap (ui_in[7] high at reset). With ui_in[6] = 1, `uio` outputs the registered `ui_in` (all outputs). With ui_in[6] = 0, `uo_out` shows the registered `uio_in`. | tests clock, reset and every pad with no SPI and no SRAM |
-| Keep the logic in front of `uo_out` shallow (TT adds ~4 ns of external delay) | E1's worst setup path went to an output pin |
+| Keep the logic in front of `uo_out` shallow (TT adds ~4 ns of external delay) | the SRAM trial build's worst setup path went to an output pin |
 
 ## 3. Memory
 
-| Column | Macro | x, y (µm) | Clients |
+| Column | Macro | x, y (µm, from the 6x4 trial) | Clients |
 |---|---|---|---|
 | 1 | `RM_IHPSG13_1P_512x32_c2_bm_bist` | 405.92, 483.84 | engine 0 when `ph = 0`, engine 1 when `ph = 1` (`isa.md` §4.0); the host only while both are stopped or halted |
 | 2 | same | 855.52, 483.84 | **one at a time** (`MEM2_MODE`): 0 = the fuzz unit · 1 = the capture writer + REPORT reader · host access when idle |
 
-- This layout is **proven**: run 41994812789 passed precheck and the GL test.
+- This layout passed precheck and the GL test on 6x4 (run 41994812789). Re-check it on 8x4.
 - `A_DOUT` drives only flops (both prefetch registers and the host read register), which
   respects its ≤ 64 fF limit.
 - **Column 2 in capture mode** is a record FIFO. The writer appends; REPORT drains behind it in
@@ -83,7 +83,8 @@ target. Tier tags (Core/Plus/…) as in chip-spec §4.
 - The read mux is a 2-cycle (multicycle) path. Large readable blocks use index windows, which
   keeps the mux small.
 
-**Register map** (16-bit little-endian at even addresses; W = write-only, R = readable):
+**Register map** (16-bit little-endian at even addresses; W = write-only, R = readable, W1 = write 1 to
+trigger, W1C = write 1 to clear):
 
 | Addr | Contents |
 |---|---|
@@ -195,23 +196,23 @@ self-contained bring-up rig.
 | Rule | Evidence |
 |---|---|
 | Macros: one per column, x = 91.2 + 44.96·k, never over x = 366.6–370.7 | `src/pdn_cfg.tcl` bridges run edge to edge |
-| ≥ ~20 µm between a macro and the edge its VDDARRAY! bridges run to | run 41975804926 (PSM-0069) |
+| ≥ ~20 µm between a macro and the edge its VDDARRAY! bridges run to | run 41975804926 (the power-grid check failed, error PSM-0069) |
 | Macro signal pins are on the bottom edge. Logic goes below the macros; the TT pins are top-left. | LEF |
 | One client per macro, with its flops next to it; `A_DOUT` drives only flops | run 41975807753 (slew/cap) |
 | Buffer nets > 120 µm (`DESIGN_REPAIR_MAX_WIRE_LENGTH`) | run 41980432163 |
-| No flop memories > ~32 words | E1F: 128 words ≈ 200K µm², the 2 h CI limit |
-| RTL timing rules: 24-bit age counters (one compare per check); registered window thresholds; no multipliers; the abort decision registered; CRC 8 bits/cycle; a pipelined host read mux; a register at every block boundary. Estimated worst path: COND do `max(now, tb + nom)` ≈ 11–14 ns. | round-2 hardware review |
+| No flop memories > ~32 words | the flop-memory trial: 128 words ≈ 200K µm², hitting the 2 h CI limit |
+| RTL timing rules: 24-bit age counters (one compare per check); registered window thresholds; no multipliers; the abort decision registered; CRC 8 bits/cycle; a pipelined host read mux; a register at every block boundary. Estimated worst path: COND do `max(now, tb + nom)` ≈ 11–14 ns. | the Nov 5 hardware review |
 
-**First-harden checks** (devOps). E1 had almost no logic, so these are still open:
+**First-harden checks** (devOps). The SRAM trial had almost no logic, so these are still open:
 
 | Check | How |
 |---|---|
 | **Routing congestion** from the macro power bridges | the downward VDD!/VSS! bridges take up to ~50% of Metal4 across ~65% of the 6x4 die width (re-check on 8x4). Count the bridge shapes in the DEF. If congested, end the downward bridges a few rows below the halo and re-run check_power_grid. |
 | Fail on global-route overflow | the template sets `GRT_ALLOW_CONGESTION = 1`, which lets overflow pass silently |
 | Placement blockages | the ~13 µm sliver between the macros, the right-edge sliver, the rows above the macros |
-| **IR drop** | one VPWR/VGND pin pair at x ≈ 368 feeds the right two-thirds of the 6x4 die, and more of the wider 8x4 die. Run PSM with realistic activity. If needed, promote the full-height straps left of macro 1 to pins (verify how TT connects power). |
+| **IR drop** | one VPWR/VGND pin pair at x ≈ 368 feeds the right two-thirds of the 6x4 die, and more of the wider 8x4 die. Run OpenROAD's power-grid analysis (PSM) with realistic activity. If needed, promote the full-height straps left of macro 1 to pins (verify how TT connects power). |
 
-**Area estimate (r3)**, at E1F's ~49 µm² per flop-bit and 15.6 µm²/cell +20%:
+**Area estimate**, at the flop-memory trial's ~49 µm² per flop-bit and 15.6 µm²/cell +20%:
 
 | Block | Area |
 |---|---|
@@ -236,5 +237,6 @@ the gate. Levers, in order, if it comes in over:
 |---|---|
 | Real engine area and the worst-path timing | first synthesis (devOps) |
 | Congestion and IR drop with full logic | first full harden |
+| The macro positions and §9 rules, which come from 6x4 | first 8x4 harden (devOps) |
 | TT demo-board facts | §8 |
 | Clock | 50 MHz target, 40 MHz fallback |

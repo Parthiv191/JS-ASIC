@@ -12,7 +12,7 @@ Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
 
 ## Status (2026-11-09)
 
-- **Design:** ISA v1, the architecture and the scope are decided ([docs/design/](docs/design/README.md)).
+- **Design:** ISA v1, the architecture and the scope are decided, apart from the items marked Open ([docs/design/](docs/design/README.md)).
   Milestones: a first end-to-end chip by Nov 29, Core complete by Dec 13, then improvement rounds
   until the Jan 17 submission ([chip-spec §4](docs/design/chip-spec.md)).
 - **On the chip today:** a bring-up design, a fixed UART transmitter and a trial harness for the

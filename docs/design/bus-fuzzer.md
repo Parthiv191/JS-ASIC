@@ -1,9 +1,10 @@
 # Learning bus fuzzer ("AFL for wires")
 
-Status: design r4 (2026-11-05), owner: devOps role (algorithm) / verification role (chip integration).
-- r4 puts storage on SRAM column 2 and gives the fingerprint its own folder.
+Status: design (2026-11-05), owner: devOps role. The FZ ops' semantics and cycle costs (§3) are
+program-visible, so changes to them need the verification role's OK.
+- Storage is on SRAM column 2, and the fingerprint has its own CRC unit.
 - Hang inputs are saved and pinned at the abort; costs are totals; determinism rules are added.
-- Nothing is built yet. The reference model's `FuzzUnit` (`emu/model/fuzzunit.py`, Task 19)
+- Nothing is built yet. The reference model's `FuzzUnit` (`toolchain/emu/fuzz/`, §6 stage 1)
   becomes the golden model for the RTL.
 
 ## 1. Idea
@@ -43,15 +44,15 @@ Requirements: `MEM2_MODE = 0` (column 2 belongs to the fuzz unit), and a complet
 ### 2.1 Storage
 
 **Column 2** is one `RM_IHPSG13_1P_512x32_c2_bm_bist` (2 KB, one access per cycle, read data
-one cycle later). Its layout passed precheck and the GL test (run 41994812789).
+one cycle later). Its layout passed precheck and the GL test on 6x4 (run 41994812789).
 
 | Region | Size | Notes |
 |---|---|---|
 | Corpus | 32 × 32 B = 1 KB | 8 words per slot |
-| Bitmap | 8192 bits = 1 KB | lost fingerprints ≈ n/2m: ~0.6% at n = 100 behaviours |
+| Bitmap | 8192 bits = 1 KB | lost fingerprints ≈ n/2m (n = distinct behaviours, m = bitmap bits): ~0.6% at n = 100 |
 
 Why 32 slots: the metadata and the lowest-energy comparator tree are flops and grow with the
-slot count. 32 matches the model, where Task 22's experiments run.
+slot count. 32 matches the model, where the learning experiments run.
 
 Flops outside the macro: staging 256, metadata 352, mask 32, findings 64, the token queue 32,
 the event mask 11, plus the LFSR, fingerprint and pointers. That is **≈ 800 flops**, ~95K µm²
@@ -161,7 +162,7 @@ loop:  reset prefix                      ; device to a known state (steps, or RA
 
 ## 6. Build stages
 
-1. **Model:** `emu/model/fuzzunit.py` plus the `FZ` ops, against emulated devices with planted
+1. **Model:** `toolchain/emu/fuzz/` plus the `FZ` ops, against emulated devices with planted
    hidden behaviour. Measure learning against a no-feedback baseline.
 2. **Host-driven:** the same algorithm with the host doing the scheduling, on the Basys 3. This
    is the fallback if stage 3 is cut (`chip-spec.md` §4).

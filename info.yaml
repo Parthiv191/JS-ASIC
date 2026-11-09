@@ -3,7 +3,7 @@ project:
   title:        "Protocol Emulator"      # Project title
   author:       "Parthiv"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "Tiny programmable processor that speaks UART/SPI/I2C in firmware (week 1: hardcoded UART TX)"      # One line description of what your project does
+  description:  "Programmable protocol emulator: UART, SPI and I2C in firmware, in any role, with a learning bus fuzzer (bring-up design for now)"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     50000000       # Clock frequency in Hz (or 0 if not applicable)
 
