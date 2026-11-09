@@ -470,8 +470,8 @@ per-iteration event mask:
   cut by a bus exit emits no DATA record.
 
 **Model trace.** The model also emits `StepRecord(pc, op, mode, value, cycle, tb)` per timed step,
-plus every event, sample point and branch outcome. Co-simulation compares at step boundaries,
-against the RTL trace port (architecture §5).
+plus every instruction start, event, MARK, sample point and branch outcome. Co-simulation
+compares each of them against the RTL trace port (architecture §5).
 
 ## 8. History
 The v0 text (review notes, the Task 7 audit, the mapping from the PIO-style team draft) is in git
