@@ -1,9 +1,9 @@
 # Chip architecture
 
 Status: v1 r3 (2026-11-05), owner: verification role. What the chip is for: `chip-spec.md`.
-Instructions: `isa.md`. Why: `decisions.md`. Process: IHP CMOS5L via Tiny Tapeout, 6x4 tiles
-(die 1289.28 × 710.64 µm, core ~902K µm²), 50 MHz target. Tier tags (Core/Plus/…) as in
-chip-spec §4.
+Instructions: `isa.md`. Why: `decisions.md`. Process: IHP CMOS5L via Tiny Tapeout, 8x4 tiles
+(core ~1.2M µm², scaled from 6x4's ~902K; the first 8x4 harden gives the exact figure), 50 MHz
+target. Tier tags (Core/Plus/…) as in chip-spec §4.
 
 ## 1. Blocks
 
@@ -206,10 +206,10 @@ self-contained bring-up rig.
 
 | Check | How |
 |---|---|
-| **Routing congestion** from the macro power bridges | the downward VDD!/VSS! bridges take up to ~50% of Metal4 across ~65% of the die width. Count the bridge shapes in the DEF. If congested, end the downward bridges a few rows below the halo and re-run check_power_grid. |
+| **Routing congestion** from the macro power bridges | the downward VDD!/VSS! bridges take up to ~50% of Metal4 across ~65% of the 6x4 die width (re-check on 8x4). Count the bridge shapes in the DEF. If congested, end the downward bridges a few rows below the halo and re-run check_power_grid. |
 | Fail on global-route overflow | the template sets `GRT_ALLOW_CONGESTION = 1`, which lets overflow pass silently |
 | Placement blockages | the ~13 µm sliver between the macros, the right-edge sliver, the rows above the macros |
-| **IR drop** | one VPWR/VGND pin pair at x ≈ 368 feeds the right two-thirds of the die. Run PSM with realistic activity. If needed, promote the full-height straps left of macro 1 to pins (verify how TT connects power). |
+| **IR drop** | one VPWR/VGND pin pair at x ≈ 368 feeds the right two-thirds of the 6x4 die, and more of the wider 8x4 die. Run PSM with realistic activity. If needed, promote the full-height straps left of macro 1 to pins (verify how TT connects power). |
 
 **Area estimate (r3)**, at E1F's ~49 µm² per flop-bit and 15.6 µm²/cell +20%:
 
@@ -220,9 +220,10 @@ self-contained bring-up rig.
 | shared tables | ~40K |
 | fuzz unit (~800 flops + comparator tree, byte muxes, shifter) | ~95K |
 | host + regs + boot + capture + REPORT + debug | ~55K |
-| **total** | **~550K (~61%)** |
+| **total** | **~550K (~46% of 8x4; was ~61% of 6x4)** |
 
-That's above the 60% target, so the first engine synthesis is the gate. Levers, in order:
+8x4 puts it under the 60% target, but the estimate is rough, so the first engine synthesis is still
+the gate. Levers, in order, if it comes in over:
 1. CODEC out.
 2. PROF out.
 3. 16 fuzz slots.
@@ -235,6 +236,5 @@ That's above the 60% target, so the first engine synthesis is the gate. Levers, 
 |---|---|
 | Real engine area and the worst-path timing | first synthesis (devOps) |
 | Congestion and IR drop with full logic | first full harden |
-| 8x4 tiles | Jane Street's answer; the extra width goes to logic first |
 | TT demo-board facts | §8 |
 | Clock | 50 MHz target, 40 MHz fallback |
