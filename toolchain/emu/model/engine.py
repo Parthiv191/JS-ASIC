@@ -1,4 +1,4 @@
-"""Cycle-level engine interpreter (docs/design/isa-v0.md §4).
+"""Cycle-level engine interpreter: ISA v1 encoding, v0 execution (docs/design/isa-v0.md §4).
 
 Each engine runs one Python generator. Every `yield` ends one engine cycle; on
 resume `self.now` has advanced by one and `self.inp`/`self.prev_inp` hold this
@@ -12,8 +12,9 @@ from typing import Iterator
 
 from ..image import Image
 from ..isa import (
-    EDGE_LAT, F_ABORT, F_CHK, F_REG, F_RESYNC, INF, QUANT, REG_MASK, SYNC_LAT, AluOp, BrCond,
-    CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, reg_of, unpack_role_if, unpack_xfer,
+    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, AluOp,
+    BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, li_imm, reg_of, unpack_cond, unpack_role_if,
+    unpack_xfer,
 )
 
 VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE"})
@@ -69,7 +70,7 @@ class Engine:
         self.instrs: list[Instr] = image.instrs()
         self.lines = image.lines
         self.pc = 0
-        self.regs = [0, 0, 0, 0]
+        self.regs = [0] * NUM_REGS
         self.tb = 0
         self.to = False            # timeout flag (isa-v0 §4)
         self.anchor = 0            # cycle of the last re-anchoring event (COND, clocked XFER, abort)
@@ -175,7 +176,7 @@ class Engine:
             ins = self.instrs[self.pc]
             handler = getattr(self, f"_op_{ins.op.name.lower()}", None)
             if handler is None:
-                raise NotImplementedError(f"{ins.op.name} is reserved in ISA v0 (pc {self.pc})")
+                raise NotImplementedError(f"{ins.op.name} is not in the v0 model yet (pc {self.pc})")
             yield from handler(ins)
 
     def _halt(self) -> Gen:
@@ -192,33 +193,35 @@ class Engine:
         yield
 
     def _op_li(self, ins: Instr) -> Gen:
-        self.regs[ins.pin & 3] = ins.operand
+        self.regs[ins.rd] = li_imm(ins)
         self.pc += 1
         yield
 
     def _op_alu(self, ins: Instr) -> Gen:
-        a = self.regs[ins.pin >> 2 & 3]
-        b = self.regs[ins.operand & 3] if ins.flags & F_REG else ins.operand
-        op = AluOp(ins.prof)
+        a = self.regs[ins.ra]
+        b = self.regs[ins.operand & 7] if ins.flags & F_REG else ins.operand
+        op = AluOp(ins.sub)
         r = {
             AluOp.ADD: lambda: a + b, AluOp.SUB: lambda: a - b, AluOp.AND: lambda: a & b,
             AluOp.OR: lambda: a | b, AluOp.XOR: lambda: a ^ b, AluOp.SHL: lambda: a << (b & 15),
             AluOp.SHR: lambda: a >> (b & 15), AluOp.EQ: lambda: int(a == b),
             AluOp.NE: lambda: int(a != b), AluOp.LT: lambda: int(a < b),
         }[op]()
-        self.regs[ins.pin & 3] = r & REG_MASK
+        self.regs[ins.rd] = r & REG_MASK
         self.pc += 1
         yield
 
     def _op_br(self, ins: Instr) -> Gen:
-        cond = BrCond(ins.prof & 3)
+        cond = BrCond(ins.sub)
+        if cond == BrCond.ROLE:
+            raise NotImplementedError(f"BR ROLE lands with the v1 model (pc {self.pc})")
         if cond == BrCond.ALWAYS:
             taken = True
         else:
             if cond == BrCond.TO:
                 taken = self.to
             else:
-                zero = self.regs[ins.pin & 3] == 0
+                zero = self.regs[ins.ra] == 0
                 taken = zero if cond == BrCond.Z else not zero
             self.branches.append(Branch(self.pc, taken))
         self.pc = ins.operand if taken else self.pc + 1
@@ -230,7 +233,7 @@ class Engine:
         yield
 
     def _op_push(self, ins: Instr) -> Gen:
-        self.rx.append(self.regs[ins.pin & 3])
+        self.rx.append(self.regs[ins.ra])
         self.pc += 1
         yield
 
@@ -238,7 +241,7 @@ class Engine:
         while not self.tx:
             self.idle = True
             yield
-        self.regs[ins.pin & 3] = self.tx.popleft() & REG_MASK
+        self.regs[ins.rd] = self.tx.popleft() & REG_MASK
         self.pc += 1
         yield
 
@@ -248,16 +251,19 @@ class Engine:
         yield
 
     def _op_raw(self, ins: Instr) -> Gen:
-        op = RawOp(ins.prof)
+        op = RawOp(ins.sub)
+        line = ins.ra
         nxt = self.pc + 1
+        if op == RawOp.EVT:
+            raise NotImplementedError(f"RAW EVT lands with the v1 model (pc {self.pc})")
         if op == RawOp.SET:
-            self.drive(ins.pin, ins.operand & 1)
+            self.drive(line, ins.operand & 1)
         elif op == RawOp.REL:
-            self.drv[ins.pin] = None
+            self.drv[line] = None
         elif op == RawOp.GET:
-            self.regs[ins.operand & 3] = self.inp[ins.pin]
+            self.regs[ins.rd] = self.inp[line]
         elif op == RawOp.JPIN:
-            if self.inp[ins.pin] == ins.operand >> 11 & 1:
+            if self.inp[line] == ins.operand >> 11 & 1:
                 nxt = ins.operand & 0x7FF
         elif op == RawOp.DELAY:
             self.pc = nxt
@@ -270,7 +276,9 @@ class Engine:
     # ------------------------------------------------------------------ timed steps (isa-v0 §4.1-4.3)
     def _op_cond(self, ins: Instr) -> Gen:
         p = self.image.profiles[ins.prof]
-        kind = CondKind(ins.operand)
+        kind, meas, _ = unpack_cond(ins.operand)
+        if meas:
+            raise NotImplementedError(f"COND MEAS lands with the v1 model (pc {self.pc})")
         if kind not in (CondKind.FALL, CondKind.RISE):
             raise NotImplementedError(f"COND {kind.name} lands in Phase 4 (pc {self.pc})")
         level = 1 if kind == CondKind.RISE else 0
@@ -280,7 +288,7 @@ class Engine:
             yield from self.wait_until(planned)
             if p.bounded:
                 self._late(planned, slot0=p.nom == 0)
-            self.drive(ins.pin, level)
+            self.drive(ins.line, level)
             self.tb = self.now
             self._reanchor(self.now)
             self._record(ins, "do")
@@ -288,7 +296,7 @@ class Engine:
             yield
             return
         while True:
-            if self.edge(ins.pin) and self.inp[ins.pin] == level:
+            if self.edge(ins.line) and self.inp[ins.line] == level:
                 e = self.now - EDGE_LAT
                 m = e - self.tb
                 if p.min > 0 and m < p.min - QUANT:
@@ -321,7 +329,7 @@ class Engine:
             yield from self.wait_until(planned)
             if ins.prof != 0:  # IDLE steps never overrun
                 self._late(planned, slot0=True)
-            self.drive(ins.pin, level)
+            self.drive(ins.line, level)
             self.tb = planned + p.nom
             self._accumulate(p, 1)
             self._record(ins, "do", level)
@@ -332,8 +340,8 @@ class Engine:
         if self.now > at:
             self.log("OVERRUN", measured=self.now - at)
         yield from self.wait_until(at)
-        v = self.inp[ins.pin]
-        self.samples.append(Sample(self.pc, ins.pin, self.now, p.nom))
+        v = self.inp[ins.line]
+        self.samples.append(Sample(self.pc, ins.line, self.now, p.nom))
         if v != level:
             self.log("LEVEL", measured=v)
             if ins.flags & F_ABORT:
@@ -348,10 +356,11 @@ class Engine:
 
     def _op_xfer(self, ins: Instr) -> Gen:
         p = self.image.profiles[ins.prof]
-        lane = self.image.lanes[ins.pin]
+        lane = self.image.lanes[ins.line]
         if lane.clk is not None:
             raise NotImplementedError(f"clocked XFER lands in Task 8 (pc {self.pc})")
-        n, src, dst, msb = unpack_xfer(ins.operand)
+        n, src, dst = unpack_xfer(ins.operand)
+        msb = bool(ins.flags & F_MSB)
         if src == Src.FZ:
             raise NotImplementedError(f"XFER src=FZ lands in Task 20 (pc {self.pc})")
         self.to = False

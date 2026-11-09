@@ -68,7 +68,7 @@ def test_duplicate_label_raises():
 def test_bad_register_raises():
     d = Description("x", parties=("a", "b"))
     with pytest.raises(ValueError):
-        d.pop("r4")
+        d.pop("r8")  # r0-r7 exist (isa §1)
 
 
 def test_profile_defaults_min_max_to_nom():

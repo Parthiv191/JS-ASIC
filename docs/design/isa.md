@@ -7,8 +7,9 @@ decides. Where it is silent, the model decides and this doc gets updated. Why ea
 
 Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 
-**The model is still v0** (1-cycle untimed instructions, 4 registers, fractional clocks). It must
-implement this v1 doc, §4.0 especially, before RTL co-simulation.
+**The model's encoding and image are v1** (`emu/isa.py`, `emu/image.py`); its execution is still v0
+(1-cycle untimed instructions, unbounded FIFOs, fractional clocks). It must implement this doc,
+§4.0 especially, before RTL co-simulation.
 
 ## 1. Constants and per-engine state
 
@@ -62,7 +63,7 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
 
 - **Image header:**
   - lines, lanes, profiles, `abort_pc`, CRC config, `prof_shift` (default 4);
-  - the bus: `bus_kind` (`NONE`, `I2C`, `SELECT`, `SE0` [P]), `bus_a`, `bus_b` (lines),
+  - the bus: `bus_kind` (`NONE 0`, `I2C 1`, `SELECT 2`, `SE0 3` [P]), `bus_a`, `bus_b` (lines),
     `bus_confirm` (cycles; default 15 for I2C, 1 for SELECT, 33 for SE0);
   - `tolerance_ppm` (compiler only).
 - **Shared vs per-engine:** both engines run one image, so the header tables are one shared

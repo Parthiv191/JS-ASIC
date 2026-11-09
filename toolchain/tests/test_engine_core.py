@@ -49,7 +49,23 @@ def test_alu_ops_wrap_16_bits():
         d.alu("or", "r3", "r3", "r2")    # register operand: 0xF | 1
         d.halt()
     e = run(Engine(img(b), Role.P0), 20)
-    assert e.regs == [0x0010, 0xFFFF, 1, 0xF]
+    assert e.regs == [0x0010, 0xFFFF, 1, 0xF, 0, 0, 0, 0]
+
+
+def test_all_eight_registers_and_li_imm16():
+    """isa §1/§3: r0-r7 are addressable (3-bit fields) and LI loads 16 bits ({sub, operand})."""
+    def b(d, l):
+        d.li("r7", 0xBEEF)
+        d.alu("add", "r4", "r7", 1)
+        d.alu("or", "r5", "r4", "r7")    # register operand from r7: rb is 3 bits
+        d.push("r6")
+        d.pop("r6")
+        d.halt()
+    e = Engine(img(b), Role.P0)
+    e.tx.append(0x1234)
+    run(e, 20)
+    assert e.regs == [0, 0, 0, 0, 0xBEF0, 0xBEFF, 0x1234, 0xBEEF]
+    assert e.rx == [0]
 
 
 def test_role_if_skips_per_role():
@@ -90,7 +106,7 @@ def test_raw_get_sees_wire_after_sync_lat():
     e = Engine(img(b), Role.P0)
     run(e, 10, wire=lambda c: [1 if c < 2 else 0] + [1] * 7)
     # ROLE_IF takes cycle 0; GETs at cycles 1..4 see the wire at cycles -1..2
-    assert e.regs == [1, 1, 1, 0]
+    assert e.regs == [1, 1, 1, 0, 0, 0, 0, 0]
 
 
 def test_raw_delay_exact_cycles():

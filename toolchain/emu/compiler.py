@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from .desc import MON, SHARED, Description, LaneRef, LineRef, Step
 from .image import IDLE, Image, LaneCfg, LineCfg
 from .isa import (
-    F_ABORT, F_CHK, F_REG, F_RESYNC, NUM_LANES, NUM_LINES, NUM_PROFILES, PROG_DEPTH,
-    AluOp, BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, encode, role_if_operand,
-    role_mask, xfer_operand,
+    F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, NUM_LANES, NUM_LINES, NUM_PROFILES, PROG_DEPTH,
+    AluOp, BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
+    role_if_operand, role_mask, xfer_operand,
 )
 
 TIMED = ("cond", "hold", "xfer")
@@ -213,6 +213,12 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
         else:
             debug[p] = f"{st.loc} {st.kind} {_summary(st)}".rstrip()
     image = Image(desc.name, desc.parties, words, profiles, lines, lanes, abort_pc, desc.tolerance_ppm, debug)
+    if not any(d.rule == "S-table" for d in diags):
+        try:
+            image.table_bytes()  # the bytes the host writes: every field must fit its slot
+        except ValueError as e:
+            anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
+            err("S-table", anchor, f"tables don't fit the chip: {e}")
     return Lowered(instrs, image, spans, pc_step, diags)
 
 
@@ -285,26 +291,28 @@ def _instr(desc, s: Step, a: dict, target, lane_index) -> Instr:
             (F_RESYNC if a.get("resync") else 0)
     k = s.kind
     if k == "cond":
-        return Instr(Op.COND, owner, a["line"].index, prof, int(CondKind[a["kind"].upper()]), flags)
+        return Instr(Op.COND, owner, a["line"].index, prof, operand=cond_operand(CondKind[a["kind"].upper()]),
+                     flags=flags)
     if k == "hold":
-        return Instr(Op.HOLD, owner, a["line"].index, prof, a["level"], flags)
+        return Instr(Op.HOLD, owner, a["line"].index, prof, operand=a["level"], flags=flags)
     if k == "xfer":
-        operand = xfer_operand(a["n"], Src[a["src"].upper()], Dst[a["dst"].upper()], a["msb_first"])
-        return Instr(Op.XFER, owner, lane_index(a["lane"]), prof, operand, flags)
+        operand = xfer_operand(a["n"], Src[a["src"].upper()], Dst[a["dst"].upper()])
+        return Instr(Op.XFER, owner, lane_index(a["lane"]), prof, operand=operand,
+                     flags=flags | (F_MSB if a["msb_first"] else 0))
     if k == "li":
-        return Instr(Op.LI, pin=reg(a["rd"]), operand=_imm(a["imm"]))
+        return li(reg(a["rd"]), _imm(a["imm"], 0xFFFF))
     if k == "alu":
         b = a["b"]
         isreg = isinstance(b, str)
-        return Instr(Op.ALU, pin=reg(a["rd"]) | (reg(a["ra"]) << 2), prof=int(AluOp[a["op"].upper()]),
+        return Instr(Op.ALU, rd=reg(a["rd"]), ra=reg(a["ra"]), sub=int(AluOp[a["op"].upper()]),
                      operand=reg(b) if isreg else _imm(b), flags=F_REG if isreg else 0)
     if k == "br":
-        return Instr(Op.BR, pin=0 if a["reg"] is None else reg(a["reg"]),
-                     prof=int(BrCond[a["cond"].upper()]), operand=target(a["target"]))
+        return Instr(Op.BR, ra=0 if a["reg"] is None else reg(a["reg"]),
+                     sub=int(BrCond[a["cond"].upper()]), operand=target(a["target"]))
     if k == "push":
-        return Instr(Op.PUSH, pin=reg(a["ra"]))
+        return Instr(Op.PUSH, ra=reg(a["ra"]))
     if k == "pop":
-        return Instr(Op.POP, pin=reg(a["rd"]))
+        return Instr(Op.POP, rd=reg(a["rd"]))
     if k == "mark":
         return Instr(Op.MARK, operand=_imm(a["id"]))
     if k == "halt":
@@ -312,27 +320,27 @@ def _instr(desc, s: Step, a: dict, target, lane_index) -> Instr:
     if k == "nop":
         return Instr(Op.NOP)
     if k == "raw_set":
-        return Instr(Op.RAW, pin=a["line"].index, prof=int(RawOp.SET), operand=a["level"] & 1)
+        return Instr(Op.RAW, ra=a["line"].index, sub=int(RawOp.SET), operand=a["level"] & 1)
     if k == "raw_rel":
-        return Instr(Op.RAW, pin=a["line"].index, prof=int(RawOp.REL))
+        return Instr(Op.RAW, ra=a["line"].index, sub=int(RawOp.REL))
     if k == "raw_get":
-        return Instr(Op.RAW, pin=a["line"].index, prof=int(RawOp.GET), operand=reg(a["rd"]))
+        return Instr(Op.RAW, rd=reg(a["rd"]), ra=a["line"].index, sub=int(RawOp.GET))
     if k == "raw_delay":
         n = a["n"]
         if not 1 <= n <= 0xFFF:
             raise ValueError(f"raw_delay {n} not in 1..4095")
-        return Instr(Op.RAW, prof=int(RawOp.DELAY), operand=n)
+        return Instr(Op.RAW, sub=int(RawOp.DELAY), operand=n)
     if k == "raw_jpin":
         t = target(a["target"])
         if t >= 2048:
             raise ValueError("raw_jpin target must be < 2048")
-        return Instr(Op.RAW, pin=a["line"].index, prof=int(RawOp.JPIN), operand=(a["level"] & 1) << 11 | t)
+        return Instr(Op.RAW, ra=a["line"].index, sub=int(RawOp.JPIN), operand=(a["level"] & 1) << 11 | t)
     raise ValueError(f"unknown step kind {k!r}")
 
 
-def _imm(v: int) -> int:
-    if not isinstance(v, int) or not 0 <= v <= 0xFFF:
-        raise ValueError(f"immediate {v!r} not in 0..4095")
+def _imm(v: int, hi: int = 0xFFF) -> int:
+    if not isinstance(v, int) or not 0 <= v <= hi:
+        raise ValueError(f"immediate {v!r} not in 0..{hi}")
     return v
 
 
