@@ -10,7 +10,7 @@ Read only what your task needs. Status tags used in every doc: **Decided** (owne
 | `isa.md` | implement or check any instruction (ISA v1, the cycle-level contract) | verification |
 | `bus-fuzzer.md` | work on the learning fuzzer (FZ ops, corpus, bitmap) | devOps |
 | `decisions.md` | need the why behind a choice, or want to log a new one | everyone |
-| `../superpowers/plans/2026-11-02-role-switching-emulator.md` | need the old task plan (predates v1; D1 is now decided in `architecture.md` §3; to be rewritten by the supervisor role) | devOps |
+| `../superpowers/plans/2026-11-02-role-switching-emulator.md` | need the old task plan (predates v1; D1 is now decided in `architecture.md` §3; to be rewritten by the supervisor role) | supervisor |
 
 Rules:
 - `isa.md` is the contract between the compiler, the Python model
