@@ -1,6 +1,6 @@
 # Chip architecture
 
-Status: v1 r3 (2026-11-05), owner Parthiv. What the chip is for: `chip-spec.md`.
+Status: v1 r3 (2026-11-05), owner: verification role. What the chip is for: `chip-spec.md`.
 Instructions: `isa.md`. Why: `decisions.md`. Process: IHP CMOS5L via Tiny Tapeout, 6x4 tiles
 (die 1289.28 × 710.64 µm, core ~902K µm²), 50 MHz target. Tier tags (Core/Plus/…) as in
 chip-spec §4.

@@ -1,41 +1,41 @@
 # Decision log
 
 One line per decision, newest last. When a decision is revised, the old row stays and the new row
-says "revises". "Claude (delegated)" = Parthiv asked Claude to decide, on evidence.
+says "revises". "Claude (delegated)" = the verification role asked Claude to decide, on evidence.
 
 | Date | Decision | Why | Who | Spec |
 |---|---|---|---|---|
-| 10-26 | TT IHP template, 6x4 tiles, top `tt_um_prot_emu_SAP`, 50 MHz target | challenge rules; template default | Parthiv | info.yaml |
-| 11-02 | Build for IHP CMOS5L, not sg13g2 | the challenge requires CMOS5L | Manthan | plan |
-| 11-03 | Role-switching design over the PIO-style draft | more novel, drift-free deadline timing, the monitor helps verification | Parthiv | isa |
-| 11-03 | Novel feature: role switching + learning bus fuzzer | the combination nobody has | Parthiv | bus-fuzzer |
-| 11-03 | I2C START/STOP as COND kinds, detected as SDA changing while SCL is high | v0 couldn't tell START/STOP from data (F1) | Parthiv | isa §4.2, §4.7 |
-| 11-03 | OD data lines let go after the next leading clock edge | fake ACK / stuck bus (F2) | Parthiv | isa §4.3 |
-| 11-03 | Clock stretching both ways: the owner waits for high; an unready target holds low | real sensors/EEPROMs stretch (F3) | Parthiv | isa §4.3 |
-| 11-03 | Early end: the target assumes more data and exits on START/STOP (sticky flags + a "why" read) | same pattern as MCU I2C hardware | Parthiv | isa §4.1, §4.7 |
-| 11-03 | MEASURE level 1 + level 2 (autobaud); level 2 first to cut | headline feature; level 1 almost free | Parthiv | isa §4.2, §4.8 |
-| 11-03 | RX full = drop + OVERFLOW; LT unsigned; shift `b & 15`; 16-bit LI | UART practice / RV32I / free fix | Parthiv | isa §3, §4.9 |
-| 11-04 | D2: `T2-window` at an anchor stays as written | slack would allow false alarms | Manthan | isa §6 |
-| 11-04 | Purpose: hardware debugging + reverse engineering, one protocol at a time | focus | Parthiv | chip-spec §1 |
-| 11-04 | Works standalone: boots from flash; the learning fuzzer with corpus distillation is on-chip | the fuzzer is the point; no PC needed | Parthiv | chip-spec §3 |
-| 11-04 | Scope: UART/SPI/I2C + MEASURE first; PS/2, JTAG, SWD etc. later | finish the core first | Parthiv | chip-spec §4 |
-| 11-04 | Low-speed USB is a stretch goal; check feasibility, sniffer first | fits debugging/RE | Parthiv | chip-spec §4, isa §4.10 |
-| 11-04 | SRAM for every big memory | ~10× denser than flops (E1F) | Parthiv | architecture §3 |
-| 11-04 | Clock not frozen: 50 MHz target, 40 MHz fallback | programs count cycles | Parthiv | chip-spec §8 |
-| 11-04 | No program checking on the chip at load | the compiler checks; the chip has timeouts | Parthiv | chip-spec §6 |
-| 11-04 | Ask Jane Street whether 8x4 tiles are allowed | more SRAM columns | Parthiv (action) | — |
-| 11-04 | 8 registers (r0–r7), 16-bit | I2C, MEASURE and the fuzzer compete for 4; +64 flops per engine | Parthiv | isa §1, §3 |
-| 11-05 | FIFOs TX 4, RX 8 (flops); column 2 doubles as a deep capture buffer when not fuzzing | the host can't drain SPI bursts; fuzzing and capture never run together | Parthiv | isa §1, architecture §3 |
-| 11-05 | Per engine: 8 profiles, 4 lanes, 8 lines; the ISA fields stay 4-bit | ~580 flops saved per engine; programs need ≤ 8/4/8 | Parthiv | isa §1 |
-| 11-05 | I2C details: OD readback (dst = wire value), lead blocks, O1–O3 rule fixes, `bus_confirm` register | real ACKs/arbitration; host-decided write length | Parthiv | isa §4.3, §4.7, §5, §6 |
-| 11-05 | Two instruction shapes: T (owner, line/lane, prof) and U (rd [26:24], ra/line [23:21], sub) | fits 8 registers + 16-bit LI; fixed register slots keep decode fast | Parthiv | isa §3 |
-| 11-05 | Capture log: 32-bit records {type, Δt, value} written by the engine | timing is what reverse engineering needs | Parthiv | isa §7, architecture §7 |
+| 10-26 | TT IHP template, 6x4 tiles, top `tt_um_prot_emu_SAP`, 50 MHz target | challenge rules; template default | verification | info.yaml |
+| 11-02 | Build for IHP CMOS5L, not sg13g2 | the challenge requires CMOS5L | devOps | plan |
+| 11-03 | Role-switching design over the PIO-style draft | more novel, drift-free deadline timing, the monitor helps verification | verification | isa |
+| 11-03 | Novel feature: role switching + learning bus fuzzer | the combination nobody has | verification | bus-fuzzer |
+| 11-03 | I2C START/STOP as COND kinds, detected as SDA changing while SCL is high | v0 couldn't tell START/STOP from data (F1) | verification | isa §4.2, §4.7 |
+| 11-03 | OD data lines let go after the next leading clock edge | fake ACK / stuck bus (F2) | verification | isa §4.3 |
+| 11-03 | Clock stretching both ways: the owner waits for high; an unready target holds low | real sensors/EEPROMs stretch (F3) | verification | isa §4.3 |
+| 11-03 | Early end: the target assumes more data and exits on START/STOP (sticky flags + a "why" read) | same pattern as MCU I2C hardware | verification | isa §4.1, §4.7 |
+| 11-03 | MEASURE level 1 + level 2 (autobaud); level 2 first to cut | headline feature; level 1 almost free | verification | isa §4.2, §4.8 |
+| 11-03 | RX full = drop + OVERFLOW; LT unsigned; shift `b & 15`; 16-bit LI | UART practice / RV32I / free fix | verification | isa §3, §4.9 |
+| 11-04 | D2: `T2-window` at an anchor stays as written | slack would allow false alarms | devOps | isa §6 |
+| 11-04 | Purpose: hardware debugging + reverse engineering, one protocol at a time | focus | verification | chip-spec §1 |
+| 11-04 | Works standalone: boots from flash; the learning fuzzer with corpus distillation is on-chip | the fuzzer is the point; no PC needed | verification | chip-spec §3 |
+| 11-04 | Scope: UART/SPI/I2C + MEASURE first; PS/2, JTAG, SWD etc. later | finish the core first | verification | chip-spec §4 |
+| 11-04 | Low-speed USB is a stretch goal; check feasibility, sniffer first | fits debugging/RE | verification | chip-spec §4, isa §4.10 |
+| 11-04 | SRAM for every big memory | ~10× denser than flops (E1F) | verification | architecture §3 |
+| 11-04 | Clock not frozen: 50 MHz target, 40 MHz fallback | programs count cycles | verification | chip-spec §8 |
+| 11-04 | No program checking on the chip at load | the compiler checks; the chip has timeouts | verification | chip-spec §6 |
+| 11-04 | Ask Jane Street whether 8x4 tiles are allowed | more SRAM columns | verification (action) | — |
+| 11-04 | 8 registers (r0–r7), 16-bit | I2C, MEASURE and the fuzzer compete for 4; +64 flops per engine | verification | isa §1, §3 |
+| 11-05 | FIFOs TX 4, RX 8 (flops); column 2 doubles as a deep capture buffer when not fuzzing | the host can't drain SPI bursts; fuzzing and capture never run together | verification | isa §1, architecture §3 |
+| 11-05 | Per engine: 8 profiles, 4 lanes, 8 lines; the ISA fields stay 4-bit | ~580 flops saved per engine; programs need ≤ 8/4/8 | verification | isa §1 |
+| 11-05 | I2C details: OD readback (dst = wire value), lead blocks, O1–O3 rule fixes, `bus_confirm` register | real ACKs/arbitration; host-decided write length | verification | isa §4.3, §4.7, §5, §6 |
+| 11-05 | Two instruction shapes: T (owner, line/lane, prof) and U (rd [26:24], ra/line [23:21], sub) | fits 8 registers + 16-bit LI; fixed register slots keep decode fast | verification | isa §3 |
+| 11-05 | Capture log: 32-bit records {type, Δt, value} written by the engine | timing is what reverse engineering needs | verification | isa §7, architecture §7 |
 | 11-05 | Fuzzer: hang inputs saved and pinned; 32 slots + 8K-bit bitmap; both length modes; findings as records | standalone keeps findings; fingerprints lost ≈ n/2m (0.6% at n = 100); flop cost scales with slots | Claude (delegated) | bus-fuzzer §2–3 |
 | 11-05 | CHOICE, ARB, WAIT_ANY reserved, no v1 hardware; CODEC fields defined now, built only if feasible | reserving is free; avoids a re-encode | Claude (delegated) | isa §3, §4.10 |
 | 11-05 | Host interface: SPI target (mode 0, ≤ clk/8) | the RP2040 and the Basys 3 bridge both do SPI; fast enough to drain capture | Claude (delegated) | architecture §4 |
 | 11-05 | Silicon debug: halt, step, registers; safe reset (all pins inputs until RUN); boot flash on ui/uo; REPORT 115200 text | the pins are the only window after tapeout; never fight a device; any terminal reads it | Claude (delegated) | architecture §2, §5–8 |
-| 11-05 | Shared program SRAM, interleaved: engine 0 on even cycles, engine 1 on odd | flops are 10× worse per bit; only 2 wide columns fit; frees column 2 | Parthiv | isa §4.0, architecture §3 |
-| 11-05 | Memory: 2 × RM_IHPSG13_1P_512x32 (col 1 program 512 words, col 2 fuzzer/capture); 2 engines | E1 passed precheck and the GL test (run 41994812789); 1024×32 → ~78% utilization | Parthiv | architecture §3 |
+| 11-05 | Shared program SRAM, interleaved: engine 0 on even cycles, engine 1 on odd | flops are 10× worse per bit; only 2 wide columns fit; frees column 2 | verification | isa §4.0, architecture §3 |
+| 11-05 | Memory: 2 × RM_IHPSG13_1P_512x32 (col 1 program 512 words, col 2 fuzzer/capture); 2 engines | E1 passed precheck and the GL test (run 41994812789); 1024×32 → ~78% utilization | verification | architecture §3 |
 | 11-05 | Fetch rule: instructions start only on their engine's parity; a 1-word prefetch; untimed (incl. taken branches) = U; ISSUE ≤ 2; abort 3–4 | deterministic and cheap; the SRAM output feeds only flops; the review showed the "prefetch whatever the parity" wording was impossible | Claude (delegated) | isa §4.0 |
 | 11-05 | (superseded below) `CLKDIV ≥ 1` ticks only on own cycles | a fixed even/odd schedule otherwise starves an engine | Claude (delegated) | — |
 | 11-05 | Bus detector generalized: `bus_kind` I2C / SELECT (SPI CS) / SE0 (USB, [P]) | SPI (a must) couldn't see CS; one mechanism covers all three | Claude (delegated) | isa §4.7 |

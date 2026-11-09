@@ -1,6 +1,6 @@
 # ISA v1: cycle-level contract
 
-Status: v1 r2 (2026-11-05), owner Parthiv. This is the contract between the compiler, the Python
+Status: v1 r2 (2026-11-05), owner: verification role. This is the contract between the compiler, the Python
 model (`toolchain/emu`), the fuzzer and the RTL. Where the RTL and the model disagree, this doc
 decides. Where it is silent, the model decides and this doc gets updated. Why each rule exists:
 `decisions.md`.
