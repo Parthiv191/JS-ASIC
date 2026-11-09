@@ -8,7 +8,7 @@ cocotb tests for `tt_um_prot_emu_SAP` (`test.py`, wrapped by `tb.v`). See the
 | `test_idle_high` | TX idles high, not busy |
 | `test_send_one_byte`, `test_send_several_bytes` | UART frames decode to the bytes sent |
 | `test_mem_word_roundtrip` | 32-bit words survive in both SRAM macros at every address bit |
-| `test_mem_chase_follows_pointers` | the macro's output drives its own address every cycle: the memory part of the engine's fetch-ahead path (isa-v0 §1) |
+| `test_mem_chase_follows_pointers` | the macro's output drives its own address every cycle: a memory stress test (the engine's real fetch registers the output first, isa §4.0) |
 | `test_uart_still_works_with_mem_view_off` | the memory harness leaves the UART pins alone |
 
 `reset()` holds `rst_n` low for 10 cycles. The design releases its reset two

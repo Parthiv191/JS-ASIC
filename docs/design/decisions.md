@@ -6,28 +6,28 @@ says "revises". "Claude (delegated)" = the verification role asked Claude to dec
 | Date | Decision | Why | Who | Spec |
 |---|---|---|---|---|
 | 10-26 | TT IHP template, 6x4 tiles, top `tt_um_prot_emu_SAP`, 50 MHz target | challenge rules; template default | verification | info.yaml |
-| 11-02 | Build for IHP CMOS5L, not sg13g2 | the challenge requires CMOS5L | devOps | plan |
+| 11-02 | Build for IHP CMOS5L, not sg13g2 | the challenge requires CMOS5L | devOps | chip-spec |
 | 11-03 | Role-switching design over the PIO-style draft | more novel, drift-free deadline timing, the monitor helps verification | verification | isa |
 | 11-03 | Novel feature: role switching + learning bus fuzzer | the combination nobody has | verification | bus-fuzzer |
-| 11-03 | I2C START/STOP as COND kinds, detected as SDA changing while SCL is high | v0 couldn't tell START/STOP from data (F1) | verification | isa §4.2, §4.7 |
-| 11-03 | OD data lines let go after the next leading clock edge | fake ACK / stuck bus (F2) | verification | isa §4.3 |
-| 11-03 | Clock stretching both ways: the owner waits for high; an unready target holds low | real sensors/EEPROMs stretch (F3) | verification | isa §4.3 |
+| 11-03 | I2C START/STOP as COND kinds, detected as SDA changing while SCL is high | v0 couldn't tell START/STOP from data | verification | isa §4.2, §4.7 |
+| 11-03 | OD data lines let go after the next leading clock edge | fake ACK / stuck bus | verification | isa §4.3 |
+| 11-03 | Clock stretching both ways: the owner waits for high; an unready target holds low | real sensors/EEPROMs stretch | verification | isa §4.3 |
 | 11-03 | Early end: the target assumes more data and exits on START/STOP (sticky flags + a "why" read) | same pattern as MCU I2C hardware | verification | isa §4.1, §4.7 |
 | 11-03 | MEASURE level 1 + level 2 (autobaud); level 2 first to cut | headline feature; level 1 almost free | verification | isa §4.2, §4.8 |
 | 11-03 | RX full = drop + OVERFLOW; LT unsigned; shift `b & 15`; 16-bit LI | UART practice / RV32I / free fix | verification | isa §3, §4.9 |
-| 11-04 | D2: `T2-window` at an anchor stays as written | slack would allow false alarms | devOps | isa §6 |
+| 11-04 | The anchor rule (`T2-window` at an anchor) stays as written | slack would allow false alarms | devOps | isa §6 |
 | 11-04 | Purpose: hardware debugging + reverse engineering, one protocol at a time | focus | verification | chip-spec §1 |
 | 11-04 | Works standalone: boots from flash; the learning fuzzer with corpus distillation is on-chip | the fuzzer is the point; no PC needed | verification | chip-spec §3 |
 | 11-04 | Scope: UART/SPI/I2C + MEASURE first; PS/2, JTAG, SWD etc. later | finish the core first | verification | chip-spec §4 |
 | 11-04 | Low-speed USB is a stretch goal; check feasibility, sniffer first | fits debugging/RE | verification | chip-spec §4, isa §4.10 |
-| 11-04 | SRAM for every big memory | ~10× denser than flops (E1F) | verification | architecture §3 |
+| 11-04 | SRAM for every big memory | ~10× denser than flops (the flop-memory trial) | verification | architecture §3 |
 | 11-04 | Clock not frozen: 50 MHz target, 40 MHz fallback | programs count cycles | verification | chip-spec §8 |
 | 11-04 | No program checking on the chip at load | the compiler checks; the chip has timeouts | verification | chip-spec §6 |
 | 11-04 | Ask Jane Street whether 8x4 tiles are allowed | more SRAM columns | verification (action) | — |
 | 11-04 | 8 registers (r0–r7), 16-bit | I2C, MEASURE and the fuzzer compete for 4; +64 flops per engine | verification | isa §1, §3 |
 | 11-05 | FIFOs TX 4, RX 8 (flops); column 2 doubles as a deep capture buffer when not fuzzing | the host can't drain SPI bursts; fuzzing and capture never run together | verification | isa §1, architecture §3 |
 | 11-05 | Per engine: 8 profiles, 4 lanes, 8 lines; the ISA fields stay 4-bit | ~580 flops saved per engine; programs need ≤ 8/4/8 | verification | isa §1 |
-| 11-05 | I2C details: OD readback (dst = wire value), lead blocks, O1–O3 rule fixes, `bus_confirm` register | real ACKs/arbitration; host-decided write length | verification | isa §4.3, §4.7, §5, §6 |
+| 11-05 | I2C details: OD readback (dst = wire value), lead blocks, open-drain rule fixes, `bus_confirm` register | real ACKs/arbitration; host-decided write length | verification | isa §4.3, §4.7, §5, §6 |
 | 11-05 | Two instruction shapes: T (owner, line/lane, prof) and U (rd [26:24], ra/line [23:21], sub) | fits 8 registers + 16-bit LI; fixed register slots keep decode fast | verification | isa §3 |
 | 11-05 | Capture log: 32-bit records {type, Δt, value} written by the engine | timing is what reverse engineering needs | verification | isa §7, architecture §7 |
 | 11-05 | Fuzzer: hang inputs saved and pinned; 32 slots + 8K-bit bitmap; both length modes; findings as records | standalone keeps findings; fingerprints lost ≈ n/2m (0.6% at n = 100); flop cost scales with slots | Claude (delegated) | bus-fuzzer §2–3 |
@@ -35,7 +35,7 @@ says "revises". "Claude (delegated)" = the verification role asked Claude to dec
 | 11-05 | Host interface: SPI target (mode 0, ≤ clk/8) | the RP2040 and the Basys 3 bridge both do SPI; fast enough to drain capture | Claude (delegated) | architecture §4 |
 | 11-05 | Silicon debug: halt, step, registers; safe reset (all pins inputs until RUN); boot flash on ui/uo; REPORT 115200 text | the pins are the only window after tapeout; never fight a device; any terminal reads it | Claude (delegated) | architecture §2, §5–8 |
 | 11-05 | Shared program SRAM, interleaved: engine 0 on even cycles, engine 1 on odd | flops are 10× worse per bit; only 2 wide columns fit; frees column 2 | verification | isa §4.0, architecture §3 |
-| 11-05 | Memory: 2 × RM_IHPSG13_1P_512x32 (col 1 program 512 words, col 2 fuzzer/capture); 2 engines | E1 passed precheck and the GL test (run 41994812789); 1024×32 → ~78% utilization | verification | architecture §3 |
+| 11-05 | Memory: 2 × RM_IHPSG13_1P_512x32 (col 1 program 512 words, col 2 fuzzer/capture); 2 engines | the SRAM trial passed precheck and the GL test (run 41994812789); 1024×32 → ~78% utilization | verification | architecture §3 |
 | 11-05 | Fetch rule: instructions start only on their engine's parity; a 1-word prefetch; untimed (incl. taken branches) = U; ISSUE ≤ 2; abort 3–4 | deterministic and cheap; the SRAM output feeds only flops; the review showed the "prefetch whatever the parity" wording was impossible | Claude (delegated) | isa §4.0 |
 | 11-05 | (superseded below) `CLKDIV ≥ 1` ticks only on own cycles | a fixed even/odd schedule otherwise starves an engine | Claude (delegated) | — |
 | 11-05 | Bus detector generalized: `bus_kind` I2C / SELECT (SPI CS) / SE0 (USB, [P]) | SPI (a must) couldn't see CS; one mechanism covers all three | Claude (delegated) | isa §4.7 |
@@ -47,7 +47,7 @@ says "revises". "Claude (delegated)" = the verification role asked Claude to dec
 | 11-05 | Config tables write-only to the host; even-aligned registers; snapshots; sticky host_err | saves ~20–30K µm² of readback mux; no torn reads; debuggable failures | Claude (delegated) | architecture §4 |
 | 11-05 | Boot image: CRC-16 trailer, RUN held back until it passes, flash wake sequence, BOOT OK/E<n> on REPORT | one bad bit could otherwise run garbage, with no visible error | Claude (delegated) | architecture §6 |
 | 11-05 | Scope tiers + cut order (Core / Novel / Plus / Stretch / Later) | ~10 weeks left, RTL not started; Core must ship | Claude (delegated) | chip-spec §4 |
-| 11-05 | **Round-2 review fixes** (3 reviewers): | | | |
+| 11-05 | **Fixes from the Nov 5 design review:** | | | |
 | 11-05 | **Revises the CLKDIV row:** no clock divider in v1 (Later tier). U = 2 always. | Core doesn't need it (UART goes down to 794 baud); it doubled every timing case to verify | Claude (delegated) | isa §1, §4.0 |
 | 11-05 | **Revises the 11-05 per-engine tables row:** one **shared** set of image tables; per engine only the role, profile 7 (PROF-writable) and state | both engines run one image; saves ~30K µm² (the area review put the total at 71–78% without it) | Claude (delegated) | isa §2, architecture §1, §4 |
 | 11-05 | **Bus exits are normal**: they log a BUS record only, with no ABORT/VIOL and no fuzzer hang | otherwise every I2C/SPI frame end lit ERR and filled the corpus with false hangs | Claude (delegated) | isa §4.1, §4.7, bus-fuzzer §3 |
@@ -57,8 +57,10 @@ says "revises". "Claude (delegated)" = the verification role asked Claude to dec
 | 11-05 | Fuzzer: a per-iteration event mask instead of event tokens; a normative LFSR draw sequence; 32-bit mask; 2-entry findings log; length 0 = empty, 0x00 past a slot's length; clear before RUN | determinism; no garbage SRAM on the wire; ~25K µm² saved | Claude (delegated) | bus-fuzzer §2–3 |
 | 11-05 | Host: read-ahead without side effects, index windows, tables written only while stopped, multicycle read mux. Flash at clk/8, sampled 5 clk after the fall. All outputs from flops; TESTMODE covers `uio`. | lost RX words; a smaller read mux; flash round-trip delay; glitch-free pins; pad test with no SPI | Claude (delegated) | architecture §2, §4, §6 |
 | 11-05 | Tiers: CRC and DBG_STEP/EXEC/BREAK → Plus; autobaud is Plus; **the fuzz-unit RTL starts only if Core passes on the FPGA by Dec 15** | schedule risk is high (the model is still v0, RTL not started) | Claude (delegated) | chip-spec §4 |
-| 11-05 | First-harden checks: power-bridge congestion, fail on GRT overflow, IR drop | E1 proved placement, not routability with full logic | Claude (delegated) | architecture §9 |
-| 11-08 | Roles: verification owns the spec, the toolchain and model, co-sim, formal and the FPGA; devOps owns the RTL, physical design, CI and the fuzzer algorithm; supervisor owns the plan, team process, challenge compliance and the submission | two independent readings of `isa.md` (model vs RTL); the FPGA board is with verification | verification | — |
+| 11-05 | First-harden checks: power-bridge congestion, fail on GRT overflow, IR drop | the SRAM trial proved placement, not routability with full logic | Claude (delegated) | architecture §9 |
+| 11-08 | Roles: verification owns the spec, the toolchain and model, co-sim, formal and the FPGA; devOps owns the RTL, physical design, CI and the fuzzer algorithm; supervisor owns the plan, team process, challenge compliance and the submission. devOps also owns architecture §9 and `bus-fuzzer.md`; the supervisor also owns `README.md`, `docs/info.md`, the design index and the old plan | two independent readings of `isa.md` (model vs RTL); the FPGA board is with verification | verification | — |
 | 11-08 | One owner role per path; other roles ask the owner instead of editing | everyone works on their own branch, so no two sessions edit one file | verification | — |
 | 11-08 | Every role tests its own code in the same PR; verification's checks come on top | an untested block is a guess | verification | — |
-| 11-08 | Cross-role context through Delta threads shared with the org: summaries and `query` first, `thread send` to ask another role | shared context without flooding each session | Claude (delegated) | — |
+| 11-08 | Cross-role context through Delta threads: summaries to find a role's thread, a `Handoff:` message ending each session (with `For <role>:` notes), `SendMessage` to a thread link for questions that can't wait | shared context without flooding sessions; a message runs the other thread on the sender's usage | Claude (delegated) | — |
+| 11-09 | **Revises 10-26:** 8x4 tiles | Jane Street confirmed 8x4 for the March 2027 shuttle (Nov 9). Answers the 11-04 question. The extra width goes to logic first, not more SRAM; the area estimate drops from ~61% to ~46%. The 6x4-derived physical rules get re-checked at the first 8x4 harden. | verification | info.yaml, chip-spec §7, architecture §9 |
+| 11-09 | Milestones: M1 first end-to-end chip Nov 29, M2 Core Dec 13, improvement rounds to Jan 10, freeze Jan 11, submit by Jan 17; `main` always submittable, tagged milestones, optional blocks behind parameters. Novel still needs both gate conditions: Core on the FPGA by Dec 15, and the model showing learning beats the baseline. | room to improve the design instead of finishing on the deadline | verification | chip-spec §4 |
