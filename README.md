@@ -2,7 +2,7 @@
 
 # Role-switching protocol emulator
 
-A Tiny Tapeout chip for the IHP SG13CMOS5L shuttle (6x4 tiles), built for the
+A Tiny Tapeout chip for the IHP SG13CMOS5L shuttle (8x4 tiles), built for the
 Jane Street ASIC design competition. Each bus protocol is written once, as an
 owner-labelled description. The same program then runs in any role: controller,
 target or monitor. A learning bus fuzzer mutates the messages it sends and keeps

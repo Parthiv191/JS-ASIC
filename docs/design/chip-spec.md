@@ -52,6 +52,20 @@ One protocol runs at a time.
 **Cut order if behind:** Stretch → PROF → standalone/REPORT → Plus debug → CRC → fuzz-unit RTL
 (host-driven fuzzing stays) → never Core.
 
+**Milestones.** Build early, then improve; `main` stays submittable throughout.
+
+| Milestone | By | Done when |
+|---|---|---|
+| M1: first end-to-end chip | Nov 29 | one engine, host SPI and the program SRAM run a UART program; hardened, precheck and GL clean; co-sim passes on UART |
+| M2: Core complete | Dec 13 | the Core tier passes on the FPGA (the Dec 15 gate) |
+| Improvement rounds | Dec 14 – Jan 10 | Novel (if the gate passed), then Plus in the order above, then Stretch; each round ends submittable |
+| Freeze and submit | Jan 11–17 | final harden, full GL regression, final docs; submit by Jan 17 |
+
+- Every merge keeps gds, precheck and the GL test green (and co-sim, once it exists). The
+  supervisor tags each milestone and round; a late failure means submitting the last good tag.
+- Each Novel, Plus and Stretch block sits behind a Verilog parameter, so a cut is a one-line
+  change.
+
 ## 5. Protocols and limits
 
 The limits assume 50 MHz and `tolerance_ppm = 20000`, i.e. at most 2% total clock-rate difference
@@ -80,13 +94,12 @@ answer).
 | Fuzzer / capture memory | 2 KB SRAM: 32 corpus slots + 8K-bit bitmap, or 512 capture records |
 | Per engine | 8 registers, profile 7, TX FIFO 4, RX FIFO 8 |
 | Shared by both engines | 8 profiles, 4 lanes, 8 lines, CRC and bus config |
-| Area | ~61% utilization (estimate, architecture §9) |
+| Area | ~46% of the 8x4 core (estimate, architecture §9) |
 
 ## 8. Open
 
 | Item | Notes |
 |---|---|
-| 6x4 vs 8x4 tiles | The verification role is asking Jane Street; extra width goes to logic first |
 | Clock | 50 MHz target, 40 MHz fallback (no ISA change) |
 | Real engine area | first engine synthesis (devOps) |
 | TT demo-board specifics | pad voltage, pin conflicts (architecture §8) |
