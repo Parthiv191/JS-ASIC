@@ -1,6 +1,6 @@
 # Learning bus fuzzer ("AFL for wires")
 
-Status: design r4 (2026-11-05), owner Manthan (algorithm) / Parthiv (chip integration).
+Status: design r4 (2026-11-05), owner: devOps role (algorithm) / verification role (chip integration).
 - r4 puts storage on SRAM column 2 and gives the fingerprint its own folder.
 - Hang inputs are saved and pinned at the abort; costs are totals; determinism rules are added.
 - Nothing is built yet. The reference model's `FuzzUnit` (`emu/model/fuzzunit.py`, Task 19)

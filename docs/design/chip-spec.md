@@ -1,6 +1,6 @@
 # Chip spec: what the chip does
 
-Status: v1 r2 (2026-11-05), owner Parthiv. Hardware: `architecture.md`. Instructions:
+Status: v1 r2 (2026-11-05), owner: verification role. Hardware: `architecture.md`. Instructions:
 `isa.md`. Why: `decisions.md`.
 
 ## 1. Purpose and challenge fit
@@ -86,7 +86,7 @@ answer).
 
 | Item | Notes |
 |---|---|
-| 6x4 vs 8x4 tiles | Parthiv is asking Jane Street; extra width goes to logic first |
+| 6x4 vs 8x4 tiles | The verification role is asking Jane Street; extra width goes to logic first |
 | Clock | 50 MHz target, 40 MHz fallback (no ISA change) |
 | Real engine area | first engine synthesis (devOps) |
 | TT demo-board specifics | pad voltage, pin conflicts (architecture §8) |
