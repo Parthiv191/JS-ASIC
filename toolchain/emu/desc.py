@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from .image import Profile
-from .isa import INF
+from .isa import INF, NUM_REGS
 
-REGS = ("r0", "r1", "r2", "r3")
+REGS = tuple(f"r{i}" for i in range(NUM_REGS))
 SRCS = ("zero", "ones", "fifo") + REGS
 DSTS = ("discard", "fifo") + REGS
 COND_KINDS = ("fall", "rise")

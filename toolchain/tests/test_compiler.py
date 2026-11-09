@@ -2,7 +2,7 @@ import pytest
 
 from emu.compiler import CompileError, compile_desc
 from emu.desc import Description
-from emu.isa import Op, Owner, unpack_role_if
+from emu.isa import PROG_DEPTH, Op, Owner, unpack_role_if
 
 
 def rules(desc, **kw):
@@ -32,7 +32,7 @@ def test_lowering_role_if_count_and_labels():
     assert [i.op for i in ins] == [Op.ROLE_IF, Op.LI, Op.ALU, Op.COND, Op.BR]
     assert unpack_role_if(ins[0].operand) == (0b101, 2)
     assert ins[4].operand == 0  # "top" labels the role block, i.e. the ROLE_IF
-    assert ins[3].owner == Owner.P0 and ins[3].pin == pp.index
+    assert ins[3].owner == Owner.P0 and ins[3].line == pp.index
 
 
 def test_r1_rejects_wrong_owner_on_pp_line():
@@ -113,10 +113,22 @@ def test_s_rejects_unresolved_label():
     assert rules(d) == {"S-label"}
 
 
-def test_s_rejects_17_profiles():
+def test_s_rejects_9_profiles():
+    """isa §1: 8 profiles are built, IDLE included."""
+    def with_extra(k):
+        d, pp, od, p = base()
+        for i in range(k):
+            d.profile(f"x{i}", nom=4)
+        d.nop()
+        return d
+    compile_desc(with_extra(6), check_timing=False)  # IDLE + base's 1 + 6 = 8
+    assert rules(with_extra(7)) == {"S-table"}
+
+
+def test_s_rejects_profile_time_over_16_bits():
+    """Profile times are 16-bit cycles (isa §1); the compiler rejects images that don't fit."""
     d, pp, od, p = base()
-    for k in range(15):
-        d.profile(f"x{k}", nom=4)
+    d.profile("long", nom=0x10000)
     d.nop()
     assert rules(d) == {"S-table"}
 
@@ -156,9 +168,12 @@ def test_s_rejects_program_over_depth():
         for _ in range(k):
             d.nop()
         return d
-    assert rules(nops(65)) == {"S-range"}
-    compile_desc(nops(64), check_timing=False)
+    assert PROG_DEPTH == 512  # isa §1
+    assert rules(nops(PROG_DEPTH + 1)) == {"S-range"}
+    compile_desc(nops(PROG_DEPTH), check_timing=False)
     compile_desc(nops(65), check_timing=False, prog_depth=128)
+    with pytest.raises(CompileError):
+        compile_desc(nops(65), check_timing=False, prog_depth=64)
 
 
 def test_encode_failure_without_diagnostic_is_an_internal_error(monkeypatch):

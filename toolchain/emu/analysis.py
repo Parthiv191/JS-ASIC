@@ -11,7 +11,7 @@ from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
     EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, NUM_REGS, QUANT as Q, BrCond, Dst, Instr, Op, Owner, RawOp, Role,
-    unpack_role_if, unpack_xfer,
+    reg_of, unpack_role_if, unpack_xfer,
 )
 
 ROLES = (Role.P0, Role.P1, Role.MON)
@@ -34,10 +34,10 @@ def successors(instrs: list[Instr], pc: int, role: Role | None = None) -> list[i
     if ins.op == Op.HALT:
         return []
     if ins.op == Op.BR:
-        if BrCond(ins.prof & 3) == BrCond.ALWAYS:
+        if BrCond(ins.sub) == BrCond.ALWAYS:
             return [ins.operand]
         return nxt + [ins.operand]
-    if ins.op == Op.RAW and ins.prof == RawOp.JPIN:
+    if ins.op == Op.RAW and ins.sub == RawOp.JPIN:
         return nxt + [ins.operand & 0x7FF]
     if ins.op == Op.ROLE_IF:
         mask, count = unpack_role_if(ins.operand)
@@ -85,12 +85,12 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
         t = state[pc]
         ins = instrs[pc]
         inblock = _in_block(low, pc)
-        cond = BrCond(ins.prof & 3) if ins.op == Op.BR else None
+        cond = BrCond(ins.sub) if ins.op == Op.BR else None
         if cond == BrCond.TO and not inblock:
             diags.add("R2-branch", pc, "BR TO outside a role block")
-        elif cond in (BrCond.Z, BrCond.NZ) and not inblock and t >> (ins.pin & 3) & 1:
-            diags.add("R2-branch", pc, f"branch on r{ins.pin & 3}, whose value can differ between roles")
-        if ins.op == Op.RAW and ins.prof == RawOp.JPIN and not inblock:
+        elif cond in (BrCond.Z, BrCond.NZ) and not inblock and t >> ins.ra & 1:
+            diags.add("R2-branch", pc, f"branch on r{ins.ra}, whose value can differ between roles")
+        if ins.op == Op.RAW and ins.sub == RawOp.JPIN and not inblock:
             diags.add("R2-branch", pc, "raw pin branch outside a role block")
         out = _taint(ins, t, inblock, od_lanes)
         edges = [(s, out) for s in successors(instrs, pc)]
@@ -115,20 +115,19 @@ def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int
         return t | (1 << reg) if tainted else t & ~(1 << reg)
 
     if ins.op == Op.LI:
-        return put(ins.pin & 3, inblock)
+        return put(ins.rd, inblock)
     if ins.op == Op.ALU:
-        ra, rd = ins.pin >> 2 & 3, ins.pin & 3
-        tainted = inblock or bool(t >> ra & 1) or bool(ins.flags & F_REG and t >> (ins.operand & 3) & 1)
-        return put(rd, tainted)
+        tainted = inblock or bool(t >> ins.ra & 1) or bool(ins.flags & F_REG and t >> (ins.operand & 7) & 1)
+        return put(ins.rd, tainted)
     if ins.op == Op.POP:
-        return put(ins.pin & 3, True)
-    if ins.op == Op.RAW and ins.prof == RawOp.GET:
-        return put(ins.operand & 3, True)
+        return put(ins.rd, True)
+    if ins.op == Op.RAW and ins.sub == RawOp.GET:
+        return put(ins.rd, True)
     if ins.op == Op.XFER:
         dst = unpack_xfer(ins.operand)[2]
         if dst >= Dst.R0:
             # on an open-drain line the owner stores what it sent, the followers what they read
-            return put(int(dst) - 4, inblock or ins.pin in od_lanes)
+            return put(reg_of(dst), inblock or ins.line in od_lanes)
     return t
 
 
@@ -168,7 +167,7 @@ def _steps(low: Lowered) -> dict[int, _Step]:
         if ins.op == Op.XFER:
             kw["n"] = unpack_xfer(ins.operand)[0]
             kw["chk"] = bool(ins.flags & F_CHK)
-            lane = img.lanes[ins.pin]
+            lane = img.lanes[ins.line]
             if lane.clk is not None:
                 kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)))
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
@@ -194,7 +193,7 @@ def completion(s: _Step | None, r: Role) -> int:
 
 
 def _cost(ins: Instr) -> int:
-    if ins.op == Op.RAW and ins.prof == RawOp.DELAY:
+    if ins.op == Op.RAW and ins.sub == RawOp.DELAY:
         return max(1, ins.operand)
     if ins.op == Op.ROLE_IF:
         return 1
