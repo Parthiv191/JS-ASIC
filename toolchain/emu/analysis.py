@@ -175,22 +175,25 @@ def _steps(low: Lowered) -> dict[int, _Step]:
     return out
 
 
-def completion(s: _Step | None, r: Role) -> int:
-    """Cycle (relative to the step's end tb) at which role r finishes step s."""
-    if s is None:  # reset: everyone starts executing pc 0 at cycle 0
-        return -1
+def completion(s: _Step, r: Role) -> tuple[int, int]:
+    """Cycles (lo, hi), relative to the step's end tb, in which role r finishes step s (isa §6).
+
+    An owner's HOLD drives, and completes, when it starts, which is up to ISSUE late (isa §4.2;
+    T5-overrun bounds the start). So does a 1-bit unclocked XFER; with more bits the last one is
+    planned past ISSUE, so the lateness is absorbed."""
     nom = s.prof.nom
     if s.op == Op.COND:
-        return 0 if s.does(r) else E
-    if s.op == Op.HOLD:
-        return -nom if s.does(r) else -nom + nom // 2 + E
-    if not s.clocked:
-        return -nom if s.does(r) else -nom + nom // 2 + E
-    if s.is_clk_owner(r):
+        c = 0 if s.does(r) else E
+        return c, c
+    if s.op == Op.HOLD or not s.clocked:
         if s.does(r):
-            return 0
-        return max(0, E - nom) if s.cpha == 0 else E
-    return E
+            return -nom, max(ISSUE - s.n * nom, -nom)
+        c = -nom + nom // 2 + E
+        return c, c
+    if s.is_clk_owner(r):
+        c = 0 if s.does(r) else (max(0, E - nom) if s.cpha == 0 else E)
+        return c, c
+    return E, E
 
 
 def _cost(ins: Instr) -> int:
@@ -350,8 +353,8 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                     if prev is None:  # reset completes at 0, so instruction 0 starts at now = 2
                         st[r] = (2 + lo, 2 + hi)
                     else:             # the first own cycle >= c + 1: c + 1 or c + ISSUE (isa §4.0)
-                        c = completion(prev, r)
-                        st[r] = (c + 1 + lo, c + ISSUE + hi)
+                        c_lo, c_hi = completion(prev, r)
+                        st[r] = (c_lo + 1 + lo, c_hi + ISSUE + hi)
             if s.owner_role not in st:
                 continue
             # anchor distance along this edge only (untimed instructions don't move it)

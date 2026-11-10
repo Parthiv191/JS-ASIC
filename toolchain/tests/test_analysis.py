@@ -392,3 +392,31 @@ def test_t5_overrun_owner_hold_after_untimed():
         return d
     assert diag_rules(desc(False)) == set()
     assert diag_rules(desc(True)) == {"T5-overrun"}
+
+
+@pytest.mark.parametrize("nops,ok", [(2, True), (3, False)])
+def test_t5_overrun_hold_completion_carries_the_issue_slot(nops, ok):
+    """Rule cross-check (final review, issue 1). An owner HOLD drives, and completes, when it
+    starts: up to ISSUE late (isa §4.2). At 0 ppm with nom 8 the COND acts at 2 (tb := 2); HOLD 0
+    starts at 4, 2 late, so it completes at -nom + 2 = -6 from its end tb 10. ROLE_IF plus k NOPs
+    put HOLD 1 at 4 + 2(k + 1) against its plan at 10: 2 late for k = 2 (inside ISSUE), 4 late for
+    k = 3 (OVERRUN). The compiler must accept exactly the programs the model runs clean."""
+    from emu.isa import Role
+    from emu.model.engine import Engine
+    d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("P", nom=8)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    with d.only("a"):
+        for _ in range(nops):
+            d.nop()
+    d.hold(ln, 1, owner="a", prof=bit)
+    d.halt()
+    assert diag_rules(d) == (set() if ok else {"T5-overrun"})
+    e = Engine(compile_desc(d, check_timing=False), Role.P0)
+    for _ in range(60):
+        if e.halted:
+            break
+        e.cycle([1] * 8)
+    assert [(ev.kind, ev.measured) for ev in e.events] == ([] if ok else [("OVERRUN", 4)])

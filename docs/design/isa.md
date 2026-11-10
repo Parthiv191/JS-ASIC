@@ -414,8 +414,9 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 
 - Completion offsets relative to the step's end `tb`:
   - COND: do 0, follow `E` (START/STOP: `E + bus_confirm + 1`).
-  - HOLD: do `−nom`, follow `−nom + nom//2 + E`.
-  - Unclocked XFER: do `−P`, follow `−P + P//2 + E`.
+  - HOLD: do `−nom + max(0, L)` (it drives when it starts, at most `ISSUE` late), follow
+    `−nom + nom//2 + E`.
+  - Unclocked XFER: do `−P` (`n = 1`: `−P + max(0, L)`, as HOLD), follow `−P + P//2 + E`.
   - Clocked XFER: clock follower `E`; clock owner with the data 0; clock owner following the
     data `max(0, E − H)` (cpha 0) or `E` (cpha 1). Add `E` on a stretch lane.
   - **OD owners** read their data back, so they complete at the follow offsets: unclocked
