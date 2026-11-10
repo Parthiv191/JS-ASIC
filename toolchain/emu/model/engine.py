@@ -12,7 +12,7 @@ from typing import Iterator
 
 from ..image import Image
 from ..isa import (
-    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, U, AluOp,
+    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, U, AluOp,
     BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, li_imm, reg_of, unpack_cond, unpack_role_if,
     unpack_xfer,
 )
@@ -153,9 +153,9 @@ class Engine:
 
     def _late(self, planned: int, slot0: bool) -> None:
         """OVERRUN for an owner action after its planned cycle. The issue slot lets an action
-        planned at a step's start (offset 0) happen one cycle late."""
+        planned at a step's start (offset 0) happen up to ISSUE cycles late (isa §4.1)."""
         late = self.now - planned
-        if late > (1 if slot0 else 0):
+        if late > (ISSUE if slot0 else 0):
             self.log("OVERRUN", measured=late)
 
     def _abort(self) -> None:
