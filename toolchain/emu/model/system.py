@@ -46,6 +46,8 @@ class EngineTrace:
     #                         engine cycle c (1-based) ran in tick cycle_tick[c - 1]
     starts: list[tuple[int, int]] = field(default_factory=list)  # (pc, now) per instruction start
     halt_cycle: int | None = None  # the HALT's (or ILLEGAL's) start cycle
+    drives: list[tuple[int | None, ...]] = field(default_factory=list)  # per tick, the drive that
+    #                                                                     tick's wire was resolved from
 
     @property
     def violations(self) -> list[Event]:
@@ -60,6 +62,7 @@ class Trace:
     engines: list[EngineTrace]
     wire_edges: list[list[int]]
     contention: list[tuple[int, int]] = field(default_factory=list)
+    glitches: list[Glitch] = field(default_factory=list)
 
 
 def enabled(spec: EngineSpec, tick: int) -> bool:
@@ -102,6 +105,7 @@ class System:
         gap = max(-(-s.clock[1] // s.clock[0]) for s in self.specs)
         settle = (SYNC_LAT + 1) * gap
         last_edge = -settle - 1
+        drives: list[list[tuple[int | None, ...]]] = [[] for _ in self.engines]
         tick = 0
         while tick < max_ticks:
             if self._pushes:
@@ -109,6 +113,8 @@ class System:
                 for p in due:
                     self.engines[p[1]].tx.extend(p[2])
                     self._pushes.remove(p)
+            for log, e in zip(drives, self.engines):
+                log.append(tuple(e.drv))
             wire, cont = resolve(self.lines, [e.drv for e in self.engines])
             for g in self.glitches:
                 if g.start <= tick < g.start + g.length:
@@ -140,9 +146,11 @@ class System:
             lines=list(self.lines),
             engines=[
                 EngineTrace(e.name, e.role, e.records, e.events, e.rx, e.samples, e.branches,
-                            e.halted, e.idle, len(e.tx), self._cycle_tick[i], e.starts, e.halt_cycle)
+                            e.halted, e.idle, len(e.tx), self._cycle_tick[i], e.starts, e.halt_cycle,
+                            drives[i])
                 for i, e in enumerate(self.engines)
             ],
             wire_edges=edges,
             contention=contention,
+            glitches=list(self.glitches),
         )

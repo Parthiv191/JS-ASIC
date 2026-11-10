@@ -1,11 +1,14 @@
 """Co-simulation's model side (test/cosim/README.md): one model engine's records as trace-port
-pulses (architecture §5), and the comparator that finds the first difference."""
+pulses (architecture §5), the comparator that finds the first difference, and the replay of the
+other engines' wire into the RTL's uio_in."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-from .model.system import Trace
+from .image import Image
+from .model.bus import resolve
+from .model.system import EngineSpec, Glitch, System, Trace
 
 MASK24 = (1 << 24) - 1  # times compare modulo 2^24 (architecture §5)
 
@@ -93,3 +96,60 @@ def compare(expected: list[Pulse], observed: list[Pulse], context: int = 5) -> M
         if a != b:
             return Mismatch(i, a, b, exp[max(0, i - context):i])
     return None
+
+
+def stimulus(trace: Trace, e: int) -> list[int]:
+    """Per tick, the `uio_in` byte the RTL must see while it plays engine `e`: the wire of every
+    other engine (undriven reads 1), with the run's glitches, line i on pin LINE[i].pin."""
+    others = [et.drives for i, et in enumerate(trace.engines) if i != e]
+    pins = [i if ln.pin is None else ln.pin for i, ln in enumerate(trace.lines)]
+    out = []
+    for t in range(trace.ticks):
+        wire, _ = resolve(trace.lines, [d[t] for d in others])
+        for g in trace.glitches:
+            if g.start <= t < g.start + g.length:
+                wire[g.wire] = g.value
+        byte = 0xFF  # pins with no line read 1
+        for i, v in enumerate(wire):
+            if not v:
+                byte &= ~(1 << pins[i])
+        out.append(byte)
+    return out
+
+
+@dataclass
+class Replay:
+    """One model run, ready to replay into the RTL playing engine `engine`."""
+    image: Image
+    trace: Trace
+    engine: int
+    expected: list[Pulse]
+    stimulus: list[int]  # uio_in per tick
+
+
+def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple = (),
+           tx: dict[int, list[int]] | None = None, max_ticks: int = 50_000) -> Replay:
+    """Run every party on the model; the RTL will play `specs[engine]`. Raises ValueError when
+    the run can't be replayed exactly (test/cosim/README.md §1)."""
+    me = specs[engine]
+    if me.clock != (1, 1) or me.phase != 0:
+        raise ValueError(f"the RTL's engine must run at clock (1, 1) and phase 0, not {me.clock}, {me.phase}")
+    if any(s.image != me.image for s in specs):
+        raise ValueError("every engine must run the same image")
+    if (tx or {}).get(engine):
+        raise ValueError("no host words for the RTL's engine until the RTL has FIFOs")
+    s = System(list(specs), glitches=glitches)
+    for i, words in (tx or {}).items():
+        s.host_push(i, words)
+    trace = s.run(max_ticks)
+    if not trace.quiescent:
+        raise ValueError(f"the model run didn't settle within {max_ticks} ticks")
+    if trace.contention:
+        raise ValueError(f"push-pull contention in the model run: (tick, line) {trace.contention[:4]}")
+    own = trace.engines[engine].drives
+    for g in glitches:
+        od_pull = trace.lines[g.wire].kind == "od" and g.value == 0
+        for t in range(g.start, min(g.start + g.length, trace.ticks)):
+            if own[t][g.wire] is not None and not od_pull:
+                raise ValueError(f"glitch on line {g.wire} at tick {t} is over the RTL's own drive")
+    return Replay(me.image, trace, engine, expected(trace, engine), stimulus(trace, engine))

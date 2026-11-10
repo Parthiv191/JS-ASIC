@@ -2,14 +2,16 @@
 
 A comparator that can't fail is worse than none, so each kind of difference is planted and
 must be reported at the right index."""
+from dataclasses import replace
+
 import pytest
 
 from emu.compiler import compile_desc
-from emu.cosim import Kind, Pulse, compare, expected
+from emu.cosim import Kind, Pulse, compare, expected, replay
 from emu.desc import Description
 from emu.isa import Role
 from emu.model.engine import Event
-from emu.model.system import EngineSpec, System
+from emu.model.system import EngineSpec, Glitch, System
 
 
 def P(now, kind, pc, *fields):
@@ -80,3 +82,67 @@ def test_expected_rejects_an_unknown_event():
     t.engines[0].events.append(Event("NOT_A_KIND", 0, 2))
     with pytest.raises(ValueError, match="NOT_A_KIND"):
         expected(t, 0)
+
+
+# ---------------------------------------------------------------- replay and stimulus
+def _holds():
+    """P0 owns PP line l (idle 1) and holds it 0 then 1, nom 4 each; P1 follows."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    p = d.profile("H", nom=4)
+    d.hold(ln, 0, owner="a", prof=p)
+    d.hold(ln, 1, owner="a", prof=p)
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+def test_stimulus_is_the_peer_wire():
+    """The peer P0 drives 0 at now = 2 (on the wire from 3) and 1 at 4 (from 5): isa §4.0, §4.2."""
+    img = _holds()
+    rep = replay([EngineSpec(img, Role.P1), EngineSpec(img, Role.P0)], 0)
+    assert rep.stimulus[:7] == [0xFF] * 3 + [0xFE] * 2 + [0xFF] * 2
+    assert rep.expected == expected(rep.trace, 0) and rep.engine == 0 and rep.image is img
+
+
+def test_stimulus_excludes_the_rtl_engine():
+    img = _holds()
+    rep = replay([EngineSpec(img, Role.P0), EngineSpec(img, Role.P1)], 0)
+    assert set(rep.stimulus) == {0xFF} and len(rep.stimulus) == rep.trace.ticks
+
+
+def test_stimulus_maps_lines_to_pins():
+    img = _holds()
+    img = replace(img, lines=[replace(img.lines[0], pin=5)] + img.lines[1:])
+    rep = replay([EngineSpec(img, Role.P1), EngineSpec(img, Role.P0)], 0)
+    assert rep.stimulus[:7] == [0xFF] * 3 + [0xDF] * 2 + [0xFF] * 2
+
+
+def test_stimulus_applies_glitches():
+    img = _holds()
+    rep = replay([EngineSpec(img, Role.P1), EngineSpec(img, Role.P0)], 0, glitches=[Glitch(0, 20, 2, 0)])
+    assert rep.stimulus[19:23] == [0xFF, 0xFE, 0xFE, 0xFF]
+
+
+def test_replay_rejects_a_glitch_over_the_rtl_drive():
+    """The chip reads its own drive inside, so a glitch over it would reach only the model."""
+    img = _holds()
+    with pytest.raises(ValueError, match="glitch"):
+        replay([EngineSpec(img, Role.P0), EngineSpec(img, Role.P1)], 0, glitches=[Glitch(0, 20, 2, 0)])
+
+
+@pytest.mark.parametrize("clock,phase", [((49, 50), 0), ((1, 1), 1)])
+def test_replay_rejects_a_slow_or_late_rtl_engine(clock, phase):
+    img = _holds()
+    with pytest.raises(ValueError, match="clock"):
+        replay([EngineSpec(img, Role.P1, clock=clock, phase=phase), EngineSpec(img, Role.P0)], 0)
+
+
+def test_replay_rejects_host_words_for_the_rtl_engine():
+    img = _holds()
+    with pytest.raises(ValueError, match="FIFO"):
+        replay([EngineSpec(img, Role.P1), EngineSpec(img, Role.P0)], 0, tx={0: [1]})
+
+
+def test_replay_rejects_two_images():
+    with pytest.raises(ValueError, match="image"):
+        replay([EngineSpec(_holds(), Role.P1), EngineSpec(replace(_holds(), name="other"), Role.P0)], 0)
