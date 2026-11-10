@@ -89,13 +89,13 @@ class Engine:
         self.anchor = 0            # cycle of the last re-anchoring event (COND, clocked XFER, abort)
         self.acc = (0, 0, 0)       # accumulated (nom, min, max) of HOLD/XFER bits since the anchor
         self.now = -1
-        self.drv: list[int | None] = [
-            ln.idle if ln.kind == "pp" and self.role != Role.MON and int(ln.owner) == int(self.role) else None
-            for ln in self.lines
-        ]
-        self.inp: list[int] | None = None
+        self.drv: list[int | None] = [None] * len(self.lines)  # before RUN every pin is an input
+        # The synchronizer is preloaded with each line's idle level when RUN rises (isa §4.1):
+        # the engine sees idle at now 0-1 and the wire from now 2 (as it was at now 0).
+        idle = [ln.idle for ln in self.lines]
+        self._pipe: list[list[int]] = [idle] * SYNC_LAT
+        self.inp: list[int] = idle
         self.prev_inp: list[int] | None = None
-        self._pipe: list[list[int]] | None = None
         self.tx: deque[int] = deque()
         self.rx: list[int] = []
         self.records: list[StepRecord] = []
@@ -110,22 +110,11 @@ class Engine:
         self._proc = self._run()
 
     # ------------------------------------------------------------------ clocking
-    def preload(self, wire: list[int]) -> None:
-        """Start the synchronizer from the bus's reset state, as the RTL's input flops reset to
-        the idle level. An edge made before this engine's first cycle (a sub-cycle phase
-        offset) is then still seen."""
-        w = list(wire[: len(self.lines)])
-        self._pipe = [w] * SYNC_LAT
-        self.inp = w
-
     def cycle(self, wire: list[int]) -> None:
         """Advance one engine cycle with the current (unsynchronized) wire values."""
         if self.halted:
             return
         w = list(wire[: len(self.lines)])
-        if self._pipe is None:  # preload: as if the wire had always looked like this
-            self._pipe = [w] * SYNC_LAT
-            self.inp = w
         self.now += 1
         self._pipe.insert(0, w)
         self.prev_inp = self.inp
@@ -193,8 +182,13 @@ class Engine:
         return t + (t & 1)
 
     def _run(self) -> Gen:
-        # s0 (now = 0) presents address 0; the word lands two cycles later, so instruction 0
-        # starts at now = 2 (isa §4.0).
+        # s0 (now = 0) drives each non-gated PP line the role owns to idle, on the wire from
+        # now = 1 (isa §2), and presents address 0; the word lands two cycles later, so
+        # instruction 0 starts at now = 2 (isa §4.0).
+        if self.role != Role.MON:
+            for i, ln in enumerate(self.lines):
+                if ln.kind == "pp" and not ln.gated and int(ln.owner) == int(self.role):
+                    self.drv[i] = ln.idle
         yield
         yield
         while True:
