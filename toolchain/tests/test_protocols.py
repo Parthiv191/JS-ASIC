@@ -58,20 +58,35 @@ def shortest_bit(ppm):
     raise AssertionError("no bit period compiles")
 
 
+@pytest.mark.parametrize("perm", PERMS, ids=lambda p: "-".join(r.name for r in p))
 @pytest.mark.parametrize("tx_fast", [True, False], ids=["tx-fast", "tx-slow"])
-def test_uart_at_tolerance_edge_min_period(tx_fast):
+def test_uart_at_tolerance_edge_min_period(tx_fast, perm):
     """Rule cross-check: the shortest bit the compiler accepts at 2% is 19 cycles (2.6 Mbaud at
     50 MHz; T5-watch, test_analysis.test_t1_uart_period_boundary), and it runs clean with the full
-    2% drift at every sub-cycle phase."""
+    2% drift at every sub-cycle phase, in every role assignment."""
     P = shortest_bit(20000)
     assert P == 19
-    perm = (Role.P0, Role.P1, Role.MON)
-    clocks = {0: BASE, 1: SLOW, 2: SLOW} if tx_fast else {0: SLOW, 1: BASE, 2: BASE}
+    tx = perm.index(Role.P0)
+    fast, slow = (BASE, SLOW) if tx_fast else (SLOW, BASE)
+    clocks = {i: fast if i == tx else slow for i in range(3)}
     for phase in range(4):
         data = uart_data(n=12, seed=phase)
         t = run_roles(get("uart").build(bit_cycles=P), perm, {"tx": data}, clocks=clocks,
-                      phases={1: phase, 2: phase})
+                      phases={i: phase for i in range(3) if i != tx})
         assert_clean(t, perm, data)
+
+
+ON_CHIP = [(Role.P0, Role.P1), (Role.P1, Role.P0), (Role.P0, Role.MON), (Role.MON, Role.P0)]
+
+
+@pytest.mark.parametrize("perm", ON_CHIP, ids=lambda p: "-".join(r.name for r in p))
+def test_uart_on_chip_engine_1_one_clk_behind(perm):
+    """The chip's own arrangement (isa §4.0): both engines on clk, engine 1 one clk behind engine 0.
+    The shortest accepted UART runs clean whichever engine transmits."""
+    data = uart_data(n=6)
+    t = run_roles(get("uart").build(bit_cycles=19), perm, {"tx": data}, phases={1: 1})
+    assert t.quiescent
+    assert_clean(t, perm, data)
 
 
 @pytest.mark.parametrize("tx_fast", [True, False], ids=["tx-fast", "tx-slow"])
