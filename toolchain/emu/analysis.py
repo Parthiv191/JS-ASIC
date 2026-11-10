@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
-    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, NUM_REGS, QUANT as Q, BrCond, Dst, Instr, Op, Owner, RawOp, Role,
+    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
+    RawOp, Role,
     reg_of, unpack_role_if, unpack_xfer,
 )
 
@@ -174,30 +175,33 @@ def _steps(low: Lowered) -> dict[int, _Step]:
     return out
 
 
-def completion(s: _Step | None, r: Role) -> int:
-    """Cycle (relative to the step's end tb) at which role r finishes step s."""
-    if s is None:  # reset: everyone starts executing pc 0 at cycle 0
-        return -1
+def completion(s: _Step, r: Role) -> tuple[int, int]:
+    """Cycles (lo, hi), relative to the step's end tb, in which role r finishes step s (isa §6).
+
+    An owner's HOLD drives, and completes, when it starts, which is up to ISSUE late (isa §4.2;
+    T5-overrun bounds the start). So does a 1-bit unclocked XFER; with more bits the last one is
+    planned past ISSUE, so the lateness is absorbed."""
     nom = s.prof.nom
     if s.op == Op.COND:
-        return 0 if s.does(r) else E
-    if s.op == Op.HOLD:
-        return -nom if s.does(r) else -nom + nom // 2 + E
-    if not s.clocked:
-        return -nom if s.does(r) else -nom + nom // 2 + E
-    if s.is_clk_owner(r):
+        c = 0 if s.does(r) else E
+        return c, c
+    if s.op == Op.HOLD or not s.clocked:
         if s.does(r):
-            return 0
-        return max(0, E - nom) if s.cpha == 0 else E
-    return E
+            return -nom, max(ISSUE - s.n * nom, -nom)
+        c = -nom + nom // 2 + E
+        return c, c
+    if s.is_clk_owner(r):
+        c = 0 if s.does(r) else (max(0, E - nom) if s.cpha == 0 else E)
+        return c, c
+    return E, E
 
 
 def _cost(ins: Instr) -> int:
+    """Cycles an untimed instruction adds to `L` (isa §4.0, §6): U, and RAW DELAY n rounded up to a
+    multiple of U. POP counts U; a stall is T5-stall's job."""
     if ins.op == Op.RAW and ins.sub == RawOp.DELAY:
-        return max(1, ins.operand)
-    if ins.op == Op.ROLE_IF:
-        return 1
-    return 1
+        return -(-max(1, ins.operand) // U) * U
+    return U
 
 
 def gaps(instrs: list[Instr], timed: set[int], start: int, role: Role) -> dict[int, tuple[int, int]]:
@@ -287,10 +291,10 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
             P = p.nom
             for a, lo, hi in tuples:
                 dr = drift(ppm, a + s.n * P)
-                if dr + Q + 1 >= P // 2:
+                if dr + Q + ISSUE >= P // 2:
                     diags.add("T1-sample", pc, f"last sample of slot length {P} at anchor distance {a}: "
-                                               f"needs drift {dr} + QUANT {Q} + 1 = {dr + Q + 1} < P//2 = {P // 2} "
-                                               f"({ppm} ppm)")
+                                               f"needs drift {dr} + QUANT {Q} + ISSUE {ISSUE} = {dr + Q + ISSUE} "
+                                               f"< P//2 = {P // 2} ({ppm} ppm)")
         # T2: accumulated windows of CHK unclocked XFER
         if s.op == Op.XFER and not s.clocked and s.chk:
             for a, lo, hi in tuples:
@@ -346,8 +350,11 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
             for r in ROLES:
                 if nxt_pc in per_role[r]:
                     lo, hi = per_role[r][nxt_pc]
-                    c = completion(prev, r)
-                    st[r] = (c + 1 + lo, c + 1 + hi)
+                    if prev is None:  # reset completes at 0, so instruction 0 starts at now = 2
+                        st[r] = (2 + lo, 2 + hi)
+                    else:             # the first own cycle >= c + 1: c + 1 or c + ISSUE (isa §4.0)
+                        c_lo, c_hi = completion(prev, r)
+                        st[r] = (c_lo + 1 + lo, c_hi + ISSUE + hi)
             if s.owner_role not in st:
                 continue
             # anchor distance along this edge only (untimed instructions don't move it)
@@ -365,7 +372,7 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
     followers = [r for r in st if not s.does(r)]
     if s.op == Op.COND:
         offset = p.nom
-        if p.bounded and o_hi > max(offset, 1):
+        if p.bounded and o_hi > (offset if offset > 0 else ISSUE):
             diags.add("T5-overrun", pc, f"owner starts at {o_hi}, after the planned action at {offset}")
         event = max(p.nom, o_lo)
         dr = drift(ppm, amax + p.nom)
@@ -380,11 +387,10 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             if (p.min > 0 and p.min > m_lo) or (p.bounded and p.max < m_hi):
                 diags.add("T2-window", pc, f"window [{p.min},{p.max}] does not contain [{m_lo},{m_hi}]")
         return
-    # HOLD / XFER: the owner's first action is at offset 0 (issue slot allows 1)
+    # HOLD / XFER: the owner's first action is at offset 0 (the issue slot allows ISSUE)
     if s.clocked:
-        c_hi = st.get(s.clk_owner, (0, 0))[1]
-        if c_hi > 1:
-            diags.add("T5-overrun", pc, f"clock owner starts at {c_hi}, after the step start")
+        # No T5-overrun: a clock owner re-bases tb := max(tb, start - H) or max(tb, start) instead
+        # of overrunning (isa §4.1, §6). The model runs clocked XFER from step 3b.
         first_obs = p.nom + E  # first leading edge, as seen by a clock follower
         dr = drift(ppm, amax + p.nom)
         for r in st:
@@ -397,8 +403,8 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
                 diags.add("T3-latency", pc, f"data owner starts at {o_hi}; bit 0 is not valid before the "
                                             f"first capture edge at {p.nom}")
         return
-    if o_hi > 1:
-        diags.add("T5-overrun", pc, f"owner starts at {o_hi}, after the step start")
+    if o_hi > ISSUE:
+        diags.add("T5-overrun", pc, f"owner starts at {o_hi}, more than ISSUE after the step start")
     sample = p.nom // 2 + E
     dr = drift(ppm, amax + p.nom)
     for r in followers:

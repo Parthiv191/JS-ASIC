@@ -7,9 +7,9 @@ decides. Where it is silent, the model decides and this doc gets updated. Why ea
 
 Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 
-**The model's encoding and image are v1** (`emu/isa.py`, `emu/image.py`); its execution is still v0
-(1-cycle untimed instructions, unbounded FIFOs, fractional clocks). It must implement this doc,
-§4.0 especially, before RTL co-simulation.
+**Model status:** the encoding, the image and fetch and issue timing (§4.0) are v1. Still to come:
+clocked XFER, COND START/STOP and MEAS, the FIFO depths (§4.9), the stall re-base (§4.1) and the
+24-bit clamp. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -414,8 +414,9 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 
 - Completion offsets relative to the step's end `tb`:
   - COND: do 0, follow `E` (START/STOP: `E + bus_confirm + 1`).
-  - HOLD: do `−nom`, follow `−nom + nom//2 + E`.
-  - Unclocked XFER: do `−P`, follow `−P + P//2 + E`.
+  - HOLD: do `−nom + max(0, L)` (it drives when it starts, at most `ISSUE` late), follow
+    `−nom + nom//2 + E`.
+  - Unclocked XFER: do `−P` (`n = 1`: `−P + max(0, L)`, as HOLD), follow `−P + P//2 + E`.
   - Clocked XFER: clock follower `E`; clock owner with the data 0; clock owner following the
     data `max(0, E − H)` (cpha 0) or `E` (cpha 1). Add `E` on a stretch lane.
   - **OD owners** read their data back, so they complete at the follow offsets: unclocked

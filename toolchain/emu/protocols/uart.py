@@ -10,7 +10,7 @@ from ..desc import Description
 from . import ProtocolSpec, slack
 
 
-def build(bit_cycles: int = 16, data_bits: int = 8, tolerance_ppm: int = 20000) -> Description:
+def build(bit_cycles: int = 20, data_bits: int = 8, tolerance_ppm: int = 20000) -> Description:
     P = bit_cycles
     s = slack(P, tolerance_ppm)
     d = Description("uart", parties=("tx", "rx"), tolerance_ppm=tolerance_ppm)
@@ -35,7 +35,9 @@ def payload(rng, n: int, data_bits: int = 8, **_) -> dict[str, list[int]]:
 SPEC = ProtocolSpec(
     name="uart",
     build=build,
-    defaults=dict(bit_cycles=16, data_bits=8, tolerance_ppm=20000),
-    space=dict(bit_cycles=[10, 12, 16, 32, 434], data_bits=[5, 6, 7, 8], tolerance_ppm=[0, 5000, 20000]),
+    # At 2% the compiler needs P >= 19 (isa §6 T5-watch: the receiver's BR and ROLE_IF before the
+    # next start edge). 434 is 115200 baud at 50 MHz.
+    defaults=dict(bit_cycles=20, data_bits=8, tolerance_ppm=20000),
+    space=dict(bit_cycles=[19, 20, 32, 434], data_bits=[5, 6, 7, 8], tolerance_ppm=[0, 5000, 20000]),
     payload=payload,
 )

@@ -4,7 +4,8 @@ import pytest
 
 from emu.compiler import compile_desc
 from emu.desc import Description
-from emu.isa import EDGE_LAT, QUANT, Role
+from emu.isa import EDGE_LAT, INF, QUANT, Role
+from emu.model.engine import Engine
 from emu.model.system import Glitch
 
 from simutil import kinds, run_sys
@@ -96,11 +97,11 @@ def test_xfer_widths_and_order(n, msb, pattern):
 def test_xfer_wire_order_msb_vs_lsb():
     t_lsb = run_sys(compile_desc(frame(n=8, msb=False)), tx={0: [0x01]})
     t_msb = run_sys(compile_desc(frame(n=8, msb=True)), tx={0: [0x01]})
-    # Slot s is on the wire at ticks 1 + sP .. sP + P: slot 0 is the start bit, slots 1-8
-    # the data, slot 9 the stop bit (as in test_hold_level_mismatch_logs_level_and_aborts).
-    # LSB-first 0x01 is high in slot 1, right after the start bit; MSB-first in slot 8.
-    assert t_lsb.wire_edges[0][:2] == [1, 1 + P]
-    assert t_msb.wire_edges[0][:2] == [1, 1 + 8 * P]
+    # The owner's COND acts at now = 2 (instruction 0's start, isa §4.0), so slot s is on the wire
+    # at ticks 3 + sP .. 2 + sP + P: slot 0 is the start bit, slots 1-8 the data, slot 9 the stop
+    # bit. LSB-first 0x01 is high in slot 1, right after the start bit; MSB-first in slot 8.
+    assert t_lsb.wire_edges[0][:2] == [3, 3 + P]
+    assert t_msb.wire_edges[0][:2] == [3, 3 + 8 * P]
 
 
 def test_xfer_check_flags_stretched_bit():
@@ -146,8 +147,8 @@ def late_desc(second_cond=False):
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit)
     d.cond("rise", ln, owner="a", prof=win)
-    if second_cond:
-        d.cond("fall", ln, owner="a")
+    if second_cond:  # unbounded (T5-timeout); nom 4 so followers of the rise can watch in time (T5-watch)
+        d.cond("fall", ln, owner="a", prof=d.profile("GAP", nom=4, min=0, max=INF))
     with d.only("b", "mon"):
         d.br("late", cond="to")
         d.mark(1)
@@ -185,13 +186,13 @@ def test_to_flag_cleared_by_next_timed_step():
 @pytest.mark.parametrize("phase", range(4))
 @pytest.mark.parametrize("value", [0xA5, 0x5A])
 def test_shortest_accepted_slot_runs_clean_at_every_phase(phase, value):
-    """At 0 ppm T1 accepts slots from P = 6 (test_analysis). Every engine runs at 1/4 of
-    the tick rate, so a follower offset by 1-3 ticks sees each edge a fraction of a cycle
-    later than the owner made it. Every such phase must still sample every bit."""
-    d = Description("p6", parties=("a", "b"), tolerance_ppm=0)
+    """At 0 ppm T1 accepts slots from P = 8 (QUANT + ISSUE = 3 < P//2; test_analysis). Every engine
+    runs at 1/4 of the tick rate, so a follower offset by 1-3 ticks sees each edge a fraction of a
+    cycle later than the owner made it. Every such phase must still sample every bit."""
+    d = Description("p8", parties=("a", "b"), tolerance_ppm=0)
     ln = d.line("l", owner="a", idle=1)
     d.abort_to("end")
-    bit = d.profile("BIT", nom=6)
+    bit = d.profile("BIT", nom=8)
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
     d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
@@ -224,12 +225,12 @@ def test_cond_with_min_zero_runs_clean():
 @pytest.mark.parametrize("phase", range(0, 8, 3))
 @pytest.mark.parametrize("ratios", [((50, 400), (49, 400)), ((49, 400), (50, 400))], ids=["slow", "fast"])
 def test_t1_boundary_at_2pct_runs_clean(ratios, phase):
-    """At 2% T1 accepts this frame from P = 10 (P = 9 fails: ceil(0.02*90) + 2 = 4, not < 4).
-    The follower runs 2% slower or faster than the owner, at sub-cycle phase offsets."""
-    d = Description("p10", parties=("a", "b"), tolerance_ppm=20000)
+    """At 2% T1 accepts this frame from P = 14 (P = 13 fails: ceil(0.02*130) + QUANT + ISSUE = 6,
+    not < 6). The follower runs 2% slower or faster than the owner, at sub-cycle phase offsets."""
+    d = Description("p14", parties=("a", "b"), tolerance_ppm=20000)
     ln = d.line("l", owner="a", idle=1)
     d.abort_to("end")
-    bit = d.profile("BIT", nom=10)
+    bit = d.profile("BIT", nom=14)
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
     d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
@@ -245,11 +246,12 @@ def test_t1_boundary_at_2pct_runs_clean(ratios, phase):
 
 
 def test_follower_samples_at_slot_midpoints():
-    """isa-v0 §4.2-4.3: a follower samples slot s at its tb + s*P + P//2 + EDGE_LAT. Equal clocks:
-    the COND anchors at 0, so the 10 slots (start, 8 data, stop) are sampled at 11 + 16s."""
+    """isa §4.2-4.3: a follower samples slot s at its tb + s*P + P//2 + EDGE_LAT. Equal clocks:
+    the COND anchors at the owner's action cycle 2, so the 10 slots (start, 8 data, stop) are
+    sampled at 13 + 16s."""
     t = run_sys(compile_desc(frame()), tx={0: [0xA5]})
     for i in (1, 2):
-        assert [s.cycle for s in t.engines[i].samples] == [P // 2 + EDGE_LAT + s * P for s in range(10)]
+        assert [s.cycle for s in t.engines[i].samples] == [2 + P // 2 + EDGE_LAT + s * P for s in range(10)]
 
 
 @pytest.mark.parametrize("scale", [14 / 16, 18 / 16], ids=["at-min", "at-max"])
@@ -289,12 +291,13 @@ def test_chk_xfer_at_anchor_raises_the_false_alarm_t2_prevents():
 
 
 def test_idle_cond_accepts_an_early_start_edge_from_a_fast_transmitter():
-    """Why COND checks EARLY only when min > 0 (isa-v0 §4.1). Back-to-back frames from a
-    transmitter 2% fast put each start edge 3-4 cycles before the receiver's expected end of
-    the stop bit. With min = 0 that is legal; checking m >= -QUANT would flag every frame."""
+    """Why COND checks EARLY only when min > 0 (isa §4.2). Back-to-back frames from a
+    transmitter 2% fast put each start edge about 4 cycles (2% of 10P) before the receiver's
+    expected end of the stop bit. With min = 0 that is legal; checking m >= -QUANT would flag every
+    frame. P = 20: v1's T5-watch needs ceil(P/2) - ceil(P/5) >= 6 at 2%, so P >= 19 (isa §6)."""
     from descs import uart_like
     data = list(range(1, 9))
-    t = run_sys(compile_desc(uart_like(16)), tx={0: data}, clocks={1: (49, 50), 2: (49, 50)})
+    t = run_sys(compile_desc(uart_like(20)), tx={0: data}, clocks={1: (49, 50), 2: (49, 50)})
     for i in (1, 2):
         recs = t.engines[i].records
         early = [recs[j].tb - recs[j - 1].tb for j in range(1, len(recs)) if recs[j].op == "COND"]
@@ -308,3 +311,76 @@ def test_xfer_check_with_abort_aborts_on_an_out_of_window_edge():
     for i in (1, 2):
         assert kinds(t, i) == ["EDGE", "ABORT"]  # jumped to the abort vector: no stop-bit LEVEL
         assert t.engines[i].rx == []
+
+
+def _owner_holds(first_nom, second_nom, pre_li=False):
+    d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    if pre_li:
+        d.li("r0", 1)
+    d.hold(ln, 0, owner="a", prof=d.profile("A", nom=first_nom))
+    d.hold(ln, 1, owner="a", prof=d.profile("B", nom=second_nom))
+    d.halt()
+    e = Engine(compile_desc(d, check_timing=False), Role.P0)
+    for _ in range(40):
+        if e.halted:
+            break
+        e.cycle([1] * 8)
+    return e
+
+
+def test_hold_at_pc0_is_two_late_without_overrun():
+    """isa §4.1: an action planned at offset 0 may happen up to ISSUE = 2 cycles late. HOLD 0 is
+    planned at tb = 0 and starts at 2: no OVERRUN, tb := 3. Its successor starts at the first own
+    cycle >= max(2 + 1, 2 + 2) = 4, one cycle after its plan: still no OVERRUN."""
+    e = _owner_holds(3, 3)
+    assert [ev.kind for ev in e.events] == []
+    assert e.starts == [(0, 2), (1, 4), (2, 6)]
+    assert [r.tb for r in e.records] == [3, 6]
+
+
+def test_hold_after_li_overruns_by_4():
+    """LI at 2 puts HOLD's start at 4, 4 cycles after its plan at tb = 0: past ISSUE, OVERRUN(4).
+    An overrun doesn't move the timeline (isa §4.1), so tb := 0 + 3 and the second HOLD, starting at
+    6, is 3 late: OVERRUN(3)."""
+    e = _owner_holds(3, 3, pre_li=True)
+    assert [(ev.kind, ev.measured) for ev in e.events] == [("OVERRUN", 4), ("OVERRUN", 3)]
+
+
+@pytest.mark.parametrize("fall,detect,halt", [(5, 7, 8), (6, 8, 10)])
+def test_follower_cond_detect_successor_on_own_cycle(fall, detect, halt):
+    """A follower COND completes in its detect cycle, fall + SYNC_LAT, which may be odd or even, with
+    tb = detect - EDGE_LAT. HALT starts at the first own cycle >= max(detect + 1, 2 + 2) (isa §4.0):
+    8 after an odd detect at 7, but 10 (not 9) after an even detect at 8."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a")
+    d.halt()
+    t = run_sys(compile_desc(d), roles=(Role.P1,), glitches=[Glitch(0, fall, 100, 0)])
+    (rec,) = t.engines[0].records
+    assert (rec.cycle, rec.tb) == (detect, detect - EDGE_LAT)
+    assert t.engines[0].starts == [(0, 2), (1, halt)]
+
+
+@pytest.mark.parametrize("mx,t,cost", [(4, 9, 3), (5, 10, 4)])
+def test_abort_restart_costs_3_or_4(mx, t, cost):
+    """A followed COND (min 0, nom 3, max mx) starts at 2 with tb = 0 and no edge ever comes. It
+    times out at the first now with now - EDGE_LAT > tb + max + QUANT, i.e. t = mx + 5, and aborts.
+    abort_pc is fetched on the first own cycle >= t + 1 and starts 2 cycles later (isa §4.0): t + 3
+    when t is odd, t + 4 when it is even."""
+    d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    d.abort_to("end")
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=3, min=0, max=mx), abort=True)
+    d.halt()
+    d.label("end")
+    d.mark(1)
+    d.halt()
+    e = Engine(compile_desc(d, check_timing=False), Role.P1)
+    for _ in range(40):
+        if e.halted:
+            break
+        e.cycle([1] * 8)
+    assert [(ev.kind, ev.cycle) for ev in e.events if ev.kind in ("TIMEOUT", "ABORT")] == [
+        ("TIMEOUT", t), ("ABORT", t)]
+    assert e.starts[:2] == [(0, 2), (2, t + cost)]
