@@ -124,6 +124,12 @@
   "//": "Fail on global-route overflow (the template allows it, which hides congestion; architecture 9).",
   "GRT_ALLOW_CONGESTION": 0,
 
+  "//": "JS-ASIC: global-route derating 0.2 (LibreLane default 0.3). With engine 0, run 42765965907",
+  "//": "overflowed 13 tracks (1-2 per gcell, Metal3, inside the engine's register-file wiring) at",
+  "//": "14% routing usage; OpenROAD suggested <= 16%. Re-run locally on that run's post-CTS odb:",
+  "//": "0.3 -> 78 overflows, 0.2 -> 0. Detailed routing still has to come out clean.",
+  "GRT_ADJUSTMENT": 0.2,
+
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
 
