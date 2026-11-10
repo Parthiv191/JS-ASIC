@@ -79,7 +79,7 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
     od_lanes = {i for i, la in enumerate(img.lanes) if img.lines[la.data].kind == "od"}
     abort_pc = img.abort_pc if any(_aborts(ins) for ins in instrs) else None
     all_tainted = (1 << NUM_REGS) - 1
-    state: dict[int, int] = {0: 0}
+    state: dict[int, int] = {0: all_tainted}  # registers keep their values across RUN (isa §1)
     work = [0]
     while work:
         pc = work.pop()

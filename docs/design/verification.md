@@ -8,7 +8,7 @@ different kind of bug; a new layer earns its place by catching what the others m
 
 | Layer | Catches | Status (11-09) | Where |
 |---|---|---|---|
-| Model tests, and cross-role tests where the two engines play opposite roles (pytest) | the model misreading the spec | Running in CI on Python 3.11 and 3.12. Encoding and image (#5) and fetch and issue timing (isa §4.0) at v1; clocked XFER, START/STOP, MEAS and FIFO depths next | `toolchain/tests/`; cross-role: `test_system.py`, `test_protocols.py` |
+| Model tests, and cross-role tests where the two engines play opposite roles (pytest) | the model misreading the spec | Running in CI on Python 3.11 and 3.12. Encoding and image (#5), fetch and issue timing (isa §4.0), reserved codes, `BR ROLE` and registers across RUN at v1; an OD owner's readback, clocked XFER, START/STOP, MEAS and FIFO depths next | `toolchain/tests/`; cross-role: `test_system.py`, `test_protocols.py` |
 | Rule coverage: every isa.md rule, failure kind, COND and XFER case mapped to a test | spec corners nobody tested | Not started; built as the model moves to v1 | §2 |
 | Co-sim: one image on the model and the RTL, compared at step boundaries (directed tests, then the protocol programs) | the RTL misreading the spec | Not started: needs the trace port (architecture §5) and a first engine | `test/cosim/` |
 | Constrained-random programs from the compiler (legal by its rules), with a shrinker that cuts a failure to its smallest program | cases nobody thought to write | Not started; designs in the old plan, Tasks 11–18 | `toolchain/` |
@@ -16,7 +16,7 @@ different kind of bug; a new layer earns its place by catching what the others m
 | Formal proofs (SymbiYosys): FIFOs, host SPI, fetch parity, the bus detector | handshake bugs simulation misses | Not started | `formal/` |
 | Gate level: the cocotb tests on the synthesized netlist (CI `gl_test`) | synthesis mismatches, X propagation | Running on every push | `.github/workflows/gds.yaml`, `test/` |
 | FPGA (Basys 3): LOOPBACK (the two engines talk on-chip), then real devices (sensor, EEPROM, a microcontroller) | real timing, pads, electrical surprises | Not started; bring-up order in architecture §5 | `fpga/`, `host/` |
-| Mutation testing: plant a bug, check that some test fails | checks too loose to fail | By hand so far: planted bugs in the image encoder (#5) and in the issue timing (step 3a), each caught by a test | — |
+| Mutation testing: plant a bug, check that some test fails | checks too loose to fail | By hand so far: planted bugs in the image encoder (#5), the issue timing (step 3a) and the reserved-code rule (off-by-one indices, a dropped dst code, an inverted ROLE_IF record; 11-10), each caught by a test | — |
 
 ## 2. Rule coverage
 

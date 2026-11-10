@@ -157,6 +157,39 @@ class BusKind(IntEnum):
     SE0 = 3     # USB-LS end of packet [P]
 
 
+RESERVED_OPS = frozenset({Op.CHOICE, Op.ARB, Op.WAIT_ANY, Op.CODEC})
+_SUBS = {op: frozenset(int(s) for s in e)
+         for op, e in ((Op.ALU, AluOp), (Op.BR, BrCond), (Op.RAW, RawOp), (Op.CRC, CrcOp), (Op.FZ, FzOp))}
+_SRCS = frozenset(int(s) for s in Src)
+_DSTS = frozenset(int(d) for d in Dst)
+PROF_OWN = 7  # PROF writes only the engine's own profile (isa §4.8)
+
+
+def reserved(i: Instr) -> str | None:
+    """Why executing `i` is ILLEGAL (isa §3), or None when every code in it is defined. The
+    compiler never emits a reserved code; an engine that runs one logs ILLEGAL and halts."""
+    if i.op in RESERVED_OPS:
+        return f"reserved opcode {i.op.name}"
+    if i.op in _SUBS and i.sub not in _SUBS[i.op]:
+        return f"reserved {i.op.name} sub {i.sub}"
+    if i.op == Op.PROF and i.sub != PROF_OWN:
+        return f"PROF p = {i.sub}: only {PROF_OWN} is built"
+    if i.op in T_OPS:
+        if i.owner == Owner.NONE:
+            return "reserved step owner 3"
+        if i.prof >= NUM_PROFILES:
+            return f"profile {i.prof} is not built"
+        if i.op != Op.XFER:
+            return f"line {i.line} does not exist" if i.line >= NUM_LINES else None
+        if i.line >= NUM_LANES:
+            return f"lane {i.line} is not built"
+        if (i.operand >> 4 & 0xF) not in _SRCS:
+            return f"reserved src {i.operand >> 4 & 0xF}"
+        if (i.operand >> 8 & 0xF) not in _DSTS:
+            return f"reserved dst {i.operand >> 8 & 0xF}"
+    return None
+
+
 F_CHK = 1 << 0
 F_RESYNC = 1 << 1
 F_ABORT = 1 << 2
