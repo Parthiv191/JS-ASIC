@@ -13,16 +13,19 @@ from simutil import kinds, run_sys
 P = 16
 
 
-def frame(n=8, msb=False, check=False, resync=False, dst="fifo", src="fifo", tail=None, ppm=20000,
-          abort=False):
-    """COND fall (IDLE) · HOLD 0 (start) · XFER n · HOLD 1 (stop) · [tail] · HALT."""
+def frame(n=8, msb=False, check=False, resync=False, dst="fifo", tail=None, ppm=20000, abort=False):
+    """[a: POP r7] · COND fall (IDLE) · HOLD 0 (start) · XFER n from r7 · HOLD 1 (stop) · [tail] · HALT.
+    The owner pops its word before the start edge, as the library UART does (T5-stall): its COND
+    acts at now = 6, after ROLE_IF and POP."""
     d = Description("f", parties=("a", "b"), tolerance_ppm=ppm)
     ln = d.line("l", owner="a", idle=1)
     bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
     d.abort_to("end")
+    with d.only("a"):
+        d.pop("r7")
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
-    d.xfer(n, ln, owner="a", prof=bit, src=src, dst=dst, msb_first=msb, check=check, resync=resync,
+    d.xfer(n, ln, owner="a", prof=bit, src="r7", dst=dst, msb_first=msb, check=check, resync=resync,
            abort=abort)
     d.hold(ln, 1, owner="a", prof=bit, abort=True)
     if tail:
@@ -72,8 +75,8 @@ def test_cond_window_early_and_timeout():
 
 def test_hold_level_mismatch_logs_level_and_aborts():
     img = compile_desc(frame())
-    # stop bit (slot 9: ticks 145..160) sampled at mid-slot; force it low around the sample
-    t = run_sys(img, tx={0: [0x00]}, glitches=[Glitch(0, 146, 12, 0)])
+    # stop bit (slot 9: ticks 149..164) sampled at mid-slot; force it low around the sample
+    t = run_sys(img, tx={0: [0x00]}, glitches=[Glitch(0, 150, 12, 0)])
     for i in (1, 2):
         assert "LEVEL" in kinds(t, i) and "ABORT" in kinds(t, i)
 
@@ -97,11 +100,11 @@ def test_xfer_widths_and_order(n, msb, pattern):
 def test_xfer_wire_order_msb_vs_lsb():
     t_lsb = run_sys(compile_desc(frame(n=8, msb=False)), tx={0: [0x01]})
     t_msb = run_sys(compile_desc(frame(n=8, msb=True)), tx={0: [0x01]})
-    # The owner's COND acts at now = 2 (instruction 0's start, isa §4.0), so slot s is on the wire
-    # at ticks 3 + sP .. 2 + sP + P: slot 0 is the start bit, slots 1-8 the data, slot 9 the stop
-    # bit. LSB-first 0x01 is high in slot 1, right after the start bit; MSB-first in slot 8.
-    assert t_lsb.wire_edges[0][:2] == [3, 3 + P]
-    assert t_msb.wire_edges[0][:2] == [3, 3 + 8 * P]
+    # The owner's COND acts at now = 6 (after ROLE_IF and POP), so slot s is on the wire at ticks
+    # 7 + sP .. 6 + sP + P: slot 0 is the start bit, slots 1-8 the data, slot 9 the stop bit.
+    # LSB-first 0x01 is high in slot 1, right after the start bit; MSB-first in slot 8.
+    assert t_lsb.wire_edges[0][:2] == [7, 7 + P]
+    assert t_msb.wire_edges[0][:2] == [7, 7 + 8 * P]
 
 
 def test_xfer_check_flags_stretched_bit():
@@ -119,9 +122,12 @@ def test_xfer_resync_recovers_drift():
     assert run(False).engines[1].rx != [0x5555]
 
 
-def test_xfer_fifo_stall_logs_overrun():
+def test_late_host_data_stalls_pop_and_the_frame_stays_clean():
+    """isa §4.1 stall re-base: the host's word arrives at tick 200. POP waits, the unbounded COND
+    it does next re-bases, and the follower waits for that start edge: nobody logs anything."""
     t = run_sys(compile_desc(frame()), roles=(Role.P0, Role.P1), tx={0: [0x3C]}, push_at=200)
-    assert "OVERRUN" in kinds(t, 0)
+    assert t.engines[1].rx == [0x3C] and not any(et.events for et in t.engines)
+    assert t.engines[0].records[0].cycle > 200
 
 
 def test_xfer_dst_fifo_only_in_follow_mode():
@@ -193,9 +199,11 @@ def test_shortest_accepted_slot_runs_clean_at_every_phase(phase, value):
     ln = d.line("l", owner="a", idle=1)
     d.abort_to("end")
     bit = d.profile("BIT", nom=8)
+    with d.only("a"):
+        d.pop("r7")
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
-    d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
+    d.xfer(8, ln, owner="a", prof=bit, src="r7", dst="fifo")
     d.hold(ln, 1, owner="a", prof=bit, abort=True)
     d.label("end")
     d.halt()
@@ -231,9 +239,11 @@ def test_t1_boundary_at_2pct_runs_clean(ratios, phase):
     ln = d.line("l", owner="a", idle=1)
     d.abort_to("end")
     bit = d.profile("BIT", nom=14)
+    with d.only("a"):
+        d.pop("r7")
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
-    d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
+    d.xfer(8, ln, owner="a", prof=bit, src="r7", dst="fifo")
     d.hold(ln, 1, owner="a", prof=bit, abort=True)
     d.label("end")
     d.halt()
@@ -247,11 +257,11 @@ def test_t1_boundary_at_2pct_runs_clean(ratios, phase):
 
 def test_follower_samples_at_slot_midpoints():
     """isa §4.2-4.3: a follower samples slot s at its tb + s*P + P//2 + EDGE_LAT. Equal clocks:
-    the COND anchors at the owner's action cycle 2, so the 10 slots (start, 8 data, stop) are
-    sampled at 13 + 16s."""
+    the COND anchors at the owner's action cycle 6, so the 10 slots (start, 8 data, stop) are
+    sampled at 17 + 16s."""
     t = run_sys(compile_desc(frame()), tx={0: [0xA5]})
     for i in (1, 2):
-        assert [s.cycle for s in t.engines[i].samples] == [2 + P // 2 + EDGE_LAT + s * P for s in range(10)]
+        assert [s.cycle for s in t.engines[i].samples] == [6 + P // 2 + EDGE_LAT + s * P for s in range(10)]
 
 
 @pytest.mark.parametrize("scale", [14 / 16, 18 / 16], ids=["at-min", "at-max"])
@@ -276,9 +286,10 @@ def test_chk_xfer_at_anchor_raises_the_false_alarm_t2_prevents():
     ln = d.line("l", owner="a", idle=1)
     bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
     with d.only("a"):
-        d.raw_delay(11)  # moves the anchor onto a 5-tick owner cycle
+        d.pop("r7")
+        d.raw_delay(9)  # with the POP, 12 cycles: moves the anchor onto a 5-tick owner cycle
     d.cond("fall", ln, owner="a")
-    d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo", check=True)
+    d.xfer(8, ln, owner="a", prof=bit, src="r7", dst="fifo", check=True)
     d.hold(ln, 1, owner="a", prof=bit)
     d.halt()
     from emu.compiler import CompileError
@@ -489,3 +500,73 @@ def test_od_owner_reads_the_wire_back_where_a_follower_samples():
     assert (xfer.value, xfer.cycle, xfer.tb) == (0xA0, base + 7 * 20 + 10 + EDGE_LAT, base + 8 * 20)
     assert [e.regs[1] for e in s.engines] == [0xA0, 0xA0]
     assert not owner.samples and not owner.violations
+
+
+def _stall_then(step, push_at, gap=None):
+    """P0 alone: POP r0 (data from the host at `push_at`), [RAW DELAY gap], then `step(d, ln, bit)`."""
+    d = Description("s", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=10, min=8, max=12)
+    d.pop("r0")
+    if gap:
+        d.raw_delay(gap)
+    step(d, ln, bit)
+    d.halt()
+    return run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,), tx={0: [0x5A]}, push_at=push_at)
+
+
+def _hold(d, ln, bit):
+    d.hold(ln, 0, owner="a", prof=bit)
+
+
+def test_pop_stall_rebases_the_next_owned_step():
+    """isa §4.1: an owned step that starts late because its owner stalled sets tb := max(tb,
+    start) and logs nothing. POP waits for the host until tick 100; the HOLD drives at its start."""
+    t = _stall_then(_hold, push_at=100)
+    et = t.engines[0]
+    (hold,) = et.records
+    start = next(now for pc, now in et.starts if pc == hold.pc)
+    assert start > 100 and hold.tb == start + 10 and not et.events
+
+
+def test_rebase_needs_a_real_stall():
+    """A POP that finds data doesn't stall: the HOLD after a 50-cycle delay is late, so OVERRUN."""
+    t = _stall_then(_hold, push_at=0, gap=50)
+    assert kinds(t, 0) == ["OVERRUN"]
+
+
+def test_a_followed_step_ends_the_stall():
+    """The stall flag lasts until the next timed step. If that step is followed, it takes its
+    timing from the other party and the stall re-bases nothing: an owned HOLD 50 cycles after
+    the followed COND is late, so OVERRUN. (T5-stall rejects this program.)"""
+    d = Description("s", parties=("a", "b"))
+    req = d.line("req", owner="b", idle=1)
+    ack = d.line("ack", owner="a", idle=1)
+    bit = d.profile("BIT", nom=10, min=8, max=12)
+    d.pop("r0")
+    d.cond("fall", req, owner="b")
+    d.raw_delay(50)
+    d.hold(ack, 0, owner="a", prof=bit)
+    d.halt()
+    # a stuck-low line (no P1) gives the fall
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,), tx={0: [1]}, push_at=100,
+                glitches=[Glitch(0, 120, 400, 0)])
+    assert kinds(t, 0) == ["OVERRUN"]
+
+
+def test_src_fifo_wait_retries_every_cycle_and_rebases_the_xfer():
+    """isa §4.3: an owner whose src = FIFO is empty waits for data, checking every cycle (not
+    only its own cycles), and the XFER re-bases to the cycle it takes the word: bit 0 goes out
+    then, with no OVERRUN. The host writes at the odd tick 101."""
+    def step(d, ln, bit):
+        d.xfer(8, ln, owner="a", prof=bit, src="fifo")
+    d = Description("s", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=10, min=8, max=12)
+    step(d, ln, bit)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,), tx={0: [0x5A]}, push_at=101)
+    et = t.engines[0]
+    (x,) = et.records
+    assert (x.value, x.tb) == (0x5A, 101 + 8 * 10) and not et.events
+    assert t.wire_edges[0][0] == 102  # bit 0 (a 0) driven at 101, on the wire from 102

@@ -79,6 +79,7 @@ target. Tier tags (Core/Plus/…) as in chip-spec §4.
   - writing the tables or column 1 while an engine runs;
   - writing column 2 while it's busy;
   - any write during boot;
+  - a TXDATA write while that engine's TX FIFO is full (the word is dropped);
   - DBG_STEP or DBG_EXEC writes to an engine that isn't halted, and REG_DATA writes to a
     running engine.
 - The read mux is a 2-cycle (multicycle) path. Large readable blocks use index windows, which

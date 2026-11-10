@@ -438,3 +438,50 @@ def test_r2_rejects_branch_on_raw_evt_reg():
     d.raw_evt("r0", 0)
     d.br("x", cond="z", reg="r0")
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
+
+
+# ---------------------------------------------------------------- T5-stall
+def test_t5_stall_accepts_pop_then_an_unbounded_cond_it_does():
+    """isa §6: the library UART shape. b never pops, so its followed COND is fine."""
+    d, ln, p = two_party()
+    with d.only("a"):
+        d.pop("r0")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" not in diag_rules(d)
+
+
+def test_t5_stall_rejects_pop_then_an_owned_hold():
+    d, ln, p = two_party()
+    with d.only("a"):
+        d.pop("r0")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_rejects_pop_then_a_followed_step():
+    """The stricter reading (decisions 11-10): the very next timed step must be the staller's."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="b", idle=1)
+    with d.only("a"):
+        d.pop("r0")
+    d.cond("fall", ln, owner="b")
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_rejects_an_unclocked_src_fifo_owner():
+    """The XFER itself would start late; only a clock owner (or a lead block) makes followers wait."""
+    d, ln, p = two_party()
+    d.cond("fall", ln, owner="a")
+    d.xfer(8, ln, owner="a", prof=p, src="fifo")
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_accepts_src_fifo_on_a_lane_its_owner_clocks():
+    """A clock owner's src = FIFO waits before its first edge, so the followers wait with it."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    mosi = d.line("mosi", owner="a", idle=0)
+    half = d.profile("HALF", nom=8, min=7, max=INF)
+    d.xfer(8, d.lane("out", data=mosi, clk=sck), owner="a", prof=half, src="fifo")
+    assert "T5-stall" not in diag_rules(d)

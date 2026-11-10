@@ -349,3 +349,16 @@ def test_raw_evt_reads_then_clears_the_masked_bits():
         d.halt()
     e = run(Engine(img(b), Role.P0, evt=0b001100), 20)
     assert e.halted and e.regs[:2] == [0b1100, 0b1000] and e.evt == 0b1000
+
+
+def test_rx_fifo_holds_8_words_then_drops_with_overflow():
+    """isa §4.9: a push into a full RX FIFO (8 words) drops the word, logs OVERFLOW (never an
+    abort) and sets evt bit 4."""
+    def b(d, l):
+        for i in range(9):
+            d.li("r0", i)
+            d.push("r0")
+        d.halt()
+    e = run(Engine(img(b), Role.P0), 100)
+    assert e.halted and e.rx == list(range(8))
+    assert [ev.kind for ev in e.events] == ["OVERFLOW"] and e.evt == 1 << 4

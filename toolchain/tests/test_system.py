@@ -180,3 +180,40 @@ def test_phase_1_engine_is_shifted_one_tick():
     t1 = System([EngineSpec(image, Role.P0, phase=1)]).run(100, stop_when_quiescent=False)
     assert t0.engines[0].starts == t1.engines[0].starts == [(0, 2), (1, 4), (2, 8)]
     assert t1.engines[0].cycle_tick[:9] == [c + 1 for c in t0.engines[0].cycle_tick[:9]]
+
+
+def _pop_loop(n):
+    """P0 pops n words, pushing each into its RX FIFO."""
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    for _ in range(n):
+        d.pop("r0")
+        d.push("r0")
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+def test_host_keeps_the_tx_fifo_at_most_4_deep():
+    """isa §1: TX holds 4 words. The model's host writes only while there is room, so a backlog
+    of 8 reaches the engine in order as POP frees space."""
+    s = System([EngineSpec(_pop_loop(8), Role.P0)])
+    s.host_push(0, list(range(8)))
+    s.run(1, stop_when_quiescent=False)
+    assert list(s.engines[0].tx) == [0, 1, 2, 3]
+    s2 = System([EngineSpec(_pop_loop(8), Role.P0)])
+    s2.host_push(0, list(range(8)))
+    t = s2.run(1000)
+    assert t.engines[0].rx == list(range(8)) and t.engines[0].tx_left == 0 and not t.engines[0].events
+
+
+def test_without_host_reads_the_rx_fifo_overflows_after_8():
+    """With host_reads_rx=False the host reads RX only after the run (as co-sim's host does):
+    the 9th word is dropped with OVERFLOW. By default the host drains RX every tick."""
+    t = System([EngineSpec(_pop_loop(9), Role.P0)], host_reads_rx=False)
+    t.host_push(0, list(range(9)))
+    tr = t.run(1000)
+    assert tr.engines[0].rx == list(range(8)) and [e.kind for e in tr.engines[0].events] == ["OVERFLOW"]
+    s = System([EngineSpec(_pop_loop(9), Role.P0)])
+    s.host_push(0, list(range(9)))
+    tr = s.run(1000)
+    assert tr.engines[0].rx == list(range(9)) and not tr.engines[0].events
