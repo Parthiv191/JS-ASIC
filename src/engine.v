@@ -15,8 +15,9 @@
 // starts on the first own cycle after its predecessor completes (and >= 2 after
 // its start, which own-cycle parity gives for free).
 //
-// Time (isa §4.1): every time point is kept as a signed age `now - x` that
-// counts up each cycle and saturates at 2^22, so the 24-bit clamp is free and
+// Time (isa §4.1): every time point is kept as a signed 24-bit age `now - x`
+// (-2^23..2^23, enough for a future tb up to 16 x 0xFFFF away) that counts up each cycle and
+// saturates at 2^22, so the 24-bit clamp is free and
 // each timing check is one compare (the RTL note in §4.1):
 //   tb_age   = now - tb               anc_age = now - window anchor
 //   slot_age = now - (owner's next bit time)
@@ -78,22 +79,22 @@ module engine #(
   localparam [1:0] K_COND = 2'd1, K_HOLD = 2'd2, K_XFER = 2'd3;  // tr_op codes
   // event kinds
   localparam OVERRUN = 0, EARLY = 1, TIMEOUT = 2, LEVEL = 3, EDGE = 4, ABORT = 6, ILLEGAL = 10;
-  localparam signed [24:0] AGE_MAX = 25'sh400000;  // 2^22: the 24-bit time clamp (isa §4.1)
-  localparam signed [24:0] EDGE_LAT = 25'sd3;
-  localparam signed [24:0] ISSUE = 25'sd2;
-  localparam signed [24:0] QUANT = 25'sd1;
+  localparam signed [23:0] AGE_MAX = 24'sh400000;  // 2^22: the 24-bit time clamp (isa §4.1)
+  localparam signed [23:0] EDGE_LAT = 24'sd3;
+  localparam signed [23:0] ISSUE = 24'sd2;
+  localparam signed [23:0] QUANT = 24'sd1;
 
-  function signed [24:0] sat;  // the 2^22 clamp
-    input signed [24:0] x;
+  function signed [23:0] sat;  // the 2^22 clamp
+    input signed [23:0] x;
     sat = (x > AGE_MAX) ? AGE_MAX : x;
   endfunction
-  function signed [24:0] u16;  // a 16-bit count as a signed age
+  function signed [23:0] u16;  // a 16-bit count as a signed age
     input [15:0] x;
-    u16 = {9'h0, x};
+    u16 = {8'h0, x};
   endfunction
   function [15:0] clamp16;     // MEAS: min(max(m, 0), 0xFFFF)
-    input signed [24:0] x;
-    clamp16 = (x < 0) ? 16'h0 : (x > 25'sh00FFFF) ? 16'hFFFF : x[15:0];
+    input signed [23:0] x;
+    clamp16 = (x < 0) ? 16'h0 : (x > 24'sh00FFFF) ? 16'hFFFF : x[15:0];
   endfunction
 
   // ---- run state ----
@@ -249,7 +250,7 @@ module engine #(
 
   // ---- time ----
   reg  [23:0]        now_r;
-  reg  signed [24:0] tb_age, anc_age;
+  reg  signed [23:0] tb_age, anc_age;
   reg  [23:0]        acc_lo, acc_hi;   // window accumulated since the anchor (isa §4.1)
   reg                acc_inf;
   wire               tick = running & ~(start & stop_op);   // time freezes at the halt cycle
@@ -262,7 +263,7 @@ module engine #(
   reg  [3:0]  s_n1, s_dst;
   reg  [15:0] s_min, s_nom, s_max, s_v, s_rx;
   reg  [3:0]  s_k, s_j;                // bits driven, bits sampled
-  reg  signed [24:0] slot_age, samp_age;
+  reg  signed [23:0] slot_age, samp_age;
 
   reg  [47:0] p7;                      // this engine's private profile 7, copied at RUN
   reg  [47:0] prof;
@@ -306,16 +307,16 @@ module engine #(
   wire [3:0]  c_j     = sel ? 4'd0 : s_j;
   wire        c_first = sel;
 
-  wire signed [24:0] nom   = u16(c_nom);
-  wire signed [24:0] half  = u16({1'b0, c_nom[15:1]});
+  wire signed [23:0] nom   = u16(c_nom);
+  wire signed [23:0] half  = u16({1'b0, c_nom[15:1]});
   wire               bounded = (c_max != 16'hFFFF);
-  wire signed [24:0] h3     = half + EDGE_LAT;
-  wire signed [24:0] tb_p1  = tb_age + 25'sd1;   // from flops: early
-  wire signed [24:0] anc_p1 = anc_age + 25'sd1;
-  wire signed [24:0] c_slot = sel ? tb_age : slot_age;
-  wire signed [24:0] c_samp = sel ? tb_age - h3 : samp_age;
-  wire signed [24:0] c_slot_p1 = sel ? tb_p1 : slot_age + 25'sd1;
-  wire signed [24:0] c_samp_p1 = sel ? tb_p1 - h3 : samp_age + 25'sd1;
+  wire signed [23:0] h3     = half + EDGE_LAT;
+  wire signed [23:0] tb_p1  = tb_age + 24'sd1;   // from flops: early
+  wire signed [23:0] anc_p1 = anc_age + 24'sd1;
+  wire signed [23:0] c_slot = sel ? tb_age : slot_age;
+  wire signed [23:0] c_samp = sel ? tb_age - h3 : samp_age;
+  wire signed [23:0] c_slot_p1 = sel ? tb_p1 : slot_age + 24'sd1;
+  wire signed [23:0] c_samp_p1 = sel ? tb_p1 - h3 : samp_age + 24'sd1;
 
   wire       inp  = sync_s[c_pin];
   wire       edg  = sync_s[c_pin] ^ sync_p[c_pin];
@@ -344,7 +345,7 @@ module engine #(
   reg  [2:0]         wr_rd;
   reg  [15:0]        wr_val;
   // next-cycle ages: *_nx already includes this cycle's + 1; tb/anc update only when *_upd
-  reg  signed [24:0] tb_nx, anc_nx, slot_nx, samp_nx, s_cur, s_cur_p1;
+  reg  signed [23:0] tb_nx, anc_nx, slot_nx, samp_nx, s_cur, s_cur_p1;
   reg                tb_upd, anc_upd;
   reg                acc_clr, acc_add;
   reg                k_inc, j_inc, smp;
@@ -352,7 +353,7 @@ module engine #(
   reg  [15:0]        value;         // the step's record value
   reg                sample_tr;     // a follower sample (trace)
 
-  reg signed [24:0] m, lo, hi;
+  reg signed [23:0] m, lo, hi;
   reg               in_win;
   reg [15:0]        rxs;
 
@@ -365,7 +366,7 @@ module engine #(
     acc_clr = 1'b0; acc_add = 1'b0;
     k_inc = 1'b0; j_inc = 1'b0; smp = 1'b0;
     rx_new = c_rx; value = 16'h0; sample_tr = 1'b0;
-    m = 25'sd0; lo = 25'sd0; hi = 25'sd0; in_win = 1'b0; rxs = c_rx;
+    m = 24'sd0; lo = 24'sd0; hi = 24'sd0; in_win = 1'b0; rxs = c_rx;
 
     if (c_on) begin
       case (c_kind)
@@ -373,11 +374,11 @@ module engine #(
         K_COND:
           if (c_do) begin
             if (tb_age >= nom) begin            // at max(now, tb + nom)
-              if (bounded && tb_age - nom > ((c_nom == 16'h0) ? ISSUE : 25'sd0)) ev[OVERRUN] = 1'b1;
+              if (bounded && tb_age - nom > ((c_nom == 16'h0) ? ISSUE : 24'sd0)) ev[OVERRUN] = 1'b1;
               drv_en = 1'b1; drv_v = c_level;
               value  = c_meas ? clamp16(tb_age) : 16'h0;
               if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(tb_age); end
-              tb_upd = 1'b1; tb_nx = 25'sd1; anc_upd = 1'b1; anc_nx = 25'sd1; acc_clr = 1'b1;
+              tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
               done = 1'b1;
             end
           end else begin
@@ -386,7 +387,7 @@ module engine #(
               if (c_min != 16'h0 && m < u16(c_min) - QUANT) ev[EARLY] = 1'b1;
               value = c_meas ? clamp16(m) : 16'h0;
               if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(m); end
-              tb_upd = 1'b1; tb_nx = EDGE_LAT + 25'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 25'sd1;
+              tb_upd = 1'b1; tb_nx = EDGE_LAT + 24'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 24'sd1;
               acc_clr = 1'b1;
               done = 1'b1;
             end else if (bounded && tb_age - EDGE_LAT > u16(c_max) + QUANT) begin
@@ -406,7 +407,7 @@ module engine #(
         // HOLD (isa §4.2)
         K_HOLD:
           if (c_do) begin
-            if (tb_age >= 25'sd0) begin         // at max(now, tb), in_win the issue slot
+            if (tb_age >= 24'sd0) begin         // at max(now, tb), in_win the issue slot
               if (!c_profz && tb_age > ISSUE) ev[OVERRUN] = 1'b1;
               drv_en = 1'b1; drv_v = c_level;
               value  = {15'h0, c_level};
@@ -431,8 +432,8 @@ module engine #(
         K_XFER: begin
           if (c_do) begin
             // owner: bit k at tb + k*P; the issue slot covers bit 0
-            if (c_k <= c_n1 && c_slot >= 25'sd0) begin
-              if (c_slot > ((c_k == 4'd0) ? ISSUE : 25'sd0)) ev[OVERRUN] = 1'b1;
+            if (c_k <= c_n1 && c_slot >= 24'sd0) begin
+              if (c_slot > ((c_k == 4'd0) ? ISSUE : 24'sd0)) ev[OVERRUN] = 1'b1;
               drv_en = 1'b1; drv_v = c_v[pos_k];
               k_inc = 1'b1; slot_nx = c_slot_p1 - nom; acc_add = 1'b1;
               if (!c_od && c_k == c_n1) begin   // a PP owner completes on its last bit
@@ -442,7 +443,7 @@ module engine #(
               end
             end
             // an OD owner reads its bits back where a follower samples them (isa §6)
-            if (c_od && c_j <= c_n1 && c_samp >= 25'sd0) begin
+            if (c_od && c_j <= c_n1 && c_samp >= 24'sd0) begin
               rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
               j_inc = 1'b1; samp_nx = c_samp_p1 - nom;
               if (c_j == c_n1) begin
@@ -463,12 +464,12 @@ module engine #(
                 if (c_abort) abort_now = 1'b1;
               end
               if (c_rsync && in_win) begin              // (a, ak) := (e, k)
-                s_cur = -half; s_cur_p1 = 25'sd1 - half;
+                s_cur = -half; s_cur_p1 = 24'sd1 - half;
               end
             end
             samp_nx = s_cur_p1;
-            if (!abort_now && s_cur >= 25'sd0) begin
-              if (s_cur > 25'sd0) ev[OVERRUN] = 1'b1;
+            if (!abort_now && s_cur >= 24'sd0) begin
+              if (s_cur > 24'sd0) ev[OVERRUN] = 1'b1;
               sample_tr = 1'b1;
               rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
               j_inc = 1'b1; acc_add = 1'b1;
@@ -491,7 +492,7 @@ module engine #(
       if (abort_now) begin
         ev[ABORT] = 1'b1;
         done = 1'b1;
-        tb_upd = 1'b1; tb_nx = 25'sd1; anc_upd = 1'b1; anc_nx = 25'sd1; acc_clr = 1'b1;
+        tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
         wr_en = 1'b0;
       end
     end
@@ -537,8 +538,8 @@ module engine #(
       busy     <= 1'b0;
       abort_pend <= 1'b0;
       now_r    <= 24'd0;
-      tb_age   <= 25'sd0;
-      anc_age  <= 25'sd0;
+      tb_age   <= 24'sd0;
+      anc_age  <= 24'sd0;
       acc_lo   <= 24'd0;
       acc_hi   <= 24'd0;
       acc_inf  <= 1'b0;
@@ -562,7 +563,7 @@ module engine #(
       s_resync <= 1'b0; s_msb <= 1'b0; s_level <= 1'b0; s_meas <= 1'b0; s_profz <= 1'b0;
       s_pin <= 3'd0; s_rd <= 3'd0; s_line <= 3'd0; s_n1 <= 4'd0; s_dst <= 4'd0;
       s_min <= 16'h0; s_nom <= 16'h0; s_max <= 16'h0; s_v <= 16'h0; s_rx <= 16'h0;
-      s_k <= 4'd0; s_j <= 4'd0; slot_age <= 25'sd0; samp_age <= 25'sd0;
+      s_k <= 4'd0; s_j <= 4'd0; slot_age <= 24'sd0; samp_age <= 24'sd0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else if (soft_reset) begin
       started  <= 1'b0;
@@ -578,8 +579,8 @@ module engine #(
       busy     <= 1'b0;
       abort_pend <= 1'b0;
       now_r    <= 24'd0;
-      tb_age   <= 25'sd0;
-      anc_age  <= 25'sd0;
+      tb_age   <= 24'sd0;
+      anc_age  <= 24'sd0;
       acc_lo   <= 24'd0;
       acc_hi   <= 24'd0;
       acc_inf  <= 1'b0;
@@ -627,8 +628,8 @@ module engine #(
         busy     <= 1'b0;
         abort_pend <= 1'b0;
         now_r    <= 24'd1;
-        tb_age   <= 25'sd1;     // tb = 0
-        anc_age  <= 25'sd1;     // anchor = 0
+        tb_age   <= 24'sd1;     // tb = 0
+        anc_age  <= 24'sd1;     // anchor = 0
         acc_lo   <= 24'd0;
         acc_hi   <= 24'd0;
         acc_inf  <= 1'b0;
@@ -747,7 +748,7 @@ module engine #(
     end
   end
 
-  assign tb_o = now_o - (s0 ? 24'd0 : tb_age[23:0]);
+  assign tb_o = now_o - (s0 ? 24'd0 : tb_age);
 
   // ---- RTL trace port (architecture §5) ----
   wire        tr_issue  = start;
@@ -758,7 +759,7 @@ module engine #(
   wire        tr_mark   = mark;
   wire [15:0] tr_value  = mark ? {4'h0, operand} : value;
   wire [23:0] tr_now    = now_o;
-  wire signed [24:0] tb_tr = tb_upd ? tb_nx - 25'sd1 : tb_age;   // tb after this cycle
+  wire signed [23:0] tb_tr = tb_upd ? tb_nx - 24'sd1 : tb_age;   // tb after this cycle
   wire [23:0] tr_tb     = now_o - tb_tr[23:0];
   wire [10:0] tr_evt    = evs;
   // branch outcomes: conditional BR, RAW JPIN, and ROLE_IF (taken = skipped)
