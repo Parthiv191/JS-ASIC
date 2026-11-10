@@ -25,6 +25,8 @@ PROG_DEPTH = 512   # words, one image shared by both engines; branch targets are
 TX_DEPTH = 4
 RX_DEPTH = 8
 TIME_BITS = 24     # now, tb, anchors
+TIME_CLAMP = 1 << 22  # no time point trails now by more than this (isa §4.1)
+MEAS_MAX = 0xFFFF  # OVERRUN values and m saturate here (isa §4.1)
 INF = 0xFFFF       # profile max = INF: no timeout
 REG_MASK = 0xFFFF
 MAX_XFER_BITS = 16

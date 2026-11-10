@@ -122,12 +122,12 @@ def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int
         return put(ins.rd, tainted)
     if ins.op == Op.POP:
         return put(ins.rd, True)
-    if ins.op == Op.RAW and ins.sub == RawOp.GET:
+    if ins.op == Op.RAW and ins.sub in (RawOp.GET, RawOp.EVT):
         return put(ins.rd, True)
     if ins.op == Op.XFER:
         dst = unpack_xfer(ins.operand)[2]
         if dst >= Dst.R0:
-            # on an open-drain line the owner stores what it sent, the followers what they read
+            # on an open-drain line the wire can differ from what the owner sent
             return put(reg_of(dst), inblock or ins.line in od_lanes)
     return t
 

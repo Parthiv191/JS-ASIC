@@ -429,3 +429,12 @@ def test_t5_overrun_hold_completion_carries_the_issue_slot(nops, ok):
             break
         e.cycle([1] * 8)
     assert [(ev.kind, ev.measured) for ev in e.events] == ([] if ok else [("OVERRUN", 4)])
+
+
+def test_r2_rejects_branch_on_raw_evt_reg():
+    """isa §6 R2: RAW EVT taints its rd (evt differs between roles)."""
+    d, ln, p = two_party()
+    d.label("x")
+    d.raw_evt("r0", 0)
+    d.br("x", cond="z", reg="r0")
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}

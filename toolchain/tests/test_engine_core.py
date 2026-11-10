@@ -338,3 +338,14 @@ def test_alu_compare_and_mask_ops(op, a, b, want):
         d.alu(op, "r1", "r0", b)
         d.halt()
     assert run(Engine(img(prog), Role.P0), 5).regs[1] == want
+
+
+def test_raw_evt_reads_then_clears_the_masked_bits():
+    """isa §4.1: RAW EVT rd, mask does rd := evt, then clears the masked bits. evt survives RUN
+    (reset and SOFT_RESET clear it), so a run can start with bits set."""
+    def b(d, l):
+        d.raw_evt("r0", 0b000100)
+        d.raw_evt("r1", 0)
+        d.halt()
+    e = run(Engine(img(b), Role.P0, evt=0b001100), 20)
+    assert e.halted and e.regs[:2] == [0b1100, 0b1000] and e.evt == 0b1000
