@@ -41,6 +41,8 @@ jobs:
 
   viewer:
     needs: gds
+    # branch runs must not overwrite the page built from main
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       pages: write # to deploy to Pages
