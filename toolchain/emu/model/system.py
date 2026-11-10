@@ -114,9 +114,6 @@ class System:
                     wire[g.wire] = g.value
             for w in cont:
                 contention.append((tick, w))
-            if tick == 0:
-                for e in self.engines:
-                    e.preload(wire)
             if prev is not None:
                 for i in range(n):
                     if wire[i] != prev[i]:
