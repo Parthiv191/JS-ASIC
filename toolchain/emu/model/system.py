@@ -1,15 +1,17 @@
 """Multi-engine system: engines on a shared bus, per-engine clock enables, host FIFOs.
 
-One global tick: resolve the wires from every engine's registered drives (glitches
+One global tick: the host writes TX words while there is room and (by default) reads
+every RX word; resolve the wires from every engine's registered drives (glitches
 override), then run one cycle of every engine whose clock enable is high. A drive
 made in tick t is therefore on the wire from tick t+1.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 from ..image import Image, LineCfg
-from ..isa import SYNC_LAT, Role
+from ..isa import SYNC_LAT, TX_DEPTH, Role
 from .bus import resolve
 from .engine import Branch, Engine, Event, Sample, StepRecord
 
@@ -36,12 +38,12 @@ class EngineTrace:
     role: Role
     records: list[StepRecord]
     events: list[Event]
-    rx: list[int]
+    rx: list[int]  # every word the host got from the RX FIFO, during or after the run
     samples: list[Sample]
     branches: list[Branch]
     halted: bool
     idle: bool
-    tx_left: int
+    tx_left: int   # words the engine never popped: in its TX FIFO or still with the host
     cycle_tick: list[int]  # tick of every clock enable, also after HALT (the clock keeps running);
     #                         engine cycle c (1-based) ran in tick cycle_tick[c - 1]
     starts: list[tuple[int, int]] = field(default_factory=list)  # (pc, now) per instruction start
@@ -71,7 +73,10 @@ def enabled(spec: EngineSpec, tick: int) -> bool:
 
 
 class System:
-    def __init__(self, engines: list[EngineSpec], glitches: list[Glitch] | tuple = ()):
+    def __init__(self, engines: list[EngineSpec], glitches: list[Glitch] | tuple = (),
+                 host_reads_rx: bool = True):
+        """`host_reads_rx`: the host empties every RX FIFO each tick (it keeps up), or with False
+        only after the run, as co-sim's host does, so a 9th word overflows."""
         if not engines:
             raise ValueError("need at least one engine")
         for s in engines:
@@ -83,6 +88,9 @@ class System:
         self.engines = [Engine(s.image, s.role, name=f"E{i}") for i, s in enumerate(engines)]
         self.glitches = list(glitches)
         self._pushes: list[tuple[int, int, list[int]]] = []
+        self._backlog: list[deque[int]] = [deque() for _ in engines]  # host words waiting for room
+        self._got: list[list[int]] = [[] for _ in engines]            # RX words the host read
+        self.host_reads_rx = host_reads_rx
         self._cycle_tick: list[list[int]] = [[] for _ in engines]
 
     def host_push(self, idx: int, words: list[int], at_tick: int = 0) -> None:
@@ -106,8 +114,16 @@ class System:
             if self._pushes:
                 due = [p for p in self._pushes if p[0] <= tick]
                 for p in due:
-                    self.engines[p[1]].tx.extend(p[2])
+                    self._backlog[p[1]].extend(p[2])
                     self._pushes.remove(p)
+            # the host writes TX only while there is room (it polls the FIFO counts)
+            for e, b in zip(self.engines, self._backlog):
+                while b and len(e.tx) < TX_DEPTH:
+                    e.tx.append(b.popleft())
+            if self.host_reads_rx:
+                for e, got in zip(self.engines, self._got):
+                    got.extend(e.rx)
+                    e.rx.clear()
             wire, cont = resolve(self.lines, [e.drv for e in self.engines])
             for g in self.glitches:
                 if g.start <= tick < g.start + g.length:
@@ -135,8 +151,8 @@ class System:
             quiescent=quiescent,
             lines=list(self.lines),
             engines=[
-                EngineTrace(e.name, e.role, e.records, e.events, e.rx, e.samples, e.branches,
-                            e.halted, e.idle, len(e.tx), self._cycle_tick[i], e.starts)
+                EngineTrace(e.name, e.role, e.records, e.events, self._got[i] + e.rx, e.samples, e.branches,
+                            e.halted, e.idle, len(e.tx) + len(self._backlog[i]), self._cycle_tick[i], e.starts)
                 for i, e in enumerate(self.engines)
             ],
             wire_edges=edges,
