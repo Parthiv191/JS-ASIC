@@ -38,24 +38,27 @@
   "//": "this file is the ihp-cmos5l template, except FP_PDN_VPITCH/FP_PDN_VOFFSET below.",
   "//": "Follows the working integration in 2AMLogic/sg13cmos5l-protocol-emulator (Apache-2.0).",
   "//": "",
-  "//": "Two RM_IHPSG13_1P_256x16 macros (236.8 x 118.78 um each) side by side, mid-height,",
-  "//": "right of the pin cluster (Tiny Tapeout pins sit on the top edge at x < 192 um). The",
-  "//": "x positions are 91.2 + k*44.96 um so the strap lattice lines up (see src/pdn_cfg.tcl).",
-  "//": "The flow reads the macro's LEF/GDS/liberty from the PDK; flow/ holds the blackbox",
-  "//": "that the Verilator lint step needs.",
+  "//": "Memory layout (docs/design/architecture.md 3, 9): two RM_IHPSG13_1P_512x32",
+  "//": "macros (416.64 x 191.34 um), one per column. x = 91.2 + k*44.96 (k = 7, 17) keeps the",
+  "//": "strap lattice on same-net stripes (same 11.24 um stripe pitch as the 256x16), and both",
+  "//": "sit right of the power-pin strap at x = 366.6-370.7. Placed near the top edge, N",
+  "//": "orientation: the signal pins are on the macro's bottom edge, so they face the logic",
+  "//": "region below; the Tiny Tapeout pins (top edge, x < 192 um) stay clear.",
+  "//": "y = 483.84 leaves ~22 um above each macro after the 10 um row-cut halo: the VDDARRAY!",
+  "//": "bridges need cell rows above the macro to connect to (run 41975804926 failed at 502.74).",
   "MACROS": {
-    "RM_IHPSG13_1P_256x16_c2_bm_bist": {
-      "gds": ["pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_256x16_c2_bm_bist.gds"],
-      "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_256x16_c2_bm_bist.lef"],
-      "vh": ["dir::../flow/blackbox-RM_IHPSG13_1P_256x16_c2_bm_bist.v"],
+    "RM_IHPSG13_1P_512x32_c2_bm_bist": {
+      "gds": ["pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_512x32_c2_bm_bist.gds"],
+      "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x32_c2_bm_bist.lef"],
+      "vh": ["dir::../flow/blackbox-RM_IHPSG13_1P_512x32_c2_bm_bist.v"],
       "instances": {
-        "u_mem.u_lo": {"location": [495.84, 294.84], "orientation": "N"},
-        "u_mem.u_hi": {"location": [765.60, 294.84], "orientation": "N"}
+        "u_mem.u_pm.u_sram": {"location": [405.92, 483.84], "orientation": "N"},
+        "u_fmem.u_pm.u_sram": {"location": [855.52, 483.84], "orientation": "N"}
       },
       "lib": {
-        "*typ*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_typ_1p20V_25C.lib"],
-        "*slow*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_slow_1p08V_125C.lib"],
-        "*fast*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_fast_1p32V_m55C.lib"]
+        "*typ*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_typ_1p20V_25C.lib"],
+        "*slow*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_slow_1p08V_125C.lib"],
+        "*fast*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_fast_1p32V_m55C.lib"]
       }
     }
   },
@@ -63,10 +66,10 @@
   "//": "Three supply pins per macro: VDD!, VSS! and the bit-array supply VDDARRAY!.",
   "//": "An unconnected VDDARRAY! powers up but never retains a bit.",
   "PDN_MACRO_CONNECTIONS": [
-    "u_mem.u_lo VPWR VGND VDD! VSS!",
-    "u_mem.u_lo VPWR VGND VDDARRAY! VSS!",
-    "u_mem.u_hi VPWR VGND VDD! VSS!",
-    "u_mem.u_hi VPWR VGND VDDARRAY! VSS!"
+    "u_mem.u_pm.u_sram VPWR VGND VDD! VSS!",
+    "u_mem.u_pm.u_sram VPWR VGND VDDARRAY! VSS!",
+    "u_fmem.u_pm.u_sram VPWR VGND VDD! VSS!",
+    "u_fmem.u_pm.u_sram VPWR VGND VDDARRAY! VSS!"
   ],
 
   "//": "The macro's power pins are Metal4-only and TopMetal1 is not on the precheck's CMOS5L",
@@ -90,9 +93,7 @@
   "//": "place and real wire loads. The two *_CORNERS lists make any slew or cap violation fail",
   "//": "the flow; the default [\"\"] matches no corner and only warns.",
   "RUN_POST_GRT_DESIGN_REPAIR": 1,
-  "//": "Buffer every net longer than 120 um. One driver feeds the same pin on both macros, ~270 um",
-  "//": "apart, and run de24585 still failed max slew (A_REN 1.31 ns vs 0.595) and max cap on A_DOUT.",
-  "//": "The same setting cleared the last violations in the SRAM experiments (run 41994812789).",
+  "//": "Buffer long nets so the macro pins (A_DOUT drives at most 64 fF) see short wires.",
   "DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
   "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
@@ -118,7 +119,8 @@
   "//": "Absolute die size",
   "FP_SIZING": "absolute",
 
-  "GRT_ALLOW_CONGESTION": 1,
+  "//": "Fail on global-route overflow (the template allows it, which hides congestion; architecture 9).",
+  "GRT_ALLOW_CONGESTION": 0,
 
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
