@@ -143,10 +143,12 @@ def _pop_then_halt():
 
 def test_pop_stall_forever_is_quiescent():
     """A POP that never gets data waits on the host: the run must still end as quiescent, so the
-    idle flag holds across the odd cycles POP skips (isa §4.0 stalls)."""
-    trace = System([EngineSpec(_pop_then_halt(), Role.P0)]).run(1000)
-    assert trace.quiescent and trace.ticks < 1000
-    assert trace.engines[0].starts == [(0, 2)]
+    idle flag holds across the odd cycles POP skips (isa §4.0 stalls). Two engines one clk apart,
+    as on chip, so that on every tick one of them is in a skipped cycle."""
+    img = _pop_then_halt()
+    trace = System([EngineSpec(img, Role.P0), EngineSpec(img, Role.P1, phase=1)]).run(1000)
+    assert trace.quiescent and trace.ticks < 100
+    assert [et.starts for et in trace.engines] == [[(0, 2)], [(0, 2)]]
 
 
 def test_phase_1_engine_is_shifted_one_tick():

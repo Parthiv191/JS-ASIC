@@ -347,18 +347,19 @@ def test_hold_after_li_overruns_by_4():
     assert [(ev.kind, ev.measured) for ev in e.events] == [("OVERRUN", 4), ("OVERRUN", 3)]
 
 
-def test_follower_cond_odd_detect_successor_on_even():
-    """A follower COND completes in its detect cycle, which may be odd. A wire that falls at tick 5
-    is seen at 5 + SYNC_LAT = 7, so the COND completes at 7 with tb = 7 - EDGE_LAT = 4, and HALT
-    starts at the first own cycle >= max(7 + 1, 2 + 2) = 8 (isa §4.0)."""
+@pytest.mark.parametrize("fall,detect,halt", [(5, 7, 8), (6, 8, 10)])
+def test_follower_cond_detect_successor_on_own_cycle(fall, detect, halt):
+    """A follower COND completes in its detect cycle, fall + SYNC_LAT, which may be odd or even, with
+    tb = detect - EDGE_LAT. HALT starts at the first own cycle >= max(detect + 1, 2 + 2) (isa §4.0):
+    8 after an odd detect at 7, but 10 (not 9) after an even detect at 8."""
     d = Description("t", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")
     d.halt()
-    t = run_sys(compile_desc(d), roles=(Role.P1,), glitches=[Glitch(0, 5, 100, 0)])
+    t = run_sys(compile_desc(d), roles=(Role.P1,), glitches=[Glitch(0, fall, 100, 0)])
     (rec,) = t.engines[0].records
-    assert (rec.cycle, rec.tb) == (7, 7 - EDGE_LAT)
-    assert t.engines[0].starts == [(0, 2), (1, 8)]
+    assert (rec.cycle, rec.tb) == (detect, detect - EDGE_LAT)
+    assert t.engines[0].starts == [(0, 2), (1, halt)]
 
 
 @pytest.mark.parametrize("mx,t,cost", [(4, 9, 3), (5, 10, 4)])
