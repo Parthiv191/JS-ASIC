@@ -12,7 +12,7 @@ from typing import Iterator
 
 from ..image import Image
 from ..isa import (
-    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, AluOp,
+    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, U, AluOp,
     BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, li_imm, reg_of, unpack_cond, unpack_role_if,
     unpack_xfer,
 )
@@ -89,6 +89,8 @@ class Engine:
         self.events: list[Event] = []
         self.samples: list[Sample] = []
         self.branches: list[Branch] = []
+        self.starts: list[tuple[int, int]] = []  # (pc, now) per instruction start: the tr_issue trace
+        self._abort_at: int | None = None        # decision cycle of an abort, until abort_pc starts
         self.halted = False
         self.halt_cycle: int | None = None
         self.idle = False
@@ -152,9 +154,9 @@ class Engine:
 
     def _late(self, planned: int, slot0: bool) -> None:
         """OVERRUN for an owner action after its planned cycle. The issue slot lets an action
-        planned at a step's start (offset 0) happen one cycle late."""
+        planned at a step's start (offset 0) happen up to ISSUE cycles late (isa §4.1)."""
         late = self.now - planned
-        if late > (1 if slot0 else 0):
+        if late > (ISSUE if slot0 else 0):
             self.log("OVERRUN", measured=late)
 
     def _abort(self) -> None:
@@ -167,17 +169,37 @@ class Engine:
         self.tb = self.now
         self._reanchor(self.now)
         self.pc = self.image.abort_pc
+        self._abort_at = self.now
 
     # ------------------------------------------------------------------ interpreter
+    @staticmethod
+    def _next_start(start: int, done: int) -> int:
+        """The successor's start: the first own cycle (even `now`) >= max(done + 1, start + U),
+        for an instruction that started at `start` and completed at `done` (isa §4.0)."""
+        t = max(done + 1, start + U)
+        return t + (t & 1)
+
     def _run(self) -> Gen:
+        # s0 (now = 0) presents address 0; the word lands two cycles later, so instruction 0
+        # starts at now = 2 (isa §4.0).
+        yield
+        yield
         while True:
             if self.pc >= len(self.instrs):
                 yield from self._halt()
             ins = self.instrs[self.pc]
             handler = getattr(self, f"_op_{ins.op.name.lower()}", None)
             if handler is None:
-                raise NotImplementedError(f"{ins.op.name} is not in the v0 model yet (pc {self.pc})")
-            yield from handler(ins)
+                raise NotImplementedError(f"{ins.op.name} is not in the model yet (pc {self.pc})")
+            start = self.now
+            self.starts.append((self.pc, start))
+            yield from handler(ins)  # its last yield ends its completion cycle
+            if self._abort_at is not None:
+                # abort_pc is fetched on the first own cycle >= t + 1 and starts 2 later (isa §4.0)
+                t, self._abort_at = self._abort_at, None
+                yield from self.wait_until(t + 1 + ((t + 1) & 1) + 2)
+            else:
+                yield from self.wait_until(self._next_start(start, self.now - 1))
 
     def _halt(self) -> Gen:
         self.halted = True
@@ -238,7 +260,9 @@ class Engine:
         yield
 
     def _op_pop(self, ins: Instr) -> Gen:
-        while not self.tx:
+        while not self.tx:  # retried only on own cycles; idle (waiting on the host) throughout
+            self.idle = True
+            yield
             self.idle = True
             yield
         self.regs[ins.rd] = self.tx.popleft() & REG_MASK
@@ -265,9 +289,9 @@ class Engine:
         elif op == RawOp.JPIN:
             if self.inp[line] == ins.operand >> 11 & 1:
                 nxt = ins.operand & 0x7FF
-        elif op == RawOp.DELAY:
+        elif op == RawOp.DELAY:  # n cycles, rounded up to a multiple of U
             self.pc = nxt
-            for _ in range(max(1, ins.operand)):
+            for _ in range(-(-max(1, ins.operand) // U) * U):
                 yield
             return
         self.pc = nxt

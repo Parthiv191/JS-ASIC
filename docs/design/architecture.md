@@ -123,8 +123,30 @@ An image's table and program bytes come from the toolchain: `Image.host_writes()
 6. LOOPBACK, two engines.
 7. External devices.
 
-**RTL trace port** (simulation only): per engine, a step-done pulse, `pc`, `tb`, the value and
-event pulses. It's compared against the model's StepRecords.
+**RTL trace port** (simulation only; Core). Signals named `tr_*` inside each engine instance,
+which the co-sim (`test/cosim/`) reads by hierarchy. They need no top-level pins, and synthesis
+removes them because nothing loads them. All are valid in the clk cycle of their pulse.
+
+| Signal | Bits | Meaning | Model record (isa §7) |
+|---|---|---|---|
+| `tr_issue` | 1 | pulse: an instruction starts (§4.0); `tr_pc` is its pc | instruction start `(pc, cycle)` |
+| `tr_step` | 1 | pulse: a timed step completes | `StepRecord` |
+| `tr_pc` | 9 | the pc of the instruction executing now | `pc` |
+| `tr_op` | 2 | with `tr_step`: 1 COND, 2 HOLD, 3 XFER | `op` |
+| `tr_do` | 1 | with `tr_step`: 1 = did the step, 0 = followed it | `mode` |
+| `tr_value` | 16 | with `tr_step`: HOLD the level, XFER the wire value (duplex: packed), COND the measurement or 0. With `tr_mark`: the id | `value` (none = 0) |
+| `tr_now` | 24 | the engine's `now` | `cycle` |
+| `tr_tb` | 24 | `tb`; with `tr_step`, its value after the step | `tb` |
+| `tr_evt` | 11 | pulses, one bit per event kind code (isa §7), in the cycle the event is logged | `Event(kind, pc, cycle)` |
+| `tr_mark` | 1 | pulse: MARK runs | `MARK` event |
+| `tr_br`, `tr_taken` | 1 + 1 | pulse: a conditional branch decides; whether it was taken | `Branch(pc, taken)` |
+| `tr_sample`, `tr_line` | 1 + 3 | pulse: a follower samples a line; which line | `Sample(pc, line, cycle)` |
+| `tr_halted` | 1 | level: the engine has halted (HALT or ILLEGAL) | `halt_cycle` |
+
+- **What the co-sim compares, per engine:** every pulse with `(tr_pc, tr_now)` and its fields,
+  in order, against the model's records. Times are compared modulo 2^24.
+- **Not compared:** debug halt, step and exec (not cycle-exact, §4.0), and anything after the
+  first mismatch.
 
 ## 6. Standalone mode (Plus)
 

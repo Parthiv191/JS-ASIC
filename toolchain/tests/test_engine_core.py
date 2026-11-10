@@ -23,7 +23,19 @@ def run(engine, cycles, wire=lambda c: [1] * 8):
     return engine
 
 
-def test_untimed_ops_take_one_cycle():
+def test_instruction_0_starts_at_now_2():
+    """isa §4.0: s0 sets now := 0 and presents address 0; the word lands 2 cycles later."""
+    def b(d, l):
+        d.nop()
+        d.halt()
+    e = run(Engine(img(b), Role.P0), 20)
+    assert e.starts == [(0, 2), (1, 4)]
+    assert e.halt_cycle == 4
+
+
+def test_untimed_ops_take_U_cycles():
+    """li, 3 x (add, eq, br), halt: 11 instructions, U = 2 apart from now = 2, so HALT starts at
+    2 + 2*10 = 22."""
     def b(d, l):
         d.li("r0", 0)
         d.label("loop")
@@ -32,9 +44,55 @@ def test_untimed_ops_take_one_cycle():
         d.br("loop", cond="z", reg="r1")
         d.halt()
     e = run(Engine(img(b), Role.P0), 50)
-    assert e.halted and e.halt_cycle == 10
+    assert e.halted and e.halt_cycle == 22
+    assert [c for _, c in e.starts] == list(range(2, 24, 2))
     assert e.regs[0] == 3
     assert [x.taken for x in e.branches] == [True, True, False]
+
+
+def test_taken_branch_and_role_if_skip_cost_U():
+    """A taken branch costs U like any untimed instruction. A ROLE_IF costs U whether or not it
+    skips, and the skipped words take no time (isa §4.0)."""
+    def jump(d, l):
+        d.br("t")
+        d.nop()
+        d.nop()
+        d.label("t")
+        d.halt()
+    assert run(Engine(img(jump), Role.P0), 20).starts == [(0, 2), (3, 4)]
+
+    def skip(d, l):
+        with d.only("b"):
+            d.nop()
+            d.nop()
+        d.halt()
+    assert run(Engine(img(skip), Role.P0), 20).starts == [(0, 2), (3, 4)]
+
+
+@pytest.mark.parametrize("n,gap", [(2, 2), (3, 4), (4, 4), (5, 6)])
+def test_raw_delay_rounds_up_to_U(n, gap):
+    """RAW DELAY n takes n cycles rounded up to a multiple of U = 2 (isa §4.0)."""
+    def b(d, l):
+        d.raw_delay(n)
+        d.halt()
+    e = run(Engine(img(b), Role.P0), 30)
+    assert e.starts == [(0, 2), (1, 2 + gap)]
+
+
+def test_pop_retries_on_own_cycles():
+    """POP starts at 2 and retries on own cycles (even now). Data that first exists at now = 5 is
+    taken at 6, so HALT starts at 8 (isa §4.0 stalls)."""
+    def b(d, l):
+        d.pop("r0")
+        d.halt()
+    e = Engine(img(b), Role.P0)
+    for _ in range(6):        # cycles now = 0..5
+        e.cycle([1] * 8)
+    assert e.now == 5 and not e.halted
+    e.tx.append(0x55)         # visible from now = 6 on
+    run(e, 10)
+    assert e.starts == [(0, 2), (1, 8)]
+    assert e.regs[0] == 0x55
 
 
 def test_alu_ops_wrap_16_bits():
@@ -78,9 +136,11 @@ def test_role_if_skips_per_role():
         d.halt()
     image = img(b)
     got = {r: run(Engine(image, r), 20) for r in Role}
-    assert got[Role.P0].regs[:3] == [1, 0, 0] and got[Role.P0].halt_cycle == 3
-    assert got[Role.P1].regs[:3] == [0, 0, 0] and got[Role.P1].halt_cycle == 2
-    assert got[Role.MON].regs[:3] == [0, 1, 1] and got[Role.MON].halt_cycle == 4
+    # U = 2 per instruction from now = 2; skipped words take no time.
+    # P0: ROLE_IF, LI, ROLE_IF (skip), HALT -> 8. P1: two skips, HALT -> 6. MON: skip, ROLE_IF, 2 LI, HALT -> 10.
+    assert got[Role.P0].regs[:3] == [1, 0, 0] and got[Role.P0].halt_cycle == 8
+    assert got[Role.P1].regs[:3] == [0, 0, 0] and got[Role.P1].halt_cycle == 6
+    assert got[Role.MON].regs[:3] == [0, 1, 1] and got[Role.MON].halt_cycle == 10
 
 
 def test_pop_blocks_until_push():
@@ -89,24 +149,27 @@ def test_pop_blocks_until_push():
         d.push("r0")
         d.halt()
     e = Engine(img(b), Role.P1)
-    run(e, 5)
+    run(e, 5)                                   # now 0..4: POP starts at 2, finds nothing at 2 and 4
     assert e.pc == 0 and e.idle and not e.halted
     e.tx.append(0x42)
-    run(e, 5)
+    run(e, 10)
     assert e.halted and e.regs[0] == 0x42 and e.rx == [0x42]
-    assert e.halt_cycle == 7  # stalled cycles 0-4, pop at 5, push at 6, halt at 7
+    assert e.halt_cycle == 10  # pop at 6 (next own cycle), push at 8, halt at 10
 
 
-def test_raw_get_sees_wire_after_sync_lat():
+@pytest.mark.parametrize("fall,want", [(6, [1, 1, 0, 0]), (7, [1, 1, 1, 0])])
+def test_raw_get_sees_wire_after_sync_lat(fall, want):
+    """ROLE_IF at 2; GETs at 4, 6, 8, 10 see the wire at now - SYNC_LAT = 2, 4, 6, 8. A wire that
+    falls at 6 is first seen by the GET at 8; one that falls at 7, by the GET at 10. Together the two
+    cases rule out a latency of 1 or 3."""
     def b(d, l):
         with d.only("a"):
             for r in ("r0", "r1", "r2", "r3"):
                 d.raw_get(r, l)
         d.halt()
     e = Engine(img(b), Role.P0)
-    run(e, 10, wire=lambda c: [1 if c < 2 else 0] + [1] * 7)
-    # ROLE_IF takes cycle 0; GETs at cycles 1..4 see the wire at cycles -1..2
-    assert e.regs == [1, 1, 1, 0, 0, 0, 0, 0]
+    run(e, 12, wire=lambda c: [1 if c < fall else 0] + [1] * 7)
+    assert e.regs == want + [0, 0, 0, 0]
 
 
 def test_raw_delay_exact_cycles():
@@ -114,7 +177,7 @@ def test_raw_delay_exact_cycles():
         d.raw_delay(5)
         d.halt()
     e = run(Engine(img(b), Role.P0), 20)
-    assert e.halt_cycle == 5
+    assert e.halt_cycle == 8  # DELAY 5 starts at 2 and takes 6 (rounded up to a multiple of U)
 
 
 def test_raw_set_drives_own_line():
@@ -124,9 +187,11 @@ def test_raw_set_drives_own_line():
             d.raw_rel(l)
         d.halt()
     e = Engine(img(b), Role.P0)
-    run(e, 2)
+    run(e, 4)                 # now 0..3: ROLE_IF at 2; the owner drives its PP line at idle
+    assert e.drv[0] == 1
+    run(e, 1)                 # SET at 4
     assert e.drv[0] == 0
-    run(e, 1)
+    run(e, 2)                 # REL at 6
     assert e.drv[0] is None
 
 
