@@ -60,10 +60,11 @@ def shortest_bit(ppm):
 
 @pytest.mark.parametrize("tx_fast", [True, False], ids=["tx-fast", "tx-slow"])
 def test_uart_at_tolerance_edge_min_period(tx_fast):
-    """The shortest bit the compiler accepts at 2% is 10 cycles (5 Mbaud at 50 MHz), and it
-    runs clean with the full 2% drift. (11 is rejected again: T1 uses P//2, isa-v0 §6.)"""
+    """Rule cross-check: the shortest bit the compiler accepts at 2% is 19 cycles (2.6 Mbaud at
+    50 MHz; T5-watch, test_analysis.test_t1_uart_period_boundary), and it runs clean with the full
+    2% drift at every sub-cycle phase."""
     P = shortest_bit(20000)
-    assert P == 10
+    assert P == 19
     perm = (Role.P0, Role.P1, Role.MON)
     clocks = {0: BASE, 1: SLOW, 2: SLOW} if tx_fast else {0: SLOW, 1: BASE, 2: BASE}
     for phase in range(4):
@@ -73,10 +74,22 @@ def test_uart_at_tolerance_edge_min_period(tx_fast):
         assert_clean(t, perm, data)
 
 
+@pytest.mark.parametrize("tx_fast", [True, False], ids=["tx-fast", "tx-slow"])
+def test_uart_115200_at_50mhz_runs_clean_at_2pct(tx_fast):
+    """Rule cross-check at the real operating point: P = 434 compiles and runs clean with the full
+    2% drift."""
+    perm = (Role.P0, Role.P1, Role.MON)
+    clocks = {0: BASE, 1: SLOW, 2: SLOW} if tx_fast else {0: SLOW, 1: BASE, 2: BASE}
+    data = uart_data(n=3)
+    t = run_roles(get("uart").build(bit_cycles=434), perm, {"tx": data}, clocks=clocks,
+                  phases={1: 1, 2: 2}, max_ticks=200_000)
+    assert_clean(t, perm, data)
+
+
 def test_uart_back_to_back_frames():
     """With data waiting, each start edge comes right at the end of the previous stop bit:
     one frame every 10 bit times, with the POP and the loop branch hidden inside the stop bit."""
-    P = 16
+    P = 20
     data = [0x00, 0xFF, 0x55, 0xAA] + uart_data(n=12)  # no data edges, all edges, and random
     perm = (Role.P0, Role.P1, Role.MON)
     t = run_roles(get("uart").build(bit_cycles=P), perm, {"tx": data})
@@ -88,11 +101,11 @@ def test_uart_back_to_back_frames():
 def test_uart_framing_error_aborts_and_resyncs():
     """A low stop bit is a framing error: the followers log LEVEL, abort to the frame start and
     pick up the next start bit. The byte itself still arrives, as a UART reports it."""
-    P = 16
+    P = 20
     data = [0x11, 0x22, 0x33, 0x44]
-    # frame k's start edge is on the wire at tick 3 + 10Pk (ROLE_IF, POP, then COND at cycle 2);
-    # its stop bit is slot 9. Pull the middle of frame 1's stop bit low.
-    stop1 = 3 + 10 * P + 9 * P
+    # frame k's start edge is on the wire at tick 7 + 10Pk (ROLE_IF at 2, POP at 4, then the COND
+    # acts at 6, isa §4.0); its stop bit is slot 9. Pull the middle of frame 1's stop bit low.
+    stop1 = 7 + 10 * P + 9 * P
     perm = (Role.P0, Role.P1, Role.MON)
     t = run_roles(get("uart").build(bit_cycles=P), perm, {"tx": data},
                   glitches=[Glitch(0, stop1 + 2, P - 4, 0)])

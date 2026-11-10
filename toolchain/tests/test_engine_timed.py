@@ -4,7 +4,7 @@ import pytest
 
 from emu.compiler import compile_desc
 from emu.desc import Description
-from emu.isa import EDGE_LAT, QUANT, Role
+from emu.isa import EDGE_LAT, INF, QUANT, Role
 from emu.model.engine import Engine
 from emu.model.system import Glitch
 
@@ -147,8 +147,8 @@ def late_desc(second_cond=False):
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit)
     d.cond("rise", ln, owner="a", prof=win)
-    if second_cond:
-        d.cond("fall", ln, owner="a")
+    if second_cond:  # unbounded (T5-timeout); nom 4 so followers of the rise can watch in time (T5-watch)
+        d.cond("fall", ln, owner="a", prof=d.profile("GAP", nom=4, min=0, max=INF))
     with d.only("b", "mon"):
         d.br("late", cond="to")
         d.mark(1)
@@ -186,13 +186,13 @@ def test_to_flag_cleared_by_next_timed_step():
 @pytest.mark.parametrize("phase", range(4))
 @pytest.mark.parametrize("value", [0xA5, 0x5A])
 def test_shortest_accepted_slot_runs_clean_at_every_phase(phase, value):
-    """At 0 ppm T1 accepts slots from P = 6 (test_analysis). Every engine runs at 1/4 of
-    the tick rate, so a follower offset by 1-3 ticks sees each edge a fraction of a cycle
-    later than the owner made it. Every such phase must still sample every bit."""
-    d = Description("p6", parties=("a", "b"), tolerance_ppm=0)
+    """At 0 ppm T1 accepts slots from P = 8 (QUANT + ISSUE = 3 < P//2; test_analysis). Every engine
+    runs at 1/4 of the tick rate, so a follower offset by 1-3 ticks sees each edge a fraction of a
+    cycle later than the owner made it. Every such phase must still sample every bit."""
+    d = Description("p8", parties=("a", "b"), tolerance_ppm=0)
     ln = d.line("l", owner="a", idle=1)
     d.abort_to("end")
-    bit = d.profile("BIT", nom=6)
+    bit = d.profile("BIT", nom=8)
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
     d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
@@ -225,12 +225,12 @@ def test_cond_with_min_zero_runs_clean():
 @pytest.mark.parametrize("phase", range(0, 8, 3))
 @pytest.mark.parametrize("ratios", [((50, 400), (49, 400)), ((49, 400), (50, 400))], ids=["slow", "fast"])
 def test_t1_boundary_at_2pct_runs_clean(ratios, phase):
-    """At 2% T1 accepts this frame from P = 10 (P = 9 fails: ceil(0.02*90) + 2 = 4, not < 4).
-    The follower runs 2% slower or faster than the owner, at sub-cycle phase offsets."""
-    d = Description("p10", parties=("a", "b"), tolerance_ppm=20000)
+    """At 2% T1 accepts this frame from P = 14 (P = 13 fails: ceil(0.02*130) + QUANT + ISSUE = 6,
+    not < 6). The follower runs 2% slower or faster than the owner, at sub-cycle phase offsets."""
+    d = Description("p14", parties=("a", "b"), tolerance_ppm=20000)
     ln = d.line("l", owner="a", idle=1)
     d.abort_to("end")
-    bit = d.profile("BIT", nom=10)
+    bit = d.profile("BIT", nom=14)
     d.cond("fall", ln, owner="a")
     d.hold(ln, 0, owner="a", prof=bit, abort=True)
     d.xfer(8, ln, owner="a", prof=bit, src="fifo", dst="fifo")
