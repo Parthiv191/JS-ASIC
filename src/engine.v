@@ -251,7 +251,9 @@ module engine #(
   // ---- time ----
   reg  [23:0]        now_r;
   reg  signed [23:0] tb_age, anc_age;
-  reg  [23:0]        acc_lo, acc_hi;   // window accumulated since the anchor (isa §4.1)
+  // window accumulated since the anchor (isa §4.1), stored as the edge-check thresholds on
+  // anc_age: thr_lo = min + EDGE_LAT - QUANT, thr_hi = max + EDGE_LAT + QUANT (mod 2^24)
+  reg  [23:0]        thr_lo, thr_hi;
   reg                acc_inf;
   wire               tick = running & ~(start & stop_op);   // time freezes at the halt cycle
   assign now_o = s0 ? 24'd0 : now_r;
@@ -332,9 +334,15 @@ module engine #(
   reg                acc_pend, acc_clrq, evq_st;
   reg  [10:0]        ev_q;
   reg  [8:0]         evpc_q;
-  // the window, with last cycle's clear and add applied (acc_* lag one cycle behind)
-  wire [23:0]        acc_lo_e  = (acc_clrq ? 24'h0 : acc_lo) + (acc_pend ? {8'h0, s_min} : 24'h0);
-  wire [23:0]        acc_hi_e  = (acc_clrq ? 24'h0 : acc_hi) + (acc_pend ? {8'h0, s_max} : 24'h0);
+  // the window, with last cycle's clear and add applied (thr_*, acc_inf lag one cycle behind)
+  localparam [23:0]  THR_LO0 = EDGE_LAT - QUANT, THR_HI0 = EDGE_LAT + QUANT;  // the empty window
+  wire [23:0]        thr_lo_e  = (acc_clrq ? THR_LO0 : thr_lo) + (acc_pend ? {8'h0, s_min} : 24'h0);
+  wire [23:0]        thr_hi_e  = (acc_clrq ? THR_HI0 : thr_hi) + (acc_pend ? {8'h0, s_max} : 24'h0);
+  // The checks compare anc_age with thr_* as 24-bit signed values. The old form, m = anc_age - E
+  // against the 24-bit signed min - Q and max + Q, wraps at thr = 2^23 + 3, not 2^23: for
+  // thr in [2^23, 2^23 + 2] the bound is above any age (<= 2^22), so lo fails and hi passes.
+  wire               thr_lo_mid = thr_lo_e[23] & ~|thr_lo_e[22:2] & ~&thr_lo_e[1:0];
+  wire               thr_hi_mid = thr_hi_e[23] & ~|thr_hi_e[22:2] & ~&thr_hi_e[1:0];
   wire               acc_inf_e = (~acc_clrq & acc_inf) | (acc_pend & (s_max == 16'hFFFF));
 
   // ---- one cycle of the step: what it does this cycle (combinational) ----
@@ -353,7 +361,7 @@ module engine #(
   reg  [15:0]        value;         // the step's record value
   reg                sample_tr;     // a follower sample (trace)
 
-  reg signed [23:0] m, lo, hi;
+  reg signed [23:0] m;
   reg               in_win;
   reg [15:0]        rxs;
 
@@ -366,7 +374,7 @@ module engine #(
     acc_clr = 1'b0; acc_add = 1'b0;
     k_inc = 1'b0; j_inc = 1'b0; smp = 1'b0;
     rx_new = c_rx; value = 16'h0; sample_tr = 1'b0;
-    m = 24'sd0; lo = 24'sd0; hi = 24'sd0; in_win = 1'b0; rxs = c_rx;
+    m = 24'sd0; in_win = 1'b0; rxs = c_rx;
 
     if (c_on) begin
       case (c_kind)
@@ -455,10 +463,9 @@ module engine #(
           end else begin
             // follower: edges against the window, samples at a + (k - ak)P + P/2 + E
             if (edg) begin
-              m  = anc_age - EDGE_LAT;
-              lo = $signed({1'b0, acc_lo_e}) - QUANT;
-              hi = $signed({1'b0, acc_hi_e}) + QUANT;
-              in_win = (m >= lo) && (acc_inf_e || m <= hi);
+              // anc_age - E in [min - Q, max + Q]
+              in_win = (anc_age >= $signed(thr_lo_e)) && !thr_lo_mid
+                    && (acc_inf_e || thr_hi_mid || anc_age <= $signed(thr_hi_e));
               if (c_chk && !in_win) begin
                 ev[EDGE] = 1'b1;
                 if (c_abort) abort_now = 1'b1;
@@ -540,8 +547,8 @@ module engine #(
       now_r    <= 24'd0;
       tb_age   <= 24'sd0;
       anc_age  <= 24'sd0;
-      acc_lo   <= 24'd0;
-      acc_hi   <= 24'd0;
+      thr_lo   <= THR_LO0;
+      thr_hi   <= THR_HI0;
       acc_inf  <= 1'b0;
       to_flag  <= 1'b0;
       sync_m   <= 8'h00;
@@ -581,8 +588,8 @@ module engine #(
       now_r    <= 24'd0;
       tb_age   <= 24'sd0;
       anc_age  <= 24'sd0;
-      acc_lo   <= 24'd0;
-      acc_hi   <= 24'd0;
+      thr_lo   <= THR_LO0;
+      thr_hi   <= THR_HI0;
       acc_inf  <= 1'b0;
       to_flag  <= 1'b0;
       drv_low  <= 8'h00;
@@ -630,8 +637,8 @@ module engine #(
         now_r    <= 24'd1;
         tb_age   <= 24'sd1;     // tb = 0
         anc_age  <= 24'sd1;     // anchor = 0
-        acc_lo   <= 24'd0;
-        acc_hi   <= 24'd0;
+        thr_lo   <= THR_LO0;
+        thr_hi   <= THR_HI0;
         acc_inf  <= 1'b0;
         acc_pend <= 1'b0;
         acc_clrq <= 1'b0;
@@ -650,11 +657,11 @@ module engine #(
         anc_age  <= anc_upd ? anc_nx : !tick ? anc_age : (anc_age >= AGE_MAX) ? AGE_MAX : anc_p1;
         slot_age <= slot_nx;
         samp_age <= samp_nx;
-        // every window update lands one cycle late; readers use acc_*_e
+        // every window update lands one cycle late; readers use thr_*_e, acc_inf_e
         acc_pend <= acc_add & ~acc_clr;
         acc_clrq <= acc_clr;
-        acc_lo   <= acc_lo_e;
-        acc_hi   <= acc_hi_e;
+        thr_lo   <= thr_lo_e;
+        thr_hi   <= thr_hi_e;
         acc_inf  <= acc_inf_e;
 
         if (running && own && skip != 11'd0) skip <= skip - 11'd1;
