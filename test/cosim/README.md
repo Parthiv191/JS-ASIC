@@ -101,7 +101,8 @@ worse than none:
 names: the event happens, the value changes, and each flag of a parametrized case changes what
 is compared. Planted bugs, each caught (11-10): an RTL follower that ignores MSB, a flipped
 register, a gap test failing on the wrong mismatch, the stimulus driver keyed on `running`, and an RTL
-that preloads both sync flops at `s0` (hiding the start-up 1).
+that preloads both sync flops at `s0` (hiding the start-up 1), and an RTL OD owner that stores
+the bits it sent instead of the ones it read back.
 
 **Co-sim** (cocotb, `test_cosim.py`), only features both sides have today:
 
@@ -114,6 +115,9 @@ that preloads both sync flops at `s0` (hiding the start-up 1).
 | xfer follower | P1 | unclocked XFER, every MSB/CHK/RESYNC combination, against a 2% slow sender with a glitch |
 | uart frame | tx, rx, mon | a UART frame with register src/dst, peers up to 2% slow and out of phase (model clocks only run slower) |
 | glitch | rx | an out-of-window edge (EDGE, data kept), a flipped sample (data 0xA0), a glitch in the start bit (LEVEL) |
+| raw evt | rx | TIMEOUT and LEVEL set their `evt` bits; RAW EVT reads `evt`, then clears the masked bits |
+| od readback | tx, rx | on an OD line a glitch over a released 1 reaches `dst` in every role; the owner completes on its last readback |
+| time clamp | tx | after a gap of about 4.2 M cycles, `tb` trails `now` by 2^22 (slow: `COSIM_SLOW=1`) |
 | illegal | P0 | a reserved code halts as ILLEGAL: `expect_fail` until devOps's #13 fix |
 | role branches | P0 | `tr_br` for ROLE_IF and RAW JPIN: `expect_fail` until devOps's #13 fix. Until then the other programs avoid both. |
 
@@ -134,6 +138,7 @@ model owner's real wire.
 
 ```sh
 cd test/cosim && make
+COSIM_SLOW=1 COCOTB_TEST_FILTER=test_time_clamp make WAVES=0   # the clamp test, without a waveform
 ```
 
 The Makefile builds `../../src/*.v`, the SRAM models in `../sram/` and `../tb.v`, with

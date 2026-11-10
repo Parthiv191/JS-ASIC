@@ -1,5 +1,5 @@
 sim_build/
-results.xml
+results*.xml
 __pycache__/
 *.fst
-make.log
+make*.log

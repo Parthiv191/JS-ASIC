@@ -3,6 +3,7 @@
 Each test checks, on the model and before it simulates, that its scenario does what the test
 names (an event happens, a value changes, a flag changes what is compared), so no case can pass
 without testing it."""
+import os
 from dataclasses import replace
 
 import cocotb
@@ -128,10 +129,10 @@ async def test_cond_early(dut):
     await cosim(dut, rep, Role.P1)
 
 
-def frame(msb=False, check=True, resync=False):
+def frame(msb=False, check=True, resync=False, kind="pp"):
     """A UART frame with register src/dst: LI r0 · COND fall · HOLD 0 · XFER 8 · HOLD 1 · MARK · HALT."""
     d = Description("frame", parties=("a", "b"))
-    ln = d.line("l", owner="a", idle=1)
+    ln = d.line("l", kind=kind, owner="a", idle=1)
     s = slack(P, 20000)  # the window the compiler's T2 needs at 2% (as emu.protocols.uart)
     bit = d.profile("BIT", nom=P, min=P - s, max=P + s)
     d.li("r0", DATA)
@@ -189,6 +190,62 @@ async def test_glitch_on_the_receiver(dut, case):
     rep = model(frame(), Role.P1, glitches=[glitch])
     assert effect(rep), f"the {case} glitch doesn't do what this case names"
     await cosim(dut, rep, Role.P1)
+
+
+# ---------------------------------------------------------------- evt, OD readback, the clamp
+@cocotb.test()
+async def test_raw_evt(dut):
+    """isa §4.1: TIMEOUT sets evt bit 2 and LEVEL bit 3, and RAW EVT reads evt, then clears the
+    masked bits. A follower with no owner: a stuck-low line gives the fall, the bounded rise times
+    out (no ABORT), and the HOLD 1 reads 0."""
+    d = Description("evt", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=16, min=14, max=18)
+    d.cond("fall", ln, owner="a")
+    d.cond("rise", ln, owner="a", prof=bit)
+    d.hold(ln, 1, owner="a", prof=bit)
+    d.raw_evt("r0", 0b0100)
+    d.raw_evt("r1", 0)
+    d.halt()
+    rep = model(compile_desc(d, check_timing=False), Role.P1, peers=False, glitches=[Glitch(0, 10, 400, 0)])
+    assert {"TIMEOUT", "LEVEL"} <= kinds(rep) and rep.trace.engines[0].regs[:2] == [0b1100, 0b1000]
+    await cosim(dut, rep, Role.P1)
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1])
+async def test_od_readback(dut, role):
+    """isa §4.3: on an OD line the owner reads its bits back where a follower samples them, so a
+    glitch over data bit 2 (a released 1 of DATA) gives 0xA0 in every role, and the owner
+    completes on its last readback."""
+    rep = model(frame(kind="od"), role, glitches=[Glitch(0, 74, 4, 0)])
+    assert [et.regs[1] for et in rep.trace.engines] == [0xA0] * 3
+    await cosim(dut, rep, role)
+
+
+CLAMP = 1 << 22
+
+
+@cocotb.test(skip=os.environ.get("COSIM_SLOW") != "1")
+async def test_time_clamp(dut):
+    """isa §4.1: tb never trails now by more than 2^22. After a gap of about 4.2 M cycles the owned
+    HOLD is planned 2^22 back (OVERRUN), and its step's tb shows the clamp. Slow: COSIM_SLOW=1."""
+    d = Description("clamp", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=10, min=8, max=12)
+    d.li("r0", 1050)  # x (RAW DELAY 4000 + SUB + BR) > 2^22
+    d.label("loop")
+    d.raw_delay(4000)
+    d.alu("sub", "r0", "r0", 1)
+    d.br("loop", cond="nz", reg="r0")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.halt()
+    rep = replay([EngineSpec(compile_desc(d, check_timing=False), Role.P0)], 0, max_ticks=5_000_000)
+    et = rep.trace.engines[0]
+    (hold,) = et.records
+    start = next(now for pc, now in et.starts if pc == hold.pc)
+    assert start > CLAMP and hold.tb == start - CLAMP + 10
+    await cosim(dut, rep, Role.P0)
 
 
 # ---------------------------------------------------------------- known gaps (README §3)
