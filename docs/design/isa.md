@@ -7,9 +7,9 @@ decides. Where it is silent, the model decides and this doc gets updated. Why ea
 
 Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 
-**The model's encoding and image are v1** (`emu/isa.py`, `emu/image.py`); its execution is still v0
-(1-cycle untimed instructions, unbounded FIFOs, fractional clocks). It must implement this doc,
-§4.0 especially, before RTL co-simulation.
+**Model status:** the encoding, the image and fetch and issue timing (§4.0) are v1. Still to come:
+clocked XFER, COND START/STOP and MEAS, the FIFO depths (§4.9), the stall re-base (§4.1) and the
+24-bit clamp. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
