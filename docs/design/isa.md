@@ -8,9 +8,9 @@ decides. Where it is silent, the model decides and this doc gets updated. Why ea
 Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 
 **Model status:** the encoding, the image, fetch and issue timing (§4.0), reserved codes (§3),
-`BR ROLE` and registers across RUN (§1) are v1. Still to come: clocked XFER, an OD owner's
-readback (§4.3), COND START/STOP and MEAS, the FIFO depths (§4.9), the stall re-base (§4.1) and
-the 24-bit clamp. The model keeps fractional clocks only to stand in for external devices.
+`BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
+(§4.1) and an OD owner's readback (§4.3) are v1. Still to come: clocked XFER, COND START/STOP and
+MEAS, the FIFO depths (§4.9) and the stall re-base (§4.1). The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -195,7 +195,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - A partial XFER writes no `dst` and pushes nothing.
   - Only the failing role jumps (`T5-abort`). `abort_pc` is 0 unless set; the compiler warns on
     ABORT without it.
-- **Event register `evt`** (sticky): bit 0 START, 1 STOP (these two are the bus flags of §4.7), 2 TIMEOUT, 3 MISMATCH (LEVEL / EDGE /
+- **Event register `evt`** (sticky; it keeps its bits across RUN, and reset and SOFT_RESET clear it): bit 0 START, 1 STOP (these two are the bus flags of §4.7), 2 TIMEOUT, 3 MISMATCH (LEVEL / EDGE /
   CLK_PHASE), 4 OVERFLOW, 5 UNDERRUN.
   - `RAW EVT rd, mask` does `rd := evt`, then clears the masked bits, the bus flags included.
     `rd` is tainted.
@@ -244,8 +244,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 ### 4.3 `XFER n, lane, owner, src, dst, msb, prof`
 - **`dst` = the wire value, in every role.** The owner reads its own bits back at the point a
   follower in its position samples them:
-  - on an OD line, someone else's 0 shows up;
-  - on a PP line it equals `src`.
+  - on an OD line, someone else's 0 shows up, and the owner completes on its last readback;
+  - on a PP line it equals `src`, and the owner completes on its last bit.
+  - Readback isn't a follower's sample: it adds no `tr_sample` (architecture §5).
 - `dst = FIFO` pushes only in follow mode. The owner takes `src` at step start.
 - **Empty `src = FIFO`:**
   - An owner that owns the lane's clock, or an unclocked lane, waits for data (a clock owner
