@@ -87,6 +87,15 @@
   "//": "the Magic.DRC step, not the GDS that is streamed out.",
   "ERROR_ON_MAGIC_DRC": 0,
   "MAGIC_GDS_FLATGLOB": ["lvsres_*", "*_CELL_SUB", "VIA_M1_*", "VIA_M2_*", "RSC_*", "*_CELL_CORNER", "*_BITKIT_CORNER"],
+  "//": "Skipped: on 8x4 with the two macros it took 44-55 min of the 120 min gds job (runs",
+  "//": "42758486820, 42766887181) for a report nothing reads. The precheck job runs the",
+  "//": "sign-off KLayout SG13CMOS5L DRC on the final GDS.",
+  "RUN_MAGIC_DRC": 0,
+
+  "//": "OpenROAD thread count. Unset, LibreLane 3.1.0.dev3 passes '-threads None', OpenROAD",
+  "//": "rejects it (ORD-0032) and every step runs on one thread: detailed routing with engine 0",
+  "//": "took 110 min (run 42766885905). GitHub's ubuntu-24.04 runners have 4 vCPUs.",
+  "OPENROAD_THREADS": 4,
 
   "//": "Slew and load into the macros. Hold fixing (after CTS) puts weak delay cells on the",
   "//": "address and data nets, and one driver feeds the same pin on both macros. Run cc3339f",
