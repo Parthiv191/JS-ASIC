@@ -275,12 +275,34 @@ def test_raw_set_drives_own_line():
     assert e.drv[0] is None
 
 
-def test_reset_drives_owned_pp_idle_only():
+def test_owned_pp_lines_go_to_idle_in_s0():
+    """isa §2: before RUN every line is released; s0 (now = 0) drives each PP line the role owns
+    to idle, so the drive is on the wire from now = 1."""
     lines = (("x", "pp", "a", 0), ("y", "pp", "b", 1), ("z", "od", "shared", 1))
     image = img(lambda d, *refs: d.halt(), lines)
-    assert Engine(image, Role.P0).drv == [0, None, None]
-    assert Engine(image, Role.P1).drv == [None, 1, None]
-    assert Engine(image, Role.MON).drv == [None, None, None]
+    for role, want in ((Role.P0, [0, None, None]), (Role.P1, [None, 1, None]), (Role.MON, [None] * 3)):
+        e = Engine(image, role)
+        assert e.drv == [None] * 3
+        run(e, 1)
+        assert e.drv == want, role
+
+
+def test_gated_line_stays_released_at_start():
+    """isa §2: a gated PP line is driven only from its owner's first step on it."""
+    base = img(lambda d, l: d.halt())
+    image = replace(base, lines=[replace(ln, gated=True) for ln in base.lines])
+    assert run(Engine(image, Role.P0), 1).drv == [None]
+
+
+def test_synchronizer_starts_at_each_lines_idle_level():
+    """isa §4.1: preloaded with the idle levels when RUN rises, so the engine sees idle at now 0-1
+    and the wire from now 2 (as it was at now 0), whatever the wire read before."""
+    e = Engine(img(lambda d, l: d.halt(), (("l", "pp", "b", 0),)), Role.P0)
+    seen = []
+    for _ in range(3):
+        e.cycle([1])
+        seen.append(e.inp[0])
+    assert seen == [0, 0, 1]
 
 
 def test_resolve_contention_and_od():

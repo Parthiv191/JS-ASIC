@@ -44,8 +44,10 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
   - `gated` (PP only): the owner drives the line only from its first owned step on it until
     the next STOP on a SELECT bus, or an abort; otherwise the line is released. For example, SPI
     MISO on a shared bus.
-  - When an engine starts, each non-gated PP line its role owns is driven to `idle`; every other line is
-    released. Before RUN, every pin is an input.
+  - Before RUN, every pin is an input. In `s0` (§4.0) each non-gated PP line the engine's role owns is
+    driven to `idle`, so the drive is on the wire from `now = 1`, like any drive; every other line stays
+    released. At `now = 0` a line reads what the pin reads: an owned idle-0 line with a pull-up reads 1,
+    and every engine of that RUN, its owner too, sees that 1 at `now = 2` and `idle` from `now = 3` (§4.1).
   - `drive(L, v)`: PP outputs `v`; OD pulls low for 0 and releases for 1.
   - An undriven line reads what the pin reads. External pull-ups, or LOOPBACK mode
     (architecture §2), make it 1.
@@ -154,7 +156,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 - **Inputs.** Synchronized inputs are sampled every engine cycle. `edge(L)` means the value
   differs from the previous cycle's. Edges during untimed instructions aren't latched, except by
   the bus detector (§4.7) and the OD let-go tracker (§4.3). The synchronizer is preloaded with each line's idle level when RUN
-  rises.
+  rises: the engine sees `idle` at `now` 0–1 and the wire from `now = 2` (as it was at `now = 0`).
 - **Timeline `tb`.** Timed steps are scheduled against `tb`, not against instruction count, so
   untimed instructions between steps don't move wire timing.
   - An owner acts at the planned time.
