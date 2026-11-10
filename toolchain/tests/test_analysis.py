@@ -32,6 +32,15 @@ def test_r2_rejects_branch_on_popped_reg():
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
+def test_r2_rejects_branch_on_reg_never_written():
+    """Registers keep their values across RUN (isa §1), so the two engines may start with
+    different values: a register is tainted until the program writes it."""
+    d, ln, p = two_party()
+    d.label("x")
+    d.br("x", cond="z", reg="r0")
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
+
+
 def test_r2_rejects_branch_on_reg_written_in_role_block():
     d, ln, p = two_party()
     d.label("x")
@@ -53,7 +62,7 @@ def test_r2_accepts_branch_on_xfer_dst():
 
 
 def test_r2_taint_joins_over_loop():
-    """r0 is clean on entry but tainted along the back edge, so the loop head is tainted."""
+    """r0 is clean after LI but tainted along the back edge, so the loop head is tainted."""
     d, ln, p = two_party()
     d.li("r0", 0)
     d.label("head")
