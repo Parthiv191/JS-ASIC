@@ -90,6 +90,7 @@ class Engine:
         self.samples: list[Sample] = []
         self.branches: list[Branch] = []
         self.starts: list[tuple[int, int]] = []  # (pc, now) per instruction start: the tr_issue trace
+        self._abort_at: int | None = None        # decision cycle of an abort, until abort_pc starts
         self.halted = False
         self.halt_cycle: int | None = None
         self.idle = False
@@ -168,6 +169,7 @@ class Engine:
         self.tb = self.now
         self._reanchor(self.now)
         self.pc = self.image.abort_pc
+        self._abort_at = self.now
 
     # ------------------------------------------------------------------ interpreter
     @staticmethod
@@ -192,7 +194,12 @@ class Engine:
             start = self.now
             self.starts.append((self.pc, start))
             yield from handler(ins)  # its last yield ends its completion cycle
-            yield from self.wait_until(self._next_start(start, self.now - 1))
+            if self._abort_at is not None:
+                # abort_pc is fetched on the first own cycle >= t + 1 and starts 2 later (isa §4.0)
+                t, self._abort_at = self._abort_at, None
+                yield from self.wait_until(t + 1 + ((t + 1) & 1) + 2)
+            else:
+                yield from self.wait_until(self._next_start(start, self.now - 1))
 
     def _halt(self) -> Gen:
         self.halted = True

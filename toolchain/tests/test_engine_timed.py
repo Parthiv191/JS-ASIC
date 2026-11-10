@@ -359,3 +359,27 @@ def test_follower_cond_odd_detect_successor_on_even():
     (rec,) = t.engines[0].records
     assert (rec.cycle, rec.tb) == (7, 7 - EDGE_LAT)
     assert t.engines[0].starts == [(0, 2), (1, 8)]
+
+
+@pytest.mark.parametrize("mx,t,cost", [(4, 9, 3), (5, 10, 4)])
+def test_abort_restart_costs_3_or_4(mx, t, cost):
+    """A followed COND (min 0, nom 3, max mx) starts at 2 with tb = 0 and no edge ever comes. It
+    times out at the first now with now - EDGE_LAT > tb + max + QUANT, i.e. t = mx + 5, and aborts.
+    abort_pc is fetched on the first own cycle >= t + 1 and starts 2 cycles later (isa §4.0): t + 3
+    when t is odd, t + 4 when it is even."""
+    d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    d.abort_to("end")
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=3, min=0, max=mx), abort=True)
+    d.halt()
+    d.label("end")
+    d.mark(1)
+    d.halt()
+    e = Engine(compile_desc(d, check_timing=False), Role.P1)
+    for _ in range(40):
+        if e.halted:
+            break
+        e.cycle([1] * 8)
+    assert [(ev.kind, ev.cycle) for ev in e.events if ev.kind in ("TIMEOUT", "ABORT")] == [
+        ("TIMEOUT", t), ("ABORT", t)]
+    assert e.starts[:2] == [(0, 2), (2, t + cost)]
