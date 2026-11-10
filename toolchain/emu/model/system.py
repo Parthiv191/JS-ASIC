@@ -48,6 +48,7 @@ class EngineTrace:
     halt_cycle: int | None = None  # the HALT's (or ILLEGAL's) start cycle
     drives: list[tuple[int | None, ...]] = field(default_factory=list)  # per tick, the drive that
     #                                                                     tick's wire was resolved from
+    regs: list[int] = field(default_factory=list)  # r0-r7 at the end of the run
 
     @property
     def violations(self) -> list[Event]:
@@ -147,7 +148,7 @@ class System:
             engines=[
                 EngineTrace(e.name, e.role, e.records, e.events, e.rx, e.samples, e.branches,
                             e.halted, e.idle, len(e.tx), self._cycle_tick[i], e.starts, e.halt_cycle,
-                            drives[i])
+                            drives[i], list(e.regs))
                 for i, e in enumerate(self.engines)
             ],
             wire_edges=edges,

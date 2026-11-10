@@ -146,3 +146,12 @@ def test_replay_rejects_host_words_for_the_rtl_engine():
 def test_replay_rejects_two_images():
     with pytest.raises(ValueError, match="image"):
         replay([EngineSpec(_holds(), Role.P1), EngineSpec(replace(_holds(), name="other"), Role.P0)], 0)
+
+
+def test_trace_keeps_the_final_registers():
+    """The trace port has no register writes, so the harness compares r0-r7 after the run."""
+    def b(d, ln):
+        d.li("r3", 0x1234)
+        d.alu("add", "r4", "r3", 1)
+        d.halt()
+    assert _one_engine(b).engines[0].regs == [0, 0, 0, 0x1234, 0x1235, 0, 0, 0]

@@ -25,7 +25,8 @@ reset ─► load over host SPI ─► ROLE, RUN ─► drive uio_in by tr_now �
 | `compare(expected, observed)` | same | the first mismatch, with context (§3), or None |
 | per-tick drives | `toolchain/emu/model/system.py` | `System.run` records each engine's drives per tick, so the wire can be rebuilt without engine `e` |
 | monitor | `test/cosim/monitor.py` | samples `tb.user_project.u_eng0.tr_*` every clk into the same pulses |
-| harness | `test/cosim/harness.py` | `cosim(dut, image, roles, ...)`: model run, reset, load, run, compare |
+| `replay(specs, e, glitches)` | `toolchain/emu/cosim.py` | runs the model and checks the rules below; returns the expected pulses and the stimulus |
+| harness | `test/cosim/harness.py` | `cosim(dut, rep, role)`: reset, load, run, compare the pulses, then read back r0–r7 |
 | tests | `test/cosim/test_cosim.py` | §4 |
 
 The model side is plain Python, so pytest checks it without a simulator. The cocotb side imports
@@ -36,10 +37,15 @@ devOps's SPI host (`test/chip.py`) without editing it.
   The other engines are external devices: any clock ratio or phase.
 - **Time.** `uio_in` during the cycle with `now = w` is the stimulus at tick `w`. At the rising
   edge that ends cycle `w − 1` (where `tr_now` reads `w − 1`), the harness writes the value for
-  `w`. Before RUN, `uio_in` holds the tick-0 value, which is what the synchronizer preloads.
+  `w`. Before RUN, `uio_in` holds the tick-0 value. The RTL preloads its synchronizer with each
+  line's idle level (isa §4.1) and reads the pin from s0 on.
+- **Start-up gap (open):** the model drives an owned PP line at idle from tick 0; the RTL drives it
+  from `now = 1`. For a line that idles at 0, the RTL reads 1 at `now = 2` and the model 0. No
+  test uses such a line yet; SPI with CPOL 0 will, so isa §2/§4.1 must settle which is right first.
 - **Undriven lines read 1** on both sides (the model's `PULL`). Pins with no line read 1.
-- **Glitches** only pull an OD line to 0, or touch a line the RTL's role never drives. The chip
-  reads its own drive inside, so a glitch over it would reach the model and not the RTL.
+- **Glitches** only pull an OD line to 0, or touch a line the RTL isn't driving at that tick
+  (checked tick by tick). The chip reads its own drive inside, so a glitch over it would reach the
+  model and not the RTL.
 - No PP contention in the model run, and no host words for the RTL's engine until the RTL has
   FIFOs (other engines may have them).
 
@@ -67,6 +73,9 @@ below, then by fields, so the order of signals inside a cycle doesn't matter.
 last tick + 64, or until it halts + 64 clk. A pulse on one side only is a mismatch, so extra
 RTL activity after the model goes quiet is caught.
 
+**Registers:** the trace port has no register writes, so after the pulses agree the harness reads
+r0–r7 over the host port and compares them with the model's final registers.
+
 ## 3. Failures
 
 A failing test reports:
@@ -76,7 +85,8 @@ A failing test reports:
 - the waveform, `test/cosim/tb.fst`.
 
 A program the model can't run yet fails loudly (`NotImplementedError`), never silently. A known
-model or RTL gap is a cocotb `expect_fail` test naming the gap. When the gap is fixed, the test
+model or RTL gap is a cocotb `expect_fail` test that must fail on exactly that gap's mismatch;
+any other failure is an error `expect_fail` doesn't absorb. When the gap is fixed, the test
 passes, cocotb reports that as a failure, and the mark comes off.
 
 ## 4. Tests
@@ -88,17 +98,28 @@ worse than none:
 - reordering pulses within a cycle is not reported;
 - `expected()` and `stimulus()` on a small two-party model run, against values worked out by hand.
 
+**No vacuous cases.** Every co-sim test first checks on the model that its scenario does what it
+names: the event happens, the value changes, and each flag of a parametrized case changes what
+is compared. Planted bugs, each caught (11-10): an RTL follower that ignores MSB, a flipped
+register, a gap test failing on the wrong mismatch, and the stimulus driver keyed on `running`.
+
 **Co-sim** (cocotb, `test_cosim.py`), only features both sides have today:
 
 | Test | RTL role | Covers |
 |---|---|---|
-| untimed | P0 | LI, ALU, BR loops, ROLE_IF, MARK, RAW, HALT |
+| untimed | P0 | LI, every ALU op (results folded into one register), a BR NZ loop, MARK, RAW DELAY and GET, HALT |
+| input at now 1 | P1 | `uio_in` during `now = 1` is the stimulus at tick 1 |
 | hold, cond | P0, P1 | HOLD and COND do and follow; EARLY, TIMEOUT, ABORT into `abort_pc` |
-| xfer | P0, P1 | unclocked XFER owner and follower; CHK, RESYNC, MSB |
+| xfer follower | P1 | unclocked XFER, every MSB/CHK/RESYNC combination, against a 2% slow sender with a glitch |
 | uart frame | tx, rx, mon | a UART frame with register src/dst, peers up to 2% slow and out of phase (model clocks only run slower) |
-| glitch | rx | a glitch in a data bit (LEVEL or EDGE) |
+| glitch | rx | an out-of-window edge (EDGE, data kept), a flipped sample (data 0xA0), a glitch in the start bit (LEVEL) |
 | illegal | P0 | a reserved code halts as ILLEGAL: `expect_fail` until devOps's #13 fix |
 | role branches | P0 | `tr_br` for ROLE_IF and RAW JPIN: `expect_fail` until devOps's #13 fix. Until then the other programs avoid both. |
+
+**Not checked yet: the RTL's own pin drives** (Later 1). In an owner role (tx, HOLD and COND
+do) co-sim checks the RTL's trace and registers, not its wire, so a wrong drive level, bit order
+or pin on the RTL owner passes until pin comparison lands. Follower roles are checked against the
+model owner's real wire.
 
 **Later**, each its own PR:
 1. Per-cycle pin comparison (`uio_out`, `uio_oe` against the model's drives), which also runs on
