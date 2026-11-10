@@ -141,14 +141,18 @@ module engine #(
   wire [3:0]  x_dst   = operand[11:8];
 
   wire timed   = (op == OP_COND) | (op == OP_HOLD) | (op == OP_XFER);
-  wire t_ok    = (t_prof[3] == 1'b0) &&
+  // Reserved codes halt as ILLEGAL in the start cycle (isa §3): step owner 3, profile >= 8,
+  // line >= 8, lane >= 4, src 4-7, dst 1 and 3-7, ALU sub 10-15, BR 5-15, RAW 6-15.
+  // COND START/STOP, clocked lanes and src/dst FIFO/FZ are defined but not built yet.
+  wire t_ok    = (t_prof[3] == 1'b0) && (t_owner != 2'd3) &&
                  (op == OP_COND ? (t_line[3] == 1'b0 && operand[1] == 1'b0) :
                   op == OP_HOLD ? (t_line[3] == 1'b0) :
                   (t_line[3:2] == 2'b00 && !lane_ck &&
                    (x_src == 4'd0 || x_src == 4'd1 || x_src[3]) &&
                    (x_dst == 4'd0 || x_dst[3])));
-  wire untimed = (op == OP_NOP || op == OP_LI || op == OP_ALU || op == OP_BR ||
-                  op == OP_ROLE_IF || op == OP_MARK || op == OP_RAW || op == OP_HALT);
+  wire untimed = (op == OP_NOP || op == OP_LI || (op == OP_ALU && sub <= 4'd9) ||
+                  (op == OP_BR && sub <= BR_ROLE) || op == OP_ROLE_IF || op == OP_MARK ||
+                  (op == OP_RAW && sub <= RAW_EVT) || op == OP_HALT);
   wire illegal = ~(untimed | (timed & t_ok));
   wire stop_op = (op == OP_HALT) | illegal;
 
@@ -757,8 +761,10 @@ module engine #(
   wire signed [24:0] tb_tr = tb_upd ? tb_nx - 25'sd1 : tb_age;   // tb after this cycle
   wire [23:0] tr_tb     = now_o - tb_tr[23:0];
   wire [10:0] tr_evt    = evs;
-  wire        tr_br     = start & (op == OP_BR) & br_cond;
-  wire        tr_taken  = taken;
+  // branch outcomes: conditional BR, RAW JPIN, and ROLE_IF (taken = skipped)
+  wire        jpin      = (op == OP_RAW) && (sub == RAW_JPIN);
+  wire        tr_br     = start & ~illegal & (((op == OP_BR) & br_cond) | jpin | (op == OP_ROLE_IF));
+  wire        tr_taken  = (op == OP_ROLE_IF) ? ~in_role : jpin ? (l_in == operand[11]) : taken;
   wire        tr_sample = c_on & sample_tr;
   wire [2:0]  tr_line   = c_line;
   wire        tr_halted = halted;
