@@ -104,6 +104,7 @@ module engine #(
 
   // ---- fetch and the prefetch register ----
   reg  [31:0] pf;
+  (* keep *) reg [3:0] pf_pi;      // a copy of pf[20:17] that only drives the profile mux
   reg         pf_valid, fetch_d, drop_d;
   reg  [8:0]  fpc;                  // address of the last fetch = pc of the word in pf
   reg  [10:0] skip;                 // own cycles still to wait (RAW DELAY)
@@ -153,8 +154,16 @@ module engine #(
 
   // ---- registers ----
   reg  [15:0] r [0:7];
-  wire [15:0] a = r[ra];
-  wire [15:0] b = flags[3] ? r[operand[2:0]] : {4'h0, operand};
+  reg         wq_v;      // a register write in flight: r[wq_rd] <= wq_val next cycle
+  reg  [2:0]  wq_rd;
+  reg  [15:0] wq_val;
+  // Every register write lands one cycle late through wq_*; the read ports bypass it, so an
+  // instruction that starts the cycle after a step completes still sees the new value.
+  wire [15:0] a = (wq_v && wq_rd == ra) ? wq_val : r[ra];
+  // one read port serves the ALU's rb and XFER's src (their index fields differ)
+  wire [2:0]  rb_i = (op == OP_XFER) ? operand[6:4] : operand[2:0];
+  wire [15:0] rb   = (wq_v && wq_rd == rb_i) ? wq_val : r[rb_i];
+  wire [15:0] b    = flags[3] ? rb : {4'h0, operand};
   assign reg_rdata = r[reg_sel];
 
   reg  [15:0] alu;
@@ -254,7 +263,7 @@ module engine #(
   reg  [47:0] p7;                      // this engine's private profile 7, copied at RUN
   reg  [47:0] prof;
   always @* begin
-    case (t_prof[2:0])
+    case (pf_pi[2:0])
       3'd0:    prof = {16'hFFFF, 16'h0000, 16'h0000};   // IDLE = (0, 0, INF)
       3'd7:    prof = p7;
       default: prof = prof_tab[(t_prof[2:0] - 3'd1) * 48 +: 48];
@@ -263,38 +272,46 @@ module engine #(
 
   wire        st     = start & timed & t_ok;  // a timed step starts this cycle
   wire [2:0]  st_line = (op == OP_XFER) ? lane[2:0] : t_line[2:0];
-  wire [15:0] st_v   = (x_src == 4'd0) ? 16'h0 : (x_src == 4'd1) ? 16'hFFFF : r[x_src[2:0]];
+  wire [15:0] st_v   = (x_src == 4'd0) ? 16'h0 : (x_src == 4'd1) ? 16'hFFFF : rb;
 
+  // In the start cycle the fields come from pf; after it, from the latched s_*. Selecting on
+  // busy (a flop) instead of st keeps the instruction decode off every datapath.
+  wire        sel     = ~busy;
   wire        c_on    = st | busy;
-  wire [1:0]  c_kind  = st ? (op == OP_COND ? K_COND : op == OP_HOLD ? K_HOLD : K_XFER) : s_kind;
-  wire        c_do    = st ? t_does : s_do;
-  wire [2:0]  c_line  = st ? st_line : s_line;
-  wire [2:0]  c_pin   = st ? line_cfg[{st_line, 3'd0} +: 3] : s_pin;
-  wire        c_od    = st ? line_cfg[{st_line, 3'd3}] : s_od;
-  wire [15:0] c_min   = st ? prof[15:0]  : s_min;
-  wire [15:0] c_nom   = st ? prof[31:16] : s_nom;
-  wire [15:0] c_max   = st ? prof[47:32] : s_max;
-  wire        c_abort = st ? flags[2] : s_abort;
-  wire        c_chk   = st ? flags[0] : s_chk;
-  wire        c_rsync = st ? flags[1] : s_resync;
-  wire        c_msb   = st ? flags[3] : s_msb;
-  wire        c_level = st ? operand[0] : s_level;   // COND: RISE 1 / FALL 0; HOLD: level
-  wire        c_meas  = st ? (op == OP_COND && operand[2]) : s_meas;
-  wire [2:0]  c_rd    = st ? operand[5:3] : s_rd;
-  wire        c_profz = st ? (t_prof == 4'd0) : s_profz;
-  wire [3:0]  c_n1    = st ? (op == OP_XFER ? x_n1 : 4'd0) : s_n1;
-  wire [3:0]  c_dst   = st ? x_dst : s_dst;
-  wire [15:0] c_v     = st ? st_v : s_v;
-  wire [15:0] c_rx    = st ? 16'h0 : s_rx;
-  wire [3:0]  c_k     = st ? 4'd0 : s_k;
-  wire [3:0]  c_j     = st ? 4'd0 : s_j;
-  wire        c_first = st;
+  wire [1:0]  c_kind  = sel ? (op == OP_COND ? K_COND : op == OP_HOLD ? K_HOLD : K_XFER) : s_kind;
+  wire        c_do    = sel ? t_does : s_do;
+  wire [2:0]  c_line  = sel ? st_line : s_line;
+  wire [2:0]  c_pin   = sel ? line_cfg[{st_line, 3'd0} +: 3] : s_pin;
+  wire        c_od    = sel ? line_cfg[{st_line, 3'd3}] : s_od;
+  wire [15:0] c_min   = sel ? prof[15:0]  : s_min;
+  wire [15:0] c_nom   = sel ? prof[31:16] : s_nom;
+  wire [15:0] c_max   = sel ? prof[47:32] : s_max;
+  wire        c_abort = sel ? flags[2] : s_abort;
+  wire        c_chk   = sel ? flags[0] : s_chk;
+  wire        c_rsync = sel ? flags[1] : s_resync;
+  wire        c_msb   = sel ? flags[3] : s_msb;
+  wire        c_level = sel ? operand[0] : s_level;   // COND: RISE 1 / FALL 0; HOLD: level
+  wire        c_meas  = sel ? (op == OP_COND && operand[2]) : s_meas;
+  wire [2:0]  c_rd    = sel ? operand[5:3] : s_rd;
+  wire        c_profz = sel ? (t_prof == 4'd0) : s_profz;
+  wire [3:0]  c_n1    = sel ? (op == OP_XFER ? x_n1 : 4'd0) : s_n1;
+  wire [3:0]  c_dst   = sel ? x_dst : s_dst;
+  wire [15:0] c_v     = sel ? st_v : s_v;
+  wire [15:0] c_rx    = sel ? 16'h0 : s_rx;
+  wire [3:0]  c_k     = sel ? 4'd0 : s_k;
+  wire [3:0]  c_j     = sel ? 4'd0 : s_j;
+  wire        c_first = sel;
 
   wire signed [24:0] nom   = u16(c_nom);
   wire signed [24:0] half  = u16({1'b0, c_nom[15:1]});
   wire               bounded = (c_max != 16'hFFFF);
-  wire signed [24:0] c_slot = st ? tb_age : slot_age;
-  wire signed [24:0] c_samp = st ? tb_age - half - EDGE_LAT : samp_age;
+  wire signed [24:0] h3     = half + EDGE_LAT;
+  wire signed [24:0] tb_p1  = tb_age + 25'sd1;   // from flops: early
+  wire signed [24:0] anc_p1 = anc_age + 25'sd1;
+  wire signed [24:0] c_slot = sel ? tb_age : slot_age;
+  wire signed [24:0] c_samp = sel ? tb_age - h3 : samp_age;
+  wire signed [24:0] c_slot_p1 = sel ? tb_p1 : slot_age + 25'sd1;
+  wire signed [24:0] c_samp_p1 = sel ? tb_p1 - h3 : samp_age + 25'sd1;
 
   wire       inp  = sync_s[c_pin];
   wire       edg  = sync_s[c_pin] ^ sync_p[c_pin];
@@ -303,6 +320,18 @@ module engine #(
   wire [3:0] pos_k = c_msb ? c_n1 - c_k : c_k;
   wire [3:0] pos_j = c_msb ? c_n1 - c_j : c_j;
 
+  // Start-cycle results that nothing reads before the next own cycle (>= start + 2) land one
+  // cycle late, off the decode -> profile -> arithmetic path: the window add (acc_pend), the
+  // register write (wq_*) and the event registers (ev_q). The window check reads acc
+  // with the pending add folded in.
+  reg                acc_pend, acc_clrq, evq_st;
+  reg  [10:0]        ev_q;
+  reg  [8:0]         evpc_q;
+  // the window, with last cycle's clear and add applied (acc_* lag one cycle behind)
+  wire [23:0]        acc_lo_e  = (acc_clrq ? 24'h0 : acc_lo) + (acc_pend ? {8'h0, s_min} : 24'h0);
+  wire [23:0]        acc_hi_e  = (acc_clrq ? 24'h0 : acc_hi) + (acc_pend ? {8'h0, s_max} : 24'h0);
+  wire               acc_inf_e = (~acc_clrq & acc_inf) | (acc_pend & (s_max == 16'hFFFF));
+
   // ---- one cycle of the step: what it does this cycle (combinational) ----
   reg                done, abort_now, to_set;
   reg  [10:0]        ev;            // event kinds logged this cycle
@@ -310,7 +339,9 @@ module engine #(
   reg                wr_en;
   reg  [2:0]         wr_rd;
   reg  [15:0]        wr_val;
-  reg  signed [24:0] tb_new, anc_new, slot_new, samp_new;
+  // next-cycle ages: *_nx already includes this cycle's + 1; tb/anc update only when *_upd
+  reg  signed [24:0] tb_nx, anc_nx, slot_nx, samp_nx, s_cur, s_cur_p1;
+  reg                tb_upd, anc_upd;
   reg                acc_clr, acc_add;
   reg                k_inc, j_inc, smp;
   reg  [15:0]        rx_new;
@@ -325,7 +356,8 @@ module engine #(
     done = 1'b0; abort_now = 1'b0; to_set = 1'b0; ev = 11'h0;
     drv_en = 1'b0; drv_v = 1'b0;
     wr_en = 1'b0; wr_rd = 3'd0; wr_val = 16'h0;
-    tb_new = tb_age; anc_new = anc_age; slot_new = c_slot; samp_new = c_samp;
+    tb_upd = 1'b0; anc_upd = 1'b0; tb_nx = tb_p1; anc_nx = anc_p1;
+    slot_nx = c_slot_p1; samp_nx = c_samp_p1; s_cur = c_samp; s_cur_p1 = c_samp_p1;
     acc_clr = 1'b0; acc_add = 1'b0;
     k_inc = 1'b0; j_inc = 1'b0; smp = 1'b0;
     rx_new = c_rx; value = 16'h0; sample_tr = 1'b0;
@@ -341,7 +373,7 @@ module engine #(
               drv_en = 1'b1; drv_v = c_level;
               value  = c_meas ? clamp16(tb_age) : 16'h0;
               if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(tb_age); end
-              tb_new = 25'sd0; anc_new = 25'sd0; acc_clr = 1'b1;
+              tb_upd = 1'b1; tb_nx = 25'sd1; anc_upd = 1'b1; anc_nx = 25'sd1; acc_clr = 1'b1;
               done = 1'b1;
             end
           end else begin
@@ -350,14 +382,16 @@ module engine #(
               if (c_min != 16'h0 && m < u16(c_min) - QUANT) ev[EARLY] = 1'b1;
               value = c_meas ? clamp16(m) : 16'h0;
               if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(m); end
-              tb_new = EDGE_LAT; anc_new = EDGE_LAT; acc_clr = 1'b1;
+              tb_upd = 1'b1; tb_nx = EDGE_LAT + 25'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 25'sd1;
+              acc_clr = 1'b1;
               done = 1'b1;
             end else if (bounded && tb_age - EDGE_LAT > u16(c_max) + QUANT) begin
               ev[TIMEOUT] = 1'b1;
               if (c_abort) abort_now = 1'b1;
               else begin
                 to_set = 1'b1;
-                tb_new = tb_age - nom; anc_new = tb_age - nom; acc_clr = 1'b1;
+                tb_upd = 1'b1; tb_nx = tb_p1 - nom; anc_upd = 1'b1; anc_nx = tb_p1 - nom;
+                acc_clr = 1'b1;
                 value  = c_meas ? 16'hFFFF : 16'h0;
                 if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = 16'hFFFF; end
               end
@@ -372,7 +406,7 @@ module engine #(
               if (!c_profz && tb_age > ISSUE) ev[OVERRUN] = 1'b1;
               drv_en = 1'b1; drv_v = c_level;
               value  = {15'h0, c_level};
-              tb_new = tb_age - nom; acc_add = 1'b1;
+              tb_upd = 1'b1; tb_nx = tb_p1 - nom; acc_add = 1'b1;
               done = 1'b1;
             end
           end else begin
@@ -384,7 +418,7 @@ module engine #(
                 ev[LEVEL] = 1'b1;
                 if (c_abort) abort_now = 1'b1;
               end
-              if (!abort_now) begin tb_new = tb_age - nom; acc_add = 1'b1; end
+              if (!abort_now) begin tb_upd = 1'b1; tb_nx = tb_p1 - nom; acc_add = 1'b1; end
               done = 1'b1;
             end
           end
@@ -396,9 +430,9 @@ module engine #(
             if (c_k <= c_n1 && c_slot >= 25'sd0) begin
               if (c_slot > ((c_k == 4'd0) ? ISSUE : 25'sd0)) ev[OVERRUN] = 1'b1;
               drv_en = 1'b1; drv_v = c_v[pos_k];
-              k_inc = 1'b1; slot_new = c_slot - nom; acc_add = 1'b1;
+              k_inc = 1'b1; slot_nx = c_slot_p1 - nom; acc_add = 1'b1;
               if (!c_od && c_k == c_n1) begin   // a PP owner completes on its last bit
-                tb_new = c_slot - nom;
+                tb_upd = 1'b1; tb_nx = c_slot_p1 - nom;
                 value  = c_v & ~(16'hFFFF << {1'b0, c_n1} << 1);
                 done   = 1'b1;
               end
@@ -406,9 +440,9 @@ module engine #(
             // an OD owner reads its bits back where a follower samples them (isa §6)
             if (c_od && c_j <= c_n1 && c_samp >= 25'sd0) begin
               rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
-              j_inc = 1'b1; samp_new = c_samp - nom;
+              j_inc = 1'b1; samp_nx = c_samp_p1 - nom;
               if (c_j == c_n1) begin
-                tb_new = c_slot;                // already base + n*P
+                tb_upd = 1'b1; tb_nx = slot_nx;     // base + n*P, after this cycle's drive
                 value  = rxs;
                 done   = 1'b1;
               end
@@ -417,26 +451,29 @@ module engine #(
             // follower: edges against the window, samples at a + (k - ak)P + P/2 + E
             if (edg) begin
               m  = anc_age - EDGE_LAT;
-              lo = $signed({1'b0, acc_lo}) - QUANT;
-              hi = $signed({1'b0, acc_hi}) + QUANT;
-              in_win = (m >= lo) && (acc_inf || m <= hi);
+              lo = $signed({1'b0, acc_lo_e}) - QUANT;
+              hi = $signed({1'b0, acc_hi_e}) + QUANT;
+              in_win = (m >= lo) && (acc_inf_e || m <= hi);
               if (c_chk && !in_win) begin
                 ev[EDGE] = 1'b1;
                 if (c_abort) abort_now = 1'b1;
               end
-              if (c_rsync && in_win) samp_new = -half;   // (a, ak) := (e, k)
+              if (c_rsync && in_win) begin              // (a, ak) := (e, k)
+                s_cur = -half; s_cur_p1 = 25'sd1 - half;
+              end
             end
-            if (!abort_now && samp_new >= 25'sd0) begin
-              if (samp_new > 25'sd0) ev[OVERRUN] = 1'b1;
+            samp_nx = s_cur_p1;
+            if (!abort_now && s_cur >= 25'sd0) begin
+              if (s_cur > 25'sd0) ev[OVERRUN] = 1'b1;
               sample_tr = 1'b1;
               rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
               j_inc = 1'b1; acc_add = 1'b1;
               if (c_j == c_n1) begin
-                tb_new = samp_new - nom + half + EDGE_LAT;   // a + (n - ak)P
+                tb_upd = 1'b1; tb_nx = s_cur_p1 - nom + h3;   // a + (n - ak)P
                 value  = rxs;
                 done   = 1'b1;
               end
-              samp_new = samp_new - nom;
+              samp_nx = s_cur_p1 - nom;
             end
             if (abort_now) done = 1'b1;
           end
@@ -450,7 +487,7 @@ module engine #(
       if (abort_now) begin
         ev[ABORT] = 1'b1;
         done = 1'b1;
-        tb_new = 25'sd0; anc_new = 25'sd0; acc_clr = 1'b1;
+        tb_upd = 1'b1; tb_nx = 25'sd1; anc_upd = 1'b1; anc_nx = 25'sd1; acc_clr = 1'b1;
         wr_en = 1'b0;
       end
     end
@@ -459,6 +496,11 @@ module engine #(
   // DELAY: n rounded up to a multiple of U = 2; skip that many own cycles minus one
   wire [11:0] dly  = (operand == 12'd0) ? 12'd0 : operand - 12'd1;
   wire        mark = start & (op == OP_MARK);
+  // untimed register writes (LI, ALU, RAW GET/EVT) also land one cycle after the start
+  wire        u_wr = start & ((op == OP_LI) | (op == OP_ALU && sub <= 4'd9) |
+                              (op == OP_RAW && (sub == RAW_GET || sub == RAW_EVT)));
+  wire [15:0] u_val = (op == OP_LI) ? pf[20:5] : (op == OP_ALU) ? alu :
+                      (sub == RAW_GET) ? {15'h0, l_in} : {10'h0, evt};
   wire        ill  = start & illegal;
   wire [10:0] evs  = ev | {ill, 10'h0};
 
@@ -467,10 +509,10 @@ module engine #(
   reg       fv_any;
   integer   fi;
   always @* begin
-    fv_any = |evs[6:0] | evs[10];
+    fv_any = |ev_q[6:0] | ev_q[10];
     fv_new = 4'd10;
     for (fi = 6; fi >= 0; fi = fi - 1)
-      if (evs[fi]) fv_new = fi[3:0];
+      if (ev_q[fi]) fv_new = fi[3:0];
   end
 
   reg     fv_valid;
@@ -481,6 +523,7 @@ module engine #(
       started  <= 1'b0;
       halted   <= 1'b0;
       pf       <= 32'h0;   // NOP
+      pf_pi    <= 4'h0;
       pf_valid <= 1'b0;
       fetch_d  <= 1'b0;
       drop_d   <= 1'b0;
@@ -509,6 +552,8 @@ module engine #(
       fv_kind  <= 4'd0;
       fv_valid <= 1'b0;
       p7       <= {16'hFFFF, 32'h0};
+      acc_pend <= 1'b0; acc_clrq <= 1'b0; wq_v <= 1'b0; wq_rd <= 3'd0; wq_val <= 16'h0;
+      ev_q <= 11'h0; evpc_q <= 9'd0; evq_st <= 1'b0;
       s_kind <= 2'd0; s_do <= 1'b0; s_od <= 1'b0; s_abort <= 1'b0; s_chk <= 1'b0;
       s_resync <= 1'b0; s_msb <= 1'b0; s_level <= 1'b0; s_meas <= 1'b0; s_profz <= 1'b0;
       s_pin <= 3'd0; s_rd <= 3'd0; s_line <= 3'd0; s_n1 <= 4'd0; s_dst <= 4'd0;
@@ -519,6 +564,7 @@ module engine #(
       started  <= 1'b0;
       halted   <= 1'b0;
       pf       <= 32'h0;
+      pf_pi    <= 4'h0;
       pf_valid <= 1'b0;
       fetch_d  <= 1'b0;
       drop_d   <= 1'b0;
@@ -543,6 +589,7 @@ module engine #(
       fv_pc    <= 9'd0;
       fv_kind  <= 4'd0;
       fv_valid <= 1'b0;
+      acc_pend <= 1'b0; acc_clrq <= 1'b0; wq_v <= 1'b0; ev_q <= 11'h0; evq_st <= 1'b0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else begin
       sync_m <= pin_in;
@@ -554,10 +601,12 @@ module engine #(
       fetch_d <= fetch;
       drop_d  <= fetch & abort_now;
       if (fetch) fpc <= fetch_addr;
-      if (fetch_d && !drop_d && !abort_now) begin
+      // pf loads every arriving word; only pf_valid depends on an abort dropping it
+      if (fetch_d) begin
         pf       <= sram_dout;
-        pf_valid <= 1'b1;
+        pf_pi    <= sram_dout[20:17];
       end
+      if (fetch_d && !drop_d && !abort_now) pf_valid <= 1'b1;
 
       if (!run) begin
         // stopped: release every pin; the state stays readable
@@ -579,6 +628,8 @@ module engine #(
         acc_lo   <= 24'd0;
         acc_hi   <= 24'd0;
         acc_inf  <= 1'b0;
+        acc_pend <= 1'b0;
+        acc_clrq <= 1'b0;
         to_flag  <= 1'b0;
         p7       <= prof_tab[288 +: 48];
         // preload: the engine sees idle levels at now 0-1 and the real wire from
@@ -589,17 +640,17 @@ module engine #(
       end else begin
         if (tick) now_r <= now_r + 24'd1;
         // ages: this cycle's value (after the step's updates), plus one
-        tb_age   <= tick ? sat(tb_new + 25'sd1)  : tb_new;
-        anc_age  <= tick ? sat(anc_new + 25'sd1) : anc_new;
-        slot_age <= slot_new + 25'sd1;
-        samp_age <= samp_new + 25'sd1;
-        if (acc_clr) begin
-          acc_lo <= 24'd0; acc_hi <= 24'd0; acc_inf <= 1'b0;
-        end else if (acc_add) begin
-          acc_lo <= acc_lo + {8'h0, c_min};
-          acc_hi <= acc_hi + {8'h0, c_max};
-          if (c_max == 16'hFFFF) acc_inf <= 1'b1;
-        end
+        // a step's new value is never above 2^22, so only the plain increment saturates
+        tb_age   <= tb_upd  ? tb_nx  : !tick ? tb_age  : (tb_age  >= AGE_MAX) ? AGE_MAX : tb_p1;
+        anc_age  <= anc_upd ? anc_nx : !tick ? anc_age : (anc_age >= AGE_MAX) ? AGE_MAX : anc_p1;
+        slot_age <= slot_nx;
+        samp_age <= samp_nx;
+        // every window update lands one cycle late; readers use acc_*_e
+        acc_pend <= acc_add & ~acc_clr;
+        acc_clrq <= acc_clr;
+        acc_lo   <= acc_lo_e;
+        acc_hi   <= acc_hi_e;
+        acc_inf  <= acc_inf_e;
 
         if (running && own && skip != 11'd0) skip <= skip - 11'd1;
 
@@ -622,9 +673,13 @@ module engine #(
           drv_low[c_pin]  <= ~drv_v;
           drv_high[c_pin] <= drv_v & ~c_od;
         end
-        if (wr_en) r[wr_rd] <= wr_val;
-        if (ev[TIMEOUT]) evt[2] <= 1'b1;
-        if (ev[LEVEL] || ev[EDGE]) evt[3] <= 1'b1;
+        // register writes (untimed and step results) go through wq_* and land next cycle
+        wq_v <= wr_en | u_wr;
+        if (u_wr) begin wq_rd <= rd; wq_val <= u_val; end
+        else if (wr_en) begin wq_rd <= wr_rd; wq_val <= wr_val; end
+        if (wq_v) r[wq_rd] <= wq_val;
+        if ((busy && ev[TIMEOUT]) || (evq_st && ev_q[TIMEOUT])) evt[2] <= 1'b1;
+        if ((busy && (ev[LEVEL] || ev[EDGE])) || (evq_st && (ev_q[LEVEL] || ev_q[EDGE]))) evt[3] <= 1'b1;
 
         if (abort_now) begin
           // release OD lines, refetch from abort_pc (isa §4.1, §4.0)
@@ -639,8 +694,6 @@ module engine #(
           pf_valid <= 1'b0;
           xpc      <= fpc;
           case (op)
-            OP_LI:   r[rd] <= pf[20:5];
-            OP_ALU:  if (sub <= 4'd9) r[rd] <= alu;
             OP_RAW:
               case (sub)
                 RAW_SET: begin
@@ -651,10 +704,8 @@ module engine #(
                   drv_low[l_pin]  <= 1'b0;
                   drv_high[l_pin] <= 1'b0;
                 end
-                RAW_GET:   r[rd] <= {15'h0, l_in};
                 RAW_DELAY: skip  <= dly[11:1];
                 RAW_EVT: begin
-                  r[rd] <= {10'h0, evt};
                   evt   <= evt & ~operand[5:0];
                 end
                 default: ;
@@ -678,9 +729,12 @@ module engine #(
       // host: registers while not running, W1C of VIOL and IRQ
       if (reg_we && !running) r[reg_sel] <= reg_wdata;
       if (irq_clr && !(mark && flags[4])) irq <= 1'b0;
-      viol <= (viol & ~viol_clr) | {5'h0, evs};
+      ev_q   <= evs;
+      evq_st <= ~busy;
+      evpc_q <= start ? fpc : xpc;
+      viol <= (viol & ~viol_clr) | {5'h0, ev_q};
       if (fv_any && !fv_valid) begin
-        fv_pc    <= start ? fpc : xpc;
+        fv_pc    <= evpc_q;
         fv_kind  <= fv_new;
         fv_valid <= 1'b1;
       end else if ((viol & ~viol_clr) == 16'h0) begin
@@ -700,7 +754,8 @@ module engine #(
   wire        tr_mark   = mark;
   wire [15:0] tr_value  = mark ? {4'h0, operand} : value;
   wire [23:0] tr_now    = now_o;
-  wire [23:0] tr_tb     = now_o - tb_new[23:0];
+  wire signed [24:0] tb_tr = tb_upd ? tb_nx - 25'sd1 : tb_age;   // tb after this cycle
+  wire [23:0] tr_tb     = now_o - tb_tr[23:0];
   wire [10:0] tr_evt    = evs;
   wire        tr_br     = start & (op == OP_BR) & br_cond;
   wire        tr_taken  = taken;

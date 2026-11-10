@@ -376,3 +376,18 @@ async def test_xfer_edge_window(dut):
         assert await get_reg(host, 2) == 0xFF, f"L={length}"
         got = await viol(host)
         assert got == (0 if ok else 1 << EDGE), f"start bit {length}: VIOL {got:#x}"
+
+
+@cocotb.test()
+async def test_xfer_od_late_single_bit(dut):
+    """An OD owner's 1-bit XFER that starts late enough to drive and read back in its start cycle
+    still ends at tb + P. DELAY 38 at 2, so the XFER starts at 40 with tb 0 (OVERRUN); its sample
+    is due at P//2 + E = 13 <= 40, so it completes at 40 with tb = 20; HALT at 42."""
+    od = line_byte(1, od=True, owner=0, idle=1)
+    prog = [Instr(Op.RAW, sub=int(RawOp.DELAY), operand=38), xfer(1, 0, Owner.P0, Src.ONES, Dst.R3, 1), HALT]
+    host, _ = await setup(dut, prog, lines=lines_with(L1=od), profs={1: (19, 20, 21)}, lanes={0: 1}, uio=0x02)
+    await wait_halted(host)
+    assert await eng_read(host, E_NOW, 3) == 42
+    assert await eng_read(host, E_TB, 3) == 20
+    assert await get_reg(host, 3) == 1        # released, and the pad reads 1
+    assert await viol(host) == 1 << OVERRUN
