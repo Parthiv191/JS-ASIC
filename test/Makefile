@@ -6,7 +6,7 @@ SIM ?= icarus
 FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
-PROJECT_SOURCES = project.v host_spi.v uart_tx.v prog_mem.v
+PROJECT_SOURCES = project.v host_spi.v engine.v uart_tx.v prog_mem.v
 
 # PDK behavioural models of the SRAM macro (simulation only, see sram/README.md)
 SRAM_MODELS = $(PWD)/sram/RM_IHPSG13_1P_512x32_c2_bm_bist.v $(PWD)/sram/RM_IHPSG13_1P_core_behavioral_bm_bist.v
@@ -44,7 +44,7 @@ VERILOG_SOURCES += $(PWD)/tb.v
 TOPLEVEL = tb
 
 # List test modules to run, separated by commas and without the .py suffix:
-COCOTB_TEST_MODULES = test
+COCOTB_TEST_MODULES = test,test_engine
 
 # include cocotb's make rules to take care of the simulator setup
 include $(shell cocotb-config --makefiles)/Makefile.sim

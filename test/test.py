@@ -5,81 +5,11 @@ LOOPBACK, 4 SRAM through the host."""
 import random
 
 import cocotb
-from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
-SCK, MOSI, CS_N = 1 << 0, 1 << 1, 1 << 2
-TM_DIR, TM_STRAP = 1 << 6, 1 << 7
-
-ID, VERSION = 0x5E, 0x01
-STATUS_BOOT_DONE, STATUS_TESTMODE, STATUS_LOOPBACK = 1 << 0, 1 << 4, 1 << 5
-UO_RESET = 0x50  # flash CS_N and REPORT high, the rest low (architecture §2)
-
-PIN_CTRL, PINS, PIN_OE, PIN_OUT, PIN_OE_SET = 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
-OVERRIDE, LOOPBACK = 1 << 0, 1 << 1
-
-COL1, COL2 = 0x1000, 0x3000
-WORDS = 512
-
-
-class Host:
-    """Bit-banged SPI host, mode 0. `half` is the SCK half period in clk (>= 4: SCK <= clk/8)."""
-
-    def __init__(self, dut, half=4):
-        self.dut, self.half = dut, half
-        self.ui = CS_N
-
-    def _set(self, mask, on):
-        self.ui = (self.ui | mask) if on else (self.ui & ~mask)
-        self.dut.ui_in.value = self.ui
-
-    async def frame(self, out, n_in=0):
-        """Send `out`, then clock `n_in` more bytes. Returns every byte read back."""
-        clk, h = self.dut.clk, self.half
-        got = []
-        self._set(CS_N, 0)
-        await ClockCycles(clk, h)
-        for b in list(out) + [0] * n_in:
-            r = 0
-            for i in range(7, -1, -1):
-                self._set(MOSI, (b >> i) & 1)
-                await ClockCycles(clk, h)
-                r = (r << 1) | (int(self.dut.uo_out.value) & 1)  # sample MISO at the rise
-                self._set(SCK, 1)
-                await ClockCycles(clk, h)
-                self._set(SCK, 0)
-            got.append(r)
-        await ClockCycles(clk, h)
-        self._set(CS_N, 1)
-        await ClockCycles(clk, 6)  # CS high >= 4 clk between frames
-        return got
-
-    async def write(self, addr, data, pair=False):
-        await self.frame([0x40 if pair else 0x00, addr >> 8, addr & 0xFF] + list(data))
-
-    async def read(self, addr, n, pair=False):
-        got = await self.frame([0xC0 if pair else 0x80, addr >> 8, addr & 0xFF], n + 1)
-        return got[4:]  # drop CMD, ADDR_H, ADDR_L and the dummy byte
-
-    async def write_words(self, addr, words):
-        await self.write(addr, b"".join(w.to_bytes(4, "little") for w in words))
-
-    async def read_words(self, addr, n):
-        b = bytes(await self.read(addr, 4 * n))
-        return [int.from_bytes(b[4 * i:4 * i + 4], "little") for i in range(n)]
-
-
-async def reset(dut, ui=CS_N):
-    """Reset with `ui` on ui_in (the straps are sampled as reset releases)."""
-    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())  # 50 MHz
-    dut.ena.value = 1
-    dut.ui_in.value = ui
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 10)
-
+from chip import (CS_N, ID, MOSI, PIN_CTRL, PIN_OE, PIN_OE_SET, PIN_OUT, PINS, SCK, STATUS_BOOT_DONE,
+                  STATUS_LOOPBACK, STATUS_TESTMODE, TM_DIR, TM_STRAP, UO_RESET, VERSION, COL1, COL2, WORDS,
+                  OVERRIDE, LOOPBACK, Host, reset)
 
 # ---------------------------------------------------------------- layer 1: reset and TESTMODE
 
