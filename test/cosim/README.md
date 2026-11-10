@@ -1,6 +1,6 @@
 # Co-simulation: model vs RTL
 
-Status: design (2026-11-10), owner: verification role. One image runs on the Python model
+Status: built (2026-11-10), owner: verification role. One image runs on the Python model
 (`toolchain/emu`) and on the RTL. Every trace-port pulse (architecture §5) is compared, with its
 `(pc, now)` and fields, until the first mismatch. Layer 3 of `docs/design/verification.md`.
 
@@ -95,9 +95,10 @@ worse than none:
 | untimed | P0 | LI, ALU, BR loops, ROLE_IF, MARK, RAW, HALT |
 | hold, cond | P0, P1 | HOLD and COND do and follow; EARLY, TIMEOUT, ABORT into `abort_pc` |
 | xfer | P0, P1 | unclocked XFER owner and follower; CHK, RESYNC, MSB |
-| uart frame | tx, rx, mon | a UART frame with register src/dst, peers at ±2% drift |
+| uart frame | tx, rx, mon | a UART frame with register src/dst, peers up to 2% slow and out of phase (model clocks only run slower) |
 | glitch | rx | a glitch in a data bit (LEVEL or EDGE) |
 | illegal | P0 | a reserved code halts as ILLEGAL: `expect_fail` until devOps's #13 fix |
+| role branches | P0 | `tr_br` for ROLE_IF and RAW JPIN: `expect_fail` until devOps's #13 fix. Until then the other programs avoid both. |
 
 **Later**, each its own PR:
 1. Per-cycle pin comparison (`uio_out`, `uio_oe` against the model's drives), which also runs on
@@ -114,4 +115,5 @@ cd test/cosim && make
 ```
 
 The Makefile builds `../../src/*.v`, the SRAM models in `../sram/` and `../tb.v`, with
-`TOPLEVEL = tb`. devOps wires it into CI next to `test/`.
+`TOPLEVEL = tb`. Check the result with `python -m cocotb_tools.check_results results.xml`
+(`make` exits 0 even when tests fail). devOps wires it into CI next to `test/`.
