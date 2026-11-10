@@ -45,6 +45,7 @@ class EngineTrace:
     cycle_tick: list[int]  # tick of every clock enable, also after HALT (the clock keeps running);
     #                         engine cycle c (1-based) ran in tick cycle_tick[c - 1]
     starts: list[tuple[int, int]] = field(default_factory=list)  # (pc, now) per instruction start
+    halt_cycle: int | None = None  # the HALT's (or ILLEGAL's) start cycle
 
     @property
     def violations(self) -> list[Event]:
@@ -139,7 +140,7 @@ class System:
             lines=list(self.lines),
             engines=[
                 EngineTrace(e.name, e.role, e.records, e.events, e.rx, e.samples, e.branches,
-                            e.halted, e.idle, len(e.tx), self._cycle_tick[i], e.starts)
+                            e.halted, e.idle, len(e.tx), self._cycle_tick[i], e.starts, e.halt_cycle)
                 for i, e in enumerate(self.engines)
             ],
             wire_edges=edges,
