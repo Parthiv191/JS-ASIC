@@ -39,9 +39,8 @@ devOps's SPI host (`test/chip.py`) without editing it.
   edge that ends cycle `w − 1` (where `tr_now` reads `w − 1`), the harness writes the value for
   `w`. Before RUN, `uio_in` holds the tick-0 value. The RTL preloads its synchronizer with each
   line's idle level (isa §4.1) and reads the pin from s0 on.
-- **Start-up gap (open):** the model drives an owned PP line at idle from tick 0; the RTL drives it
-  from `now = 1`. For a line that idles at 0, the RTL reads 1 at `now = 2` and the model 0. No
-  test uses such a line yet; SPI with CPOL 0 will, so isa §2/§4.1 must settle which is right first.
+- **Start-up:** both sides make the idle drives in `s0`, on the wire from `now = 1` (isa §2), so an
+  owned idle-0 line reads the pull-up's 1 at `now = 2`. Test `idle 0 start` checks it.
 - **Undriven lines read 1** on both sides (the model's `PULL`). Pins with no line read 1.
 - **Glitches** only pull an OD line to 0, or touch a line the RTL isn't driving at that tick
   (checked tick by tick). The chip reads its own drive inside, so a glitch over it would reach the
@@ -101,7 +100,8 @@ worse than none:
 **No vacuous cases.** Every co-sim test first checks on the model that its scenario does what it
 names: the event happens, the value changes, and each flag of a parametrized case changes what
 is compared. Planted bugs, each caught (11-10): an RTL follower that ignores MSB, a flipped
-register, a gap test failing on the wrong mismatch, and the stimulus driver keyed on `running`.
+register, a gap test failing on the wrong mismatch, the stimulus driver keyed on `running`, and an RTL
+that preloads both sync flops at `s0` (hiding the start-up 1).
 
 **Co-sim** (cocotb, `test_cosim.py`), only features both sides have today:
 
@@ -109,6 +109,7 @@ register, a gap test failing on the wrong mismatch, and the stimulus driver keye
 |---|---|---|
 | untimed | P0 | LI, every ALU op (results folded into one register), a BR NZ loop, MARK, RAW DELAY and GET, HALT |
 | input at now 1 | P1 | `uio_in` during `now = 1` is the stimulus at tick 1 |
+| idle 0 start | P0, P1 | the idle drive lands at `now = 1`: owner and follower read 1 at `now = 2`, then 0 |
 | hold, cond | P0, P1 | HOLD and COND do and follow; EARLY, TIMEOUT, ABORT into `abort_pc` |
 | xfer follower | P1 | unclocked XFER, every MSB/CHK/RESYNC combination, against a 2% slow sender with a glitch |
 | uart frame | tx, rx, mon | a UART frame with register src/dst, peers up to 2% slow and out of phase (model clocks only run slower) |

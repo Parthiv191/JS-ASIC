@@ -72,6 +72,21 @@ async def test_input_at_now_1(dut):
     await cosim(dut, rep, Role.P1)
 
 
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1])
+async def test_idle_0_start(dut, role):
+    """isa §2: the owner's idle drive is made in s0 and lands at now = 1, so the owner and the
+    follower both read the pull-up's 1 at now = 2 and the idle 0 from now = 3."""
+    d = Description("idle0", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=0)
+    d.raw_get("r0", ln)  # now 2
+    d.raw_get("r1", ln)  # now 4
+    d.halt()
+    rep = model(compile_desc(d), role)
+    assert rep.trace.engines[0].regs[:2] == [1, 0]
+    await cosim(dut, rep, role)
+
+
 # ---------------------------------------------------------------- timed steps
 def window():
     """COND fall · HOLD 0 · COND rise in a window, with ABORT · MARK · HALT (abort_pc)."""
