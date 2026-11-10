@@ -4,8 +4,43 @@ on:
   push:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # superseded branch runs are cancelled; every commit on main keeps its own result
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
+  # gds runs only when hardware changes. A workflow-level paths filter would leave the
+  # required checks pending, so the skip is a job-level if: (a skipped job counts as a pass).
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      hw: ${{ steps.diff.outputs.hw }}
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Diff against the merge-base with main
+        id: diff
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF" = "refs/heads/main" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "hw=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          base=$(git merge-base origin/main HEAD)
+          files=$(git diff --name-only "$base" HEAD)
+          echo "$files"
+          if echo "$files" | grep -qE '^(src/|flow/|test/|info\.yaml$|\.github/workflows/gds\.yaml$)'; then
+            echo "hw=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hw=false" >> "$GITHUB_OUTPUT"
+          fi
+
   gds:
+    needs: changes
+    if: needs.changes.outputs.hw == 'true'
     runs-on: ubuntu-24.04
     # post-GRT design repair is marked experimental ("may result in hangs"); a normal run takes ~35 min
     timeout-minutes: 120
@@ -41,6 +76,8 @@ jobs:
 
   viewer:
     needs: gds
+    # branch runs must not overwrite the page built from main
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       pages: write # to deploy to Pages
