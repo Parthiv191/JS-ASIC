@@ -392,13 +392,14 @@ module engine #(
           end else begin
             if (edg && inp == c_level) begin   // the edge wins over a timeout
               m = tb_age - EDGE_LAT;
-              if (c_min != 16'h0 && m < u16(c_min) - QUANT) ev[EARLY] = 1'b1;
+              // EARLY: m < min - QUANT, i.e. tb_age < min + E - QUANT (no subtract on the age)
+              if (c_min != 16'h0 && tb_age < u16(c_min) + (EDGE_LAT - QUANT)) ev[EARLY] = 1'b1;
               value = c_meas ? clamp16(m) : 16'h0;
               if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(m); end
               tb_upd = 1'b1; tb_nx = EDGE_LAT + 24'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 24'sd1;
               acc_clr = 1'b1;
               done = 1'b1;
-            end else if (bounded && tb_age - EDGE_LAT > u16(c_max) + QUANT) begin
+            end else if (bounded && tb_age > u16(c_max) + (EDGE_LAT + QUANT)) begin   // now - E > tb + max + QUANT
               ev[TIMEOUT] = 1'b1;
               if (c_abort) abort_now = 1'b1;
               else begin
