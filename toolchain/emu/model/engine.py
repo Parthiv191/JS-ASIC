@@ -13,8 +13,8 @@ from typing import Iterator
 from ..image import Image
 from ..isa import (
     EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, U, AluOp,
-    BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, li_imm, reg_of, unpack_cond, unpack_role_if,
-    unpack_xfer,
+    BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved, unpack_cond,
+    unpack_role_if, unpack_xfer,
 )
 
 VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE"})
@@ -55,34 +55,47 @@ class Sample:
 
 @dataclass(frozen=True)
 class Branch:
+    """A conditional decision: BR Z/NZ/TO/ROLE, RAW JPIN or ROLE_IF (architecture §5 `tr_br`).
+    `taken`: the pc left the fall-through path (for ROLE_IF, the block was skipped)."""
     pc: int
     taken: bool
+    cycle: int
 
 
 Gen = Iterator[None]
 
 
+def _decode(w: int) -> Instr | None:
+    try:
+        return decode(w)
+    except ValueError:  # a free opcode (20-31): ILLEGAL when it runs
+        return None
+
+
 class Engine:
-    def __init__(self, image: Image, role: Role, name: str = ""):
+    def __init__(self, image: Image, role: Role, name: str = "", regs: list[int] | None = None):
         self.image = image
         self.role = Role(role)
         self.name = name or self.role.name
-        self.instrs: list[Instr] = image.instrs()
+        self.instrs: list[Instr | None] = [_decode(w) for w in image.words]  # None: a free opcode
         self.lines = image.lines
         self.pc = 0
-        self.regs = [0] * NUM_REGS
+        # r0-r7 keep their values across RUN; reset clears them (isa §1)
+        self.regs = [0] * NUM_REGS if regs is None else [v & REG_MASK for v in regs]
+        if len(self.regs) != NUM_REGS:
+            raise ValueError(f"need {NUM_REGS} registers, got {len(self.regs)}")
         self.tb = 0
         self.to = False            # timeout flag (isa-v0 §4)
         self.anchor = 0            # cycle of the last re-anchoring event (COND, clocked XFER, abort)
         self.acc = (0, 0, 0)       # accumulated (nom, min, max) of HOLD/XFER bits since the anchor
         self.now = -1
-        self.drv: list[int | None] = [
-            ln.idle if ln.kind == "pp" and self.role != Role.MON and int(ln.owner) == int(self.role) else None
-            for ln in self.lines
-        ]
-        self.inp: list[int] | None = None
+        self.drv: list[int | None] = [None] * len(self.lines)  # before RUN every pin is an input
+        # The synchronizer is preloaded with each line's idle level when RUN rises (isa §4.1):
+        # the engine sees idle at now 0-1 and the wire from now 2 (as it was at now 0).
+        idle = [ln.idle for ln in self.lines]
+        self._pipe: list[list[int]] = [idle] * SYNC_LAT
+        self.inp: list[int] = idle
         self.prev_inp: list[int] | None = None
-        self._pipe: list[list[int]] | None = None
         self.tx: deque[int] = deque()
         self.rx: list[int] = []
         self.records: list[StepRecord] = []
@@ -97,22 +110,11 @@ class Engine:
         self._proc = self._run()
 
     # ------------------------------------------------------------------ clocking
-    def preload(self, wire: list[int]) -> None:
-        """Start the synchronizer from the bus's reset state, as the RTL's input flops reset to
-        the idle level. An edge made before this engine's first cycle (a sub-cycle phase
-        offset) is then still seen."""
-        w = list(wire[: len(self.lines)])
-        self._pipe = [w] * SYNC_LAT
-        self.inp = w
-
     def cycle(self, wire: list[int]) -> None:
         """Advance one engine cycle with the current (unsynchronized) wire values."""
         if self.halted:
             return
         w = list(wire[: len(self.lines)])
-        if self._pipe is None:  # preload: as if the wire had always looked like this
-            self._pipe = [w] * SYNC_LAT
-            self.inp = w
         self.now += 1
         self._pipe.insert(0, w)
         self.prev_inp = self.inp
@@ -180,19 +182,27 @@ class Engine:
         return t + (t & 1)
 
     def _run(self) -> Gen:
-        # s0 (now = 0) presents address 0; the word lands two cycles later, so instruction 0
-        # starts at now = 2 (isa §4.0).
+        # s0 (now = 0) drives each non-gated PP line the role owns to idle, on the wire from
+        # now = 1 (isa §2), and presents address 0; the word lands two cycles later, so
+        # instruction 0 starts at now = 2 (isa §4.0).
+        if self.role != Role.MON:
+            for i, ln in enumerate(self.lines):
+                if ln.kind == "pp" and not ln.gated and int(ln.owner) == int(self.role):
+                    self.drv[i] = ln.idle
         yield
         yield
         while True:
             if self.pc >= len(self.instrs):
                 yield from self._halt()
             ins = self.instrs[self.pc]
+            start = self.now
+            self.starts.append((self.pc, start))
+            if ins is None or reserved(ins):  # isa §3: halts in its start cycle, as HALT does
+                self.log("ILLEGAL")
+                yield from self._halt()
             handler = getattr(self, f"_op_{ins.op.name.lower()}", None)
             if handler is None:
                 raise NotImplementedError(f"{ins.op.name} is not in the model yet (pc {self.pc})")
-            start = self.now
-            self.starts.append((self.pc, start))
             yield from handler(ins)  # its last yield ends its completion cycle
             if self._abort_at is not None:
                 # abort_pc is fetched on the first own cycle >= t + 1 and starts 2 later (isa §4.0)
@@ -235,23 +245,25 @@ class Engine:
 
     def _op_br(self, ins: Instr) -> Gen:
         cond = BrCond(ins.sub)
-        if cond == BrCond.ROLE:
-            raise NotImplementedError(f"BR ROLE lands with the v1 model (pc {self.pc})")
         if cond == BrCond.ALWAYS:
             taken = True
         else:
-            if cond == BrCond.TO:
+            if cond == BrCond.ROLE:
+                taken = bool(ins.ra >> int(self.role) & 1)
+            elif cond == BrCond.TO:
                 taken = self.to
             else:
                 zero = self.regs[ins.ra] == 0
                 taken = zero if cond == BrCond.Z else not zero
-            self.branches.append(Branch(self.pc, taken))
+            self.branches.append(Branch(self.pc, taken, self.now))
         self.pc = ins.operand if taken else self.pc + 1
         yield
 
     def _op_role_if(self, ins: Instr) -> Gen:
         mask, count = unpack_role_if(ins.operand)
-        self.pc += 1 if mask >> int(self.role) & 1 else 1 + count
+        skip = not mask >> int(self.role) & 1
+        self.branches.append(Branch(self.pc, skip, self.now))
+        self.pc += 1 + count if skip else 1
         yield
 
     def _op_push(self, ins: Instr) -> Gen:
@@ -287,7 +299,9 @@ class Engine:
         elif op == RawOp.GET:
             self.regs[ins.rd] = self.inp[line]
         elif op == RawOp.JPIN:
-            if self.inp[line] == ins.operand >> 11 & 1:
+            taken = self.inp[line] == ins.operand >> 11 & 1
+            self.branches.append(Branch(self.pc, taken, self.now))
+            if taken:
                 nxt = ins.operand & 0x7FF
         elif op == RawOp.DELAY:  # n cycles, rounded up to a multiple of U
             self.pc = nxt
@@ -446,7 +460,7 @@ class Engine:
                     k += 1
                     if k == n:
                         break
-                    continue
+                # at most one sample per cycle: an overdue one waits for the next (isa §4.3)
                 yield
                 fresh = True
             self.tb = a + (n - ak) * P

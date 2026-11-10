@@ -26,6 +26,22 @@ def test_edge_latency_between_engines():
     assert trace.wire_edges[0] == [9]  # driven in tick 8, visible on the wire from tick 9
 
 
+def test_idle_0_line_reads_the_pin_until_its_owner_drives_it():
+    """isa §2: the owner's idle drive is made in s0 and is on the wire from tick 1, so tick 0
+    reads the pull-up. Every engine of the same RUN, the owner too, sees that 1 at now = 2 and
+    the idle level from now = 3."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=0)
+    d.raw_get("r0", ln)  # now 2
+    d.raw_get("r1", ln)  # now 4
+    d.halt()
+    image = compile_desc(d, check_timing=False)
+    s = System([EngineSpec(image, Role.P0), EngineSpec(image, Role.P1)])
+    trace = s.run(100)
+    assert trace.wire_edges[0] == [1]  # 1 at tick 0, the owner's 0 from tick 1
+    assert [e.regs[:2] for e in s.engines] == [[1, 0], [1, 0]]
+
+
 def test_clock_enable_ratio():
     d = Description("t", parties=("a", "b"))
     d.line("l", owner="a")
@@ -95,7 +111,7 @@ def test_glitch_overrides_wire():
 def test_contention_reported():
     image = raw_image(lambda d, ln: d.raw_delay(100))
     trace = System([EngineSpec(image, Role.P0), EngineSpec(image, Role.P0)]).run(5)
-    assert trace.contention and trace.contention[0] == (0, 0)
+    assert trace.contention and trace.contention[0] == (1, 0)  # the s0 drives land at tick 1
 
 
 def test_quiescence_waits_for_an_edge_in_flight():

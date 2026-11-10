@@ -347,6 +347,26 @@ def test_hold_after_li_overruns_by_4():
     assert [(ev.kind, ev.measured) for ev in e.events] == [("OVERRUN", 4), ("OVERRUN", 3)]
 
 
+def test_late_follower_takes_one_sample_per_cycle():
+    """isa §4.3: a follower takes at most one sample per cycle. RAW DELAY 20 makes the XFER start
+    at 22, past all four planned samples at tb + k·P + P//2 + EDGE_LAT = 4 + 2k (tb = 0, P = 2).
+    They are taken at 22-25, one per cycle, and each logs OVERRUN(now - planned)."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.raw_delay(20)
+    d.xfer(4, ln, owner="a", prof=d.profile("B", nom=2), dst="r0")
+    d.halt()
+    e = Engine(compile_desc(d, check_timing=False), Role.P1)
+    for _ in range(40):
+        if e.halted:
+            break
+        e.cycle([1] * 8)
+    assert [s.cycle for s in e.samples] == [22, 23, 24, 25]
+    assert [(ev.kind, ev.measured) for ev in e.events] == [
+        ("OVERRUN", 18), ("OVERRUN", 17), ("OVERRUN", 16), ("OVERRUN", 15)]
+    assert e.regs[0] == 0xF
+
+
 @pytest.mark.parametrize("fall,detect,halt", [(5, 7, 8), (6, 8, 10)])
 def test_follower_cond_detect_successor_on_own_cycle(fall, detect, halt):
     """A follower COND completes in its detect cycle, fall + SYNC_LAT, which may be odd or even, with

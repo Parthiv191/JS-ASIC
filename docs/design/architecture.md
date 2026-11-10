@@ -1,6 +1,6 @@
 # Chip architecture
 
-Status: v1 (updated 2026-11-09), owner: verification role (§9: devOps role). What the chip is for: `chip-spec.md`.
+Status: v1 (updated 2026-11-10), owner: verification role (§9: devOps role). What the chip is for: `chip-spec.md`.
 Instructions: `isa.md`. Why: `decisions.md`. Process: IHP CMOS5L via Tiny Tapeout, 8x4 tiles
 (core ~1.2M µm², scaled from 6x4's ~902K; the first 8x4 harden gives the exact figure), 50 MHz
 target. Tier tags (Core/Plus/…) as in chip-spec §4.
@@ -39,7 +39,7 @@ target. Tier tags (Core/Plus/…) as in chip-spec §4.
 | Every external input has 2 synchronizer flops: host SPI, flash MISO, the straps, `uio_in` | metastability; gives `SYNC_LAT` |
 | **Every output comes straight from a flop.** Each engine has one drive flop per pin (the line→pin map is applied before the flops). `uio_oe` = OR of the per-pin flops, `uio_out` = NOR of the "pull low" flops, ERR is registered. The TESTMODE mux is the only other gate. | glitch-free pins; no false edges on real devices |
 | Each engine's synchronizer input is `low ? 0 : high ? 1 : (LOOPBACK ? 1 : uio_in)` | on-chip peers see each other with the model's `EDGE_LAT` |
-| Until RUN (and during boot), every `uio` is an input. `uo_out` reset levels: MISO 0, IRQ 0, ERR 0, flash SCK 0, flash CS_N 1, flash MOSI 0, REPORT 1, ACT 0. | never fight a device; UART and flash idle correctly |
+| Until RUN (and during boot), every `uio` is an input. The one exception is GPIO override (§4), which drives the pins in any state. `uo_out` reset levels: MISO 0, IRQ 0, ERR 0, flash SCK 0, flash CS_N 1, flash MOSI 0, REPORT 1, ACT 0. | never fight a device; UART and flash idle correctly |
 | **LOOPBACK** (PIN_CTRL): `uio_oe` is forced to 0, and undriven lines read 1 inside the chip | self-test with no board and no pull-ups |
 | **TESTMODE** strap (ui_in[7] high at reset). With ui_in[6] = 1, `uio` outputs the registered `ui_in` (all outputs). With ui_in[6] = 0, `uo_out` shows the registered `uio_in`. | tests clock, reset and every pad with no SPI and no SRAM |
 | Keep the logic in front of `uo_out` shallow (TT adds ~4 ns of external delay) | the SRAM trial build's worst setup path went to an output pin |
@@ -79,7 +79,8 @@ target. Tier tags (Core/Plus/…) as in chip-spec §4.
   - writing the tables or column 1 while an engine runs;
   - writing column 2 while it's busy;
   - any write during boot;
-  - DBG_STEP, DBG_EXEC or REG_DATA writes to an engine that isn't halted.
+  - DBG_STEP or DBG_EXEC writes to an engine that isn't halted, and REG_DATA writes to a
+    running engine.
 - The read mux is a 2-cycle (multicycle) path. Large readable blocks use index windows, which
   keeps the mux small.
 
@@ -91,9 +92,30 @@ trigger, W1C = write 1 to clear):
 | **0x0000 global** | 00 ID (0x5E) · 01 VERSION · 02 SCRATCH (RW) · 03 STATUS (boot_done, boot_err, host_err, mem2_busy, testmode, loopback) · 04 RUN · 05 SOFT_RESET (W1) · 06 IRQ (W1C) · 07 ERR_CLR (W1) · 08 DBG_HALT · 09 DBG_STEP (W1) · 0A MEM2_MODE · 0B PIN_CTRL (gpio_override, loopback) · 0C PINS (R) · 0D PIN_OE (R) · 0E PIN_OUT (W) · 0F PIN_OE_SET (W) · 10 CAP_CTRL (enable, engine, Δt shift, report_en) · 12 CAP_COUNT · 14 CAP_LOST · 16 REPORT_DIV (default 434 = 115200) · 18 ERR_MASK · 1A sizes (program/64, profiles, lanes, engines) |
 | **0x0400 shared tables (W, while stopped)** | 00–2F PROF[0..7] (min, nom, max LE; PROF0 ignored; PROF7 is copied into each engine's private slot at RUN) · 30–37 LINE[0..7], 1 byte each: `pin[2:0] od[3] owner[5:4] idle[6] gated[7]`; an unused slot is `0x68 + i` (a released OD line), which is also each slot's reset value · 38–47 LANE[0..3], 4 bytes each: `{b0: data[2:0] clk[5:3] has_clk cpol · b1: cpha data2[3:1] has_d2 stretch nrzi · b2: ldelay[3:0] stuff_n[6:4] d2_comp · b3: 0}` · 4A ABORT_PC · 4C CRC width, 4D flags (bit 0 lsb_first), 4E poly, 50 init, 52 xorout · 54 BUS_KIND (0 NONE, 1 I2C, 2 SELECT, 3 SE0) · 55 BUS_AB (a[2:0], b[5:3]) · 56 BUS_CONFIRM · 57 PROF_SHIFT |
 | **0x1000–0x17FF** | program SRAM, 512 words × 4 bytes, little-endian (a word commits on its 4th byte) |
-| **0x2000 + 0x100·e** engine e | 00 ROLE (W) · 02 STATUS (running, halted, FIFO flags) · 03 FIFO counts · 04 PC · 06 VIOL (W1C, `isa.md` §7) · 08 EVT · 0A IRQ_ID · 0C FIRST_VIOL_PC · 0E FIRST_VIOL_KIND · 10 BREAK_PC (bit 15 = enable) · 12 REG_SEL (W) · 14 REG_DATA (r[REG_SEL]; writable while halted) · 16 TB · 1A NOW (3 bytes each) · 20 DBG_EXEC (W, 4 bytes; the 4th runs it) · 30 TXDATA (pair; pushes on the high byte) · 32 RXDATA (pair) |
+| **0x2000 + 0x100·e** engine e | 00 ROLE (W) · 02 STATUS (running, halted, FIFO flags) · 03 FIFO counts · 04 PC · 06 VIOL (W1C, `isa.md` §7) · 08 EVT · 0A IRQ_ID · 0C FIRST_VIOL_PC · 0E FIRST_VIOL_KIND · 10 BREAK_PC (bit 15 = enable) · 12 REG_SEL (W) · 14 REG_DATA (r[REG_SEL]; writable while stopped or halted) · 16 TB · 1A NOW (3 bytes each) · 20 DBG_EXEC (W, 4 bytes; the 4th runs it) · 30 TXDATA (pair; pushes on the high byte) · 32 RXDATA (pair) |
 | **0x3000–0x37FF** | column 2 SRAM, 512 × 4 bytes, host access when idle |
 | **0x4000 fuzz unit** | 00 FZ_CTRL (W1: clear bitmap, reset) · 01 FZ_STATUS (busy, ready, token_lost) · 02 FZ_LEN · 03 FZ_MODE (wire, bitmap size) · 04 LFSR_SEED · 06 FINDINGS_COUNT · 08 MASK (4 bytes, 1 bit per byte position) · 0C FINDING[0..1] (4 bytes each) · 14 STAGE_SEL (W) · 15 STAGE_DATA · 16 SLOT_SEL (W) · 18 SLOT_META (length, energy, pinned; RW while stopped) |
+
+**Register behaviour** where the map is silent (stopped = RUN bit 0; halted = HALT, ILLEGAL or
+DBG_HALT):
+
+| Register | Behaviour |
+|---|---|
+| 0x0000–0x000F | 1-byte registers |
+| VERSION | 0x01 |
+| STATUS | bit 0 boot_done (1 when no boot runs), 1 boot_err, 2 host_err, 3 mem2_busy, 4 testmode, 5 loopback |
+| RUN | bit `e` = engine `e`. A 0 → 1 starts it (`isa.md` §4.0), also after a HALT. 1 → 0 stops it and releases its lines; its state stays readable. r0–r7 keep their values (`isa.md` §1). |
+| SOFT_RESET | also clears that engine's RUN bit, so the engine is left stopped |
+| IRQ | one W1C bit per engine |
+| ERR_CLR | clears `STATUS.host_err` |
+| ERR pin | the OR of the VIOL bits under ERR_MASK (all bits until ERR_MASK is built) |
+| FIRST_VIOL_PC/KIND | re-arm when the host clears VIOL to 0 |
+| REG_DATA | a write commits on the high byte |
+| PIN_CTRL | bit 0 gpio_override, bit 1 loopback; readable |
+| GPIO override | the host's drive flops replace the engines' drives (no merge), before RUN too. They take PIN_OUT and PIN_OE_SET one cycle after the write. |
+| PINS | the synchronized value the engines see (§2's formula), so LOOPBACK can be checked from the host alone |
+| PIN_OE | what the chip drives, before the LOOPBACK mask |
+| read-only registers | writes are ignored and don't set host_err |
 
 An image's table and program bytes come from the toolchain: `Image.host_writes()` in
 `toolchain/emu/image.py`.
@@ -139,7 +161,7 @@ removes them because nothing loads them. All are valid in the clk cycle of their
 | `tr_tb` | 24 | `tb`; with `tr_step`, its value after the step | `tb` |
 | `tr_evt` | 11 | pulses, one bit per event kind code (isa §7), in the cycle the event is logged | `Event(kind, pc, cycle)` |
 | `tr_mark` | 1 | pulse: MARK runs | `MARK` event |
-| `tr_br`, `tr_taken` | 1 + 1 | pulse: a conditional branch decides; whether it was taken | `Branch(pc, taken)` |
+| `tr_br`, `tr_taken` | 1 + 1 | pulse: a conditional decision (BR Z/NZ/TO/ROLE, RAW JPIN, ROLE_IF), in the instruction's start cycle; whether it left the fall-through path (ROLE_IF: skipped) | `Branch(pc, taken, cycle)` |
 | `tr_sample`, `tr_line` | 1 + 3 | pulse: a follower samples a line; which line | `Sample(pc, line, cycle)` |
 | `tr_halted` | 1 | level: the engine has halted (HALT or ILLEGAL) | `halt_cycle` |
 
@@ -260,8 +282,8 @@ the gate. Levers, in order, if it comes in over:
 
 | Item | Decide by |
 |---|---|
-| Real engine area and the worst-path timing | first synthesis (devOps) |
+| Engine area: the timed engine is ≈ 220K µm² after place and route (#14), ~2× §9's estimate, projecting ~65% of the core against the 60% target. Scope cuts wait for devOps's engine area pass. | engine 1's harden (devOps) |
 | Congestion and IR drop with full logic | first full harden |
 | The macro positions and §9 rules, which come from 6x4 | first 8x4 harden (devOps) |
 | TT demo-board facts | §8 |
-| Clock | 50 MHz target, 40 MHz fallback |
+| Sign-off clock: 50 MHz target, 40 MHz fallback. #14 misses 50 MHz by 2.9 ns at the slow corner (1.08 V, 125 °C) and passes typical by 5.6 ns. The clock comes from the board, so 40 MHz changes no silicon and no cycle counts. Until the decision, no area goes into timing fixes. | engine 1's harden: devOps reports slack at 20 and 25 ns |
