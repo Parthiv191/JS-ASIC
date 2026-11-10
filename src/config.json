@@ -22,8 +22,10 @@
   "CLOCK_PERIOD": 20,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
-  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
-  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
+  "//": "Hold margins 0.05 / 0.02 ns (template 0.1 / 0.05): hold padding was ~31K um2 of delay cells",
+  "//": "on short flop-to-flop paths. Final hold WS stays positive in every corner (aBC: +0.06 ns).",
+  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.05,
+  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.02,
 
   "//": "RUN_LINTER, LINTER_INCLUDE_PDK_MODELS - Disabling the linter is not recommended!",
   "RUN_LINTER": 1,
@@ -104,9 +106,11 @@
   "//": "place and real wire loads. The two *_CORNERS lists make any slew or cap violation fail",
   "//": "the flow; the default [\"\"] matches no corner and only warns.",
   "RUN_POST_GRT_DESIGN_REPAIR": 1,
-  "//": "Buffer long nets so the macro pins (A_DOUT drives at most 64 fF) see short wires.",
-  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
-  "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 120,
+  "//": "Buffer long nets so the macro pins (A_DOUT drives at most 64 fF) see short wires. 250, not",
+  "//": "120 um: at 120 the engine's 40%-density placement took ~31K um2 of wire buffers. Slew and",
+  "//": "cap still fail the flow in every corner (below); local run aBC: 0 of either.",
+  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
+  "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
   "MAX_CAP_VIOLATION_CORNERS": ["*"],
 
