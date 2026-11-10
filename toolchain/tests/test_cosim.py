@@ -155,3 +155,19 @@ def test_trace_keeps_the_final_registers():
         d.alu("add", "r4", "r3", 1)
         d.halt()
     assert _one_engine(b).engines[0].regs == [0, 0, 0, 0x1234, 0x1235, 0, 0, 0]
+
+
+def test_replay_host_reads_rx_only_after_the_run():
+    """The harness reads RX after the run, so the replay's model host must too: a peer that pushes
+    9 words overflows (isa §4.9), as the chip would."""
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    with d.only("b"):
+        for i in range(9):
+            d.li("r0", i)
+            d.push("r0")
+    d.halt()
+    img = compile_desc(d, check_timing=False)
+    rep = replay([EngineSpec(img, Role.P0), EngineSpec(img, Role.P1)], 0)
+    peer = rep.trace.engines[1]
+    assert peer.rx == list(range(8)) and [e.kind for e in peer.events] == ["OVERFLOW"]

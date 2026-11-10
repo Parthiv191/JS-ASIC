@@ -138,7 +138,7 @@ def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple 
         raise ValueError("every engine must run the same image")
     if (tx or {}).get(engine):
         raise ValueError("no host words for the RTL's engine until the RTL has FIFOs")
-    s = System(list(specs), glitches=glitches)
+    s = System(list(specs), glitches=glitches, host_reads_rx=False)  # the harness reads RX after the run
     for i, words in (tx or {}).items():
         s.host_push(i, words)
     trace = s.run(max_ticks)
