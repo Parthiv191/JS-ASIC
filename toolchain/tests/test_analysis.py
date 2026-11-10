@@ -82,17 +82,19 @@ def test_r2_rejects_jpin_outside_block():
 
 # ---------------------------------------------------------------- T rules
 def test_t1_uart_period_boundary():
-    """Stop-bit sample: A = 9P from the anchor, slot end 10P.
+    """Two boundaries at d = 2% (isa §6, U = ISSUE = 2).
 
-    T1 needs ceil(d*10P) + QUANT + 1 < P//2. At d = 2%: P=10 -> 2+2 < 5 holds;
-    P=9 -> 2+2 < 4 fails; P=8 -> 2+2 < 4 fails.
-    At P=8 the follower is also late for the next start edge (T5): it finishes the
-    stop bit at -P + P//2 + E = -1, then runs BR and ROLE_IF and starts at 2. With
-    drift ceil(d*80) = 2 that is 4 > event 0 + E = 3. At P=9 it starts at 1: 3 <= 3.
+    T1, the stop-bit sample (A = 9P from the anchor, slot end 10P): ceil(d*10P) + QUANT + ISSUE
+    < P//2. P=14 -> 3+3 < 7 holds; P=13 -> 3+3 < 6 fails.
+    T5-watch, the next start edge: the follower finishes the stop bit at -P + P//2 + E, then runs
+    BR and ROLE_IF (U each) and starts at most ISSUE late, so L = -P + P//2 + 9. It must be
+    watching by the event at 0 + E: L + ceil(d*10P) <= 3, i.e. ceil(P/2) - ceil(P/5) >= 6.
+    P=19 -> 10-4 = 6 holds; P=18 -> 9-4 = 5 fails.
     """
-    assert diag_rules(uart_like(10)) == set()
-    assert diag_rules(uart_like(9)) == {"T1-sample"}
-    assert diag_rules(uart_like(8)) == {"T1-sample", "T5-watch"}
+    assert diag_rules(uart_like(19)) == set()
+    assert diag_rules(uart_like(18)) == {"T5-watch"}
+    assert diag_rules(uart_like(14)) == {"T5-watch"}
+    assert diag_rules(uart_like(13)) == {"T1-sample", "T5-watch"}
     assert diag_rules(uart_like(434)) == set()
 
 
@@ -119,11 +121,12 @@ def test_t3_rejects_spi_target_half_period_4():
     assert "T3-latency" in diag_rules(spi_like(4))
 
 
-def test_t3_accepts_6():
-    """Bit 0 (cpha 0): the target starts at E+1 = 4 after the clock owner's tb, so
-    H >= 4 + 1 + ceil(d*H) = 6; H=5 fails only the bit-0 bound."""
-    assert diag_rules(spi_like(6)) == set()
-    assert diag_rules(spi_like(5)) == {"T3-latency"}
+def test_t3_accepts_7():
+    """Bit 0 (cpha 0): the target starts at most E + ISSUE = 5 after the clock owner's tb, so
+    H >= 5 + 1 + ceil(d*H) = 7; H=6 fails only the bit-0 bound. Clocked XFER is exempt from
+    T5-overrun (isa §6)."""
+    assert diag_rules(spi_like(7)) == set()
+    assert diag_rules(spi_like(6)) == {"T3-latency"}
 
 
 def test_t4_rejects_min_gt_nom():
@@ -188,7 +191,7 @@ def test_r2_accepts_br_to_inside_block():
 
 
 def test_t1_message_names_the_real_bound():
-    """At 0 ppm a 4-cycle slot still fails: QUANT + 1 = 2 is not < 4//2. The message must say so."""
+    """At 0 ppm a 4-cycle slot still fails: QUANT + ISSUE = 3 is not < 4//2. The message must say so."""
     d = Description("t", parties=("a", "b"), tolerance_ppm=0)
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")
@@ -197,12 +200,13 @@ def test_t1_message_names_the_real_bound():
     with pytest.raises(CompileError) as e:
         compile_desc(d)
     (msg,) = [x.msg for x in e.value.diags if x.rule == "T1-sample"]
-    assert "drift 0 + QUANT 1 + 1 = 2" in msg and "P//2 = 2" in msg
+    assert "drift 0 + QUANT 1 + ISSUE 2 = 3" in msg and "P//2 = 2" in msg
 
 
-@pytest.mark.parametrize("P,ok", [(5, False), (6, True)])
+@pytest.mark.parametrize("P,ok", [(7, False), (8, True)])
 def test_t1_shortest_hold_slot_at_zero_ppm(P, ok):
-    """Even without drift a follower needs QUANT + 1 = 2 < P//2, so the shortest followed slot is 6."""
+    """Even without drift a follower needs QUANT + ISSUE = 3 < P//2, so the shortest followed slot
+    is 8."""
     d = Description("t", parties=("a", "b"), tolerance_ppm=0)
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")
@@ -214,7 +218,7 @@ def test_t1_shortest_hold_slot_at_zero_ppm(P, ok):
 @pytest.mark.parametrize("ppm,ok", [(20000, False), (10000, True)])
 def test_t1_sixteen_bit_unclocked_frame(ppm, ok):
     """P=16 after a 1P start bit: the last sample is at A + 16P = 272.
-    2%: ceil(5.44) + QUANT + 1 = 8, not < 8. 1%: 3 + 2 = 5 < 8."""
+    2%: ceil(5.44) + QUANT + ISSUE = 9, not < 8. 1%: 3 + 3 = 6 < 8."""
     from descs import slack
     d = Description("t", parties=("a", "b"), tolerance_ppm=ppm)
     ln = d.line("l", owner="a", idle=1)
@@ -307,7 +311,7 @@ def test_r2_taints_registers_at_the_abort_target():
     d.alu("ne", "r1", "r0", 3)
     d.br("top", cond="nz", reg="r1")
     d.halt()
-    assert diag_rules(d) == {"R2-branch"}
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
 def _cond_then(next_step, abort=False):
@@ -330,9 +334,14 @@ def test_t5_rejects_a_timed_step_after_a_cond_that_can_time_out():
     assert diag_rules(d) == {"T5-timeout"}
 
 
-def test_t5_accepts_an_idle_cond_after_a_cond_that_can_time_out():
-    d = _cond_then(lambda d, ln, p: d.cond("fall", ln, owner="a"))
+def test_t5_accepts_an_unbounded_cond_after_a_cond_that_can_time_out():
+    """The trailing COND is unbounded, as T5-timeout requires. It plans its edge at nom = 4: a
+    follower of the rise starts watching at most E + ISSUE = 5 after it, before the edge is
+    visible at 4 + E. With nom = 0 the owner's edge could come at 1 and be missed (T5-watch)."""
+    gap = lambda d: d.profile("GAP", nom=4, min=0, max=INF)  # noqa: E731
+    d = _cond_then(lambda d, ln, p: d.cond("fall", ln, owner="a", prof=gap(d)))
     assert diag_rules(d) == set()
+    assert diag_rules(_cond_then(lambda d, ln, p: d.cond("fall", ln, owner="a"))) == {"T5-watch"}
 
 
 def test_t5_accepts_a_timed_step_after_a_cond_with_abort():
@@ -366,4 +375,20 @@ def test_t5_rejects_an_abort_target_whose_first_cond_the_aborting_role_owns():
 
 
 def test_t5_accepts_uart_abort_to_frame_start():
-    assert diag_rules(uart_like(16)) == set()
+    assert diag_rules(uart_like(20)) == set()  # P >= 19 at 2% (test_t1_uart_period_boundary)
+
+
+def test_t5_overrun_owner_hold_after_untimed():
+    """An owner HOLD is planned at offset 0, so it may start at most ISSUE = 2 late (isa §6
+    T5-overrun). At pc 0 it starts at 2 (reset completes at 0): accepted. After an LI it starts
+    at 4: rejected."""
+    def desc(pre_li):
+        d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+        ln = d.line("l", owner="a", idle=1)
+        if pre_li:
+            d.li("r0", 1)
+        d.hold(ln, 0, owner="a", prof=d.profile("P", nom=16))
+        d.halt()
+        return d
+    assert diag_rules(desc(False)) == set()
+    assert diag_rules(desc(True)) == {"T5-overrun"}
