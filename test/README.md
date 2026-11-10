@@ -31,7 +31,8 @@ make -B SIM=verilator EXTRA_ARGS=--timing   # Verilator needs --timing for the m
 
 Gate-level simulation needs a netlist and the PDK's cell models:
 
-1. Download the `tt_submission` artifact of a `gds` run (`gh run download <run-id> -n tt_submission`)
+1. Download the `tt_submission` artifact of a `gds` run (`gh run download <run-id> -n tt_submission`;
+   gds is skipped on branches that change no hardware, so take a run from `main` or a hardware branch)
    and copy its `tt_um_prot_emu_SAP.v` to `gate_level_netlist.v` (gitignored).
 2. Point `PDK_ROOT` at a directory holding
    `ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/verilog/{sg13cmos5l_stdcell.v,sg13cmos5l_udp.v}`
