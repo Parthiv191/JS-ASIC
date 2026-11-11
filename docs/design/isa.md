@@ -40,7 +40,8 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
   - An engine **does** a step iff `role ≠ MON` and (`owner == role` or `owner == SHARED`).
   - Otherwise it **follows** the step.
 - **Line config:** `kind ∈ {PP (push-pull), OD (open-drain)}`, `owner ∈ {P0, P1, SHARED (OD only), SWITCHED (reserved,
-  for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`.
+  for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`, and `pin`: the uio pin it maps to (default: its
+  index). Each line has its own pin; the image rejects two lines on one pin.
   - `gated` (PP only): the owner drives the line only from its first owned step on it until
     the next STOP on a SELECT bus, or an abort; otherwise the line is released. For example, SPI
     MISO on a shared bus.
