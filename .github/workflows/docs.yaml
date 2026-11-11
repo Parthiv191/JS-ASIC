@@ -17,5 +17,13 @@ jobs:
         with:
           submodules: recursive
 
+      # apt mirrors have had DNS outages (.github/ci-failures.md): retry fetches machine-wide,
+      # then wait out a short outage before anything installs
+      - name: Make apt retry
+        shell: bash
+        run: |
+          echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-retries
+          for i in 1 2 3 4 5 6; do sudo apt-get update && break; echo "apt-get update failed ($i), retrying"; sleep 30; done
+
       - name: Build docs
         uses: TinyTapeout/tt-gds-action/docs@ihp-cmos5l
