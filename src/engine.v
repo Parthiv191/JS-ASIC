@@ -119,6 +119,7 @@ module engine #(
   // ---- fetch and the prefetch register ----
   reg  [31:0] pf;
   (* keep *) reg [3:0] pf_pi;      // a copy of pf[20:17] that only drives the profile mux
+  (* keep *) reg [1:0] pf_li;      // a copy of pf[22:21] that only drives the lane mux
   reg         pf_valid, fetch_d, drop_d;
   reg  [8:0]  fpc;                  // address of the last fetch = pc of the word in pf
   reg  [10:0] skip;                 // own cycles still to wait (RAW DELAY)
@@ -146,7 +147,7 @@ module engine #(
   // the lane (XFER)
   reg  [23:0] lane;
   always @*
-    case (t_line[1:0])
+    case (pf_li)
       2'd0: lane = lane_cfg[23:0];
       2'd1: lane = lane_cfg[47:24];
       2'd2: lane = lane_cfg[71:48];
@@ -366,9 +367,10 @@ module engine #(
   wire        x_wait    = ~c_ck | c_own;        // a data owner without the clock can't wait (isa §4.3)
   wire        fwait     = x_fifo & (sel | s_fwait) & ~tx_ne & x_wait;
   wire        take      = x_fifo & (sel | s_fwait) & tx_ne;
-  wire        ck_own    = c_on & (c_kind == K_XFER) & c_ck & c_own;   // a clock owner re-bases by its own rule
   wire        take_late = take & busy;
-  wire        rebase    = ((st & stalled & t_does) | take_late) & ~ck_own;
+  // (a clock owner's clocked XFER re-bases by its own rule from the raw tb_age instead, so the
+  // lane stays off tbx: every timed step's start-cycle arithmetic starts from it)
+  wire        rebase    = (st & stalled & t_does) | take_late;
   wire [15:0] c_v     = take ? tx_head : sel ? st_v : s_v;
   wire [15:0] c_rx    = sel ? 16'h0 : s_rx;
   wire [3:0]  c_k     = sel ? 4'd0 : s_k;
@@ -534,9 +536,11 @@ module engine #(
                 // The edge timer starts at base - H. At the start only cpha 1 can make an edge
                 // (when tb + H <= start; cpha 0's first edge is at max(tb, start) + H, and H >= 1),
                 // so the start cycle needs one compare.
+                // From the raw tb_age: a stall re-base (tbx) doesn't apply to it; cpha 0's
+                // max(tb, start) is the same either way, and its tb is set at the last edge.
                 if (fresh) begin
-                  if (c_cpha && tbx >= nom) begin ck_ev = 1'b1; slot_nx = 24'sd1 - nom; end
-                  else if (c_cpha || tbx <= 24'sd0) slot_nx = tbx_p1 - nom;
+                  if (c_cpha && tb_age >= nom) begin ck_ev = 1'b1; slot_nx = 24'sd1 - nom; end
+                  else if (c_cpha || tb_age <= 24'sd0) slot_nx = tb_p1 - nom;
                   else slot_nx = 24'sd1 - nom;
                 end else begin
                   slot_nx = slot_age + 24'sd1;
@@ -730,6 +734,7 @@ module engine #(
       halted   <= 1'b0;
       pf       <= 32'h0;   // NOP
       pf_pi    <= 4'h0;
+      pf_li    <= 2'd0;
       pf_valid <= 1'b0;
       fetch_d  <= 1'b0;
       drop_d   <= 1'b0;
@@ -774,6 +779,7 @@ module engine #(
       halted   <= 1'b0;
       pf       <= 32'h0;
       pf_pi    <= 4'h0;
+      pf_li    <= 2'd0;
       pf_valid <= 1'b0;
       fetch_d  <= 1'b0;
       drop_d   <= 1'b0;
@@ -815,6 +821,7 @@ module engine #(
       if (fetch_d) begin
         pf       <= sram_dout;
         pf_pi    <= sram_dout[20:17];
+        pf_li    <= sram_dout[22:21];
       end
       if (fetch_d && !drop_d && !abort_now) pf_valid <= 1'b1;
 

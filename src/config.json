@@ -111,6 +111,8 @@
   "//": "cap still fail the flow in every corner (below); local run aBC: 0 of either.",
   "DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
   "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
+  "//": "post-GRT repair margin 10 -> 25%: the SRAM's A_DOUT pins (limit 0.064 pF) came out 2% over after routing (#48)",
+  "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 25,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
   "MAX_CAP_VIOLATION_CORNERS": ["*"],
 
