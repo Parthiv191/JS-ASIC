@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
-    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, NUM_REGS, QUANT as Q, BrCond, Dst, Instr, Op, Owner, RawOp, Role,
+    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
+    RawOp, Role, Src,
     reg_of, unpack_role_if, unpack_xfer,
 )
 
@@ -78,7 +79,7 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
     od_lanes = {i for i, la in enumerate(img.lanes) if img.lines[la.data].kind == "od"}
     abort_pc = img.abort_pc if any(_aborts(ins) for ins in instrs) else None
     all_tainted = (1 << NUM_REGS) - 1
-    state: dict[int, int] = {0: 0}
+    state: dict[int, int] = {0: all_tainted}  # registers keep their values across RUN (isa §1)
     work = [0]
     while work:
         pc = work.pop()
@@ -121,12 +122,12 @@ def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int
         return put(ins.rd, tainted)
     if ins.op == Op.POP:
         return put(ins.rd, True)
-    if ins.op == Op.RAW and ins.sub == RawOp.GET:
+    if ins.op == Op.RAW and ins.sub in (RawOp.GET, RawOp.EVT):
         return put(ins.rd, True)
     if ins.op == Op.XFER:
         dst = unpack_xfer(ins.operand)[2]
         if dst >= Dst.R0:
-            # on an open-drain line the owner stores what it sent, the followers what they read
+            # on an open-drain line the wire can differ from what the owner sent
             return put(reg_of(dst), inblock or ins.line in od_lanes)
     return t
 
@@ -144,6 +145,7 @@ class _Step:
     cpha: int = 0
     chk: bool = False
     abort: bool = False
+    od: bool = False  # an XFER whose data line is open-drain: its owner reads the bits back
 
     def does(self, r: Role) -> bool:
         return r != Role.MON and (self.owner == Owner.SHARED or int(self.owner) == int(r))
@@ -168,36 +170,40 @@ def _steps(low: Lowered) -> dict[int, _Step]:
             kw["n"] = unpack_xfer(ins.operand)[0]
             kw["chk"] = bool(ins.flags & F_CHK)
             lane = img.lanes[ins.line]
+            kw["od"] = img.lines[lane.data].kind == "od"
             if lane.clk is not None:
                 kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)))
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
     return out
 
 
-def completion(s: _Step | None, r: Role) -> int:
-    """Cycle (relative to the step's end tb) at which role r finishes step s."""
-    if s is None:  # reset: everyone starts executing pc 0 at cycle 0
-        return -1
+def completion(s: _Step, r: Role) -> tuple[int, int]:
+    """Cycles (lo, hi), relative to the step's end tb, in which role r finishes step s (isa §6).
+
+    An owner's HOLD drives, and completes, when it starts, which is up to ISSUE late (isa §4.2;
+    T5-overrun bounds the start). So does a 1-bit unclocked XFER; with more bits the last one is
+    planned past ISSUE, so the lateness is absorbed."""
     nom = s.prof.nom
     if s.op == Op.COND:
-        return 0 if s.does(r) else E
-    if s.op == Op.HOLD:
-        return -nom if s.does(r) else -nom + nom // 2 + E
-    if not s.clocked:
-        return -nom if s.does(r) else -nom + nom // 2 + E
+        c = 0 if s.does(r) else E
+        return c, c
+    if s.op == Op.HOLD or not s.clocked:
+        if s.does(r) and not s.od:  # an OD owner reads back, so it finishes as a follower does
+            return -nom, max(ISSUE - s.n * nom, -nom)
+        c = -nom + nom // 2 + E
+        return c, c
     if s.is_clk_owner(r):
-        if s.does(r):
-            return 0
-        return max(0, E - nom) if s.cpha == 0 else E
-    return E
+        c = 0 if s.does(r) else (max(0, E - nom) if s.cpha == 0 else E)
+        return c, c
+    return E, E
 
 
 def _cost(ins: Instr) -> int:
+    """Cycles an untimed instruction adds to `L` (isa §4.0, §6): U, and RAW DELAY n rounded up to a
+    multiple of U. POP counts U; a stall is T5-stall's job."""
     if ins.op == Op.RAW and ins.sub == RawOp.DELAY:
-        return max(1, ins.operand)
-    if ins.op == Op.ROLE_IF:
-        return 1
-    return 1
+        return -(-max(1, ins.operand) // U) * U
+    return U
 
 
 def gaps(instrs: list[Instr], timed: set[int], start: int, role: Role) -> dict[int, tuple[int, int]]:
@@ -287,10 +293,10 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
             P = p.nom
             for a, lo, hi in tuples:
                 dr = drift(ppm, a + s.n * P)
-                if dr + Q + 1 >= P // 2:
+                if dr + Q + ISSUE >= P // 2:
                     diags.add("T1-sample", pc, f"last sample of slot length {P} at anchor distance {a}: "
-                                               f"needs drift {dr} + QUANT {Q} + 1 = {dr + Q + 1} < P//2 = {P // 2} "
-                                               f"({ppm} ppm)")
+                                               f"needs drift {dr} + QUANT {Q} + ISSUE {ISSUE} = {dr + Q + ISSUE} "
+                                               f"< P//2 = {P // 2} ({ppm} ppm)")
         # T2: accumulated windows of CHK unclocked XFER
         if s.op == Op.XFER and not s.clocked and s.chk:
             for a, lo, hi in tuples:
@@ -328,6 +334,8 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                                           f"step it reaches there must be an unbounded COND it follows, "
                                           f"so it waits for the other party's next event")
 
+    _check_stalls(low, steps, timed, diags)
+
     # pairwise checks: predecessor timed step (or reset) -> next timed step
     preds: list[tuple[_Step | None, int]] = [(None, 0)] + [(s, pc + 1) for pc, s in steps.items()]
     for prev, start in preds:
@@ -346,8 +354,11 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
             for r in ROLES:
                 if nxt_pc in per_role[r]:
                     lo, hi = per_role[r][nxt_pc]
-                    c = completion(prev, r)
-                    st[r] = (c + 1 + lo, c + 1 + hi)
+                    if prev is None:  # reset completes at 0, so instruction 0 starts at now = 2
+                        st[r] = (2 + lo, 2 + hi)
+                    else:             # the first own cycle >= c + 1: c + 1 or c + ISSUE (isa §4.0)
+                        c_lo, c_hi = completion(prev, r)
+                        st[r] = (c_lo + 1 + lo, c_hi + ISSUE + hi)
             if s.owner_role not in st:
                 continue
             # anchor distance along this edge only (untimed instructions don't move it)
@@ -355,6 +366,55 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 (_advance(prev, t)[0] for t in states.get(prev.pc, set())), default=0)
             _pair_checks(s, st, a_edge, ppm, diags)
     return diags.list()
+
+
+def _reach(instrs: list[Instr], starts: list[int], role: Role) -> set[int]:
+    """Every pc `role` can execute from `starts`."""
+    seen: set[int] = set()
+    work = [s for s in starts if s < len(instrs)]
+    while work:
+        pc = work.pop()
+        if pc in seen:
+            continue
+        seen.add(pc)
+        work += successors(instrs, pc, role)
+    return seen
+
+
+def _makes_others_wait(s: _Step, r: Role) -> bool:
+    """An unbounded COND that r does, or an unbounded clocked XFER r clocks (whoever owns its
+    data): the others wait for r however long it stalled. A bounded one times them out."""
+    if s.prof.bounded:
+        return False
+    if s.op == Op.COND:
+        return s.owner_role == r
+    return s.op == Op.XFER and s.is_clk_owner(r)
+
+
+def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags: _Diags) -> None:
+    """T5-stall (isa §6): a POP can wait for the host for any time, so the next timed step on
+    every path must be the staller's own and make the others wait for it. An owner's src = FIFO
+    XFER waits inside the step (unless the clock is someone else's: then it sends ONES), so it
+    must itself make the others wait: only a clocked XFER its owner clocks does."""
+    instrs = low.instrs
+    starts = [0] + ([low.image.abort_pc] if low.image.abort_pc else [])
+    for r in ROLES:  # MON owns no step, so nothing after a MON POP makes the others wait
+        for pc in sorted(_reach(instrs, starts, r)):
+            ins = instrs[pc]
+            if ins.op == Op.POP:
+                for nxt in sorted(gaps(instrs, timed, pc + 1, r)):
+                    if not _makes_others_wait(steps[nxt], r):
+                        diags.add("T5-stall", nxt, f"{r.name} can stall at the POP at pc {pc}; its next "
+                                                   f"timed step must be one it owns that makes the others "
+                                                   f"wait (an unbounded COND it does, or an unbounded "
+                                                   f"clocked XFER it clocks)")
+            elif ins.op == Op.XFER and steps[pc].does(r) and unpack_xfer(ins.operand)[1] == Src.FIFO:
+                s = steps[pc]
+                if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r):
+                    diags.add("T5-stall", pc, f"{r.name} owns this src = FIFO XFER and waits here while "
+                                              f"TX is empty, so its followers lose the timeline; only an "
+                                              f"unbounded clocked XFER its owner clocks may take src = "
+                                              f"FIFO (or POP into a register before an unbounded COND)")
 
 
 def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int, diags: _Diags) -> None:
@@ -365,7 +425,7 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
     followers = [r for r in st if not s.does(r)]
     if s.op == Op.COND:
         offset = p.nom
-        if p.bounded and o_hi > max(offset, 1):
+        if p.bounded and o_hi > (offset if offset > 0 else ISSUE):
             diags.add("T5-overrun", pc, f"owner starts at {o_hi}, after the planned action at {offset}")
         event = max(p.nom, o_lo)
         dr = drift(ppm, amax + p.nom)
@@ -380,11 +440,10 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             if (p.min > 0 and p.min > m_lo) or (p.bounded and p.max < m_hi):
                 diags.add("T2-window", pc, f"window [{p.min},{p.max}] does not contain [{m_lo},{m_hi}]")
         return
-    # HOLD / XFER: the owner's first action is at offset 0 (issue slot allows 1)
+    # HOLD / XFER: the owner's first action is at offset 0 (the issue slot allows ISSUE)
     if s.clocked:
-        c_hi = st.get(s.clk_owner, (0, 0))[1]
-        if c_hi > 1:
-            diags.add("T5-overrun", pc, f"clock owner starts at {c_hi}, after the step start")
+        # No T5-overrun: a clock owner re-bases tb := max(tb, start - H) or max(tb, start) instead
+        # of overrunning (isa §4.1, §6). The model runs clocked XFER from step 3b.
         first_obs = p.nom + E  # first leading edge, as seen by a clock follower
         dr = drift(ppm, amax + p.nom)
         for r in st:
@@ -397,8 +456,8 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
                 diags.add("T3-latency", pc, f"data owner starts at {o_hi}; bit 0 is not valid before the "
                                             f"first capture edge at {p.nom}")
         return
-    if o_hi > 1:
-        diags.add("T5-overrun", pc, f"owner starts at {o_hi}, after the step start")
+    if o_hi > ISSUE:
+        diags.add("T5-overrun", pc, f"owner starts at {o_hi}, more than ISSUE after the step start")
     sample = p.nom // 2 + E
     dr = drift(ppm, amax + p.nom)
     for r in followers:

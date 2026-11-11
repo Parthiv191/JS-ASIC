@@ -7,9 +7,10 @@ decides. Where it is silent, the model decides and this doc gets updated. Why ea
 
 Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 
-**The model's encoding and image are v1** (`emu/isa.py`, `emu/image.py`); its execution is still v0
-(1-cycle untimed instructions, unbounded FIFOs, fractional clocks). It must implement this doc,
-§4.0 especially, before RTL co-simulation.
+**Model status:** the encoding, the image, fetch and issue timing (§4.0), reserved codes (§3),
+`BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
+(§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
+(§4.1) are v1. Still to come: clocked XFER (with UNDERRUN), COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -20,7 +21,7 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 | `QUANT` | 1 | measurement slack on every window check |
 | `ISSUE` | 2 | max cycles from a timed step's completion to its successor's start (§4.0) |
 | `U` | 2 | cycles per untimed instruction (§4.0). There is no clock divider in v1. |
-| Registers | 8 × 16 bit | `r0..r7` |
+| Registers | 8 × 16 bit | `r0..r7`. They keep their values across RUN; reset and SOFT_RESET clear them. The host can write them while the engine is stopped or halted (architecture §4). |
 | Lines | 8, shared table | logical `L0..L7`, mapped to pins by `LINE.pin` (`architecture.md` §4) |
 | Profiles | 8 built (field allows 16), one table shared by both engines; **profile 7 is per-engine**: initialised from the shared PROF7 at RUN, then written only by `PROF` | `(min, nom, max)`, 16-bit cycles (max 1.3 ms at 50 MHz); entry 0 = `IDLE` = `(0, 0, INF)` |
 | Lanes | 4 built (field allows 16), shared table | §2 |
@@ -39,12 +40,15 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
   - An engine **does** a step iff `role ≠ MON` and (`owner == role` or `owner == SHARED`).
   - Otherwise it **follows** the step.
 - **Line config:** `kind ∈ {PP (push-pull), OD (open-drain)}`, `owner ∈ {P0, P1, SHARED (OD only), SWITCHED (reserved,
-  for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`.
+  for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`, and `pin`: the uio pin it maps to (default: its
+  index). Each line has its own pin; the image rejects two lines on one pin.
   - `gated` (PP only): the owner drives the line only from its first owned step on it until
     the next STOP on a SELECT bus, or an abort; otherwise the line is released. For example, SPI
     MISO on a shared bus.
-  - When an engine starts, each non-gated PP line its role owns is driven to `idle`; every other line is
-    released. Before RUN, every pin is an input.
+  - Before RUN, every pin is an input. In `s0` (§4.0) each non-gated PP line the engine's role owns is
+    driven to `idle`, so the drive is on the wire from `now = 1`, like any drive; every other line stays
+    released. At `now = 0` a line reads what the pin reads: an owned idle-0 line with a pull-up reads 1,
+    and every engine of that RUN, its owner too, sees that 1 at `now = 2` and `idle` from `now = 3` (§4.1).
   - `drive(L, v)`: PP outputs `v`; OD pulls low for 0 and releases for 1.
   - An undriven line reads what the pin reads. External pull-ups, or LOOPBACK mode
     (architecture §2), make it 1.
@@ -101,6 +105,10 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 
 - Reserved (executing one is ILLEGAL, §4.1), with no v1 hardware: `CHOICE 16`, `ARB 17`, `WAIT_ANY 18`, `CODEC 19` (the CODEC
   lives in the lane config). Codes 20–31 are free.
+- **Every reserved code is ILLEGAL**, not only opcodes: a reserved `sub` (ALU 10–15, BR 5–15,
+  RAW 6–15, CRC 3–15, FZ 3–15, PROF ≠ 7), `src` 4–7, `dst` 1 and 3–7, step owner 3, and an
+  unbuilt index (COND/HOLD line ≥ 8, XFER lane ≥ 4, profile ≥ 8). Unused bits are ignored. The
+  compiler never emits one; `emu.isa.reserved()` is the list.
 - `src`: ZERO 0, ONES 1, FIFO 2, FZ 3, r0–r7 = 8–15.
 - `dst`: DISCARD 0, FIFO 2, r0–r7 = 8–15; other codes reserved.
 - `aluop`: ADD 0, SUB 1, AND 2, OR 3, XOR 4, SHL 5, SHR 6, EQ 7, NE 8, LT 9.
@@ -114,7 +122,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   are those with `ph = e`; it may read the program SRAM only on them.
 - **Start:**
   - A RUN write takes effect on the next `ph = 0` cycle. When an engine's RUN bit rises, its first own cycle `s0` sets `now := 0`, `tb := 0`, the anchors `:= 0`
-    and presents address 0.
+    and presents address 0. `r0..r7` keep their values (§1).
   - Instruction 0 starts at `now = 2`.
   - Engines started by one RUN write are therefore 1 clk apart, engine 1 behind. The model runs
     engine `e` with phase offset `e`.
@@ -149,7 +157,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 - **Inputs.** Synchronized inputs are sampled every engine cycle. `edge(L)` means the value
   differs from the previous cycle's. Edges during untimed instructions aren't latched, except by
   the bus detector (§4.7) and the OD let-go tracker (§4.3). The synchronizer is preloaded with each line's idle level when RUN
-  rises.
+  rises: the engine sees `idle` at `now` 0–1 and the wire from `now = 2` (as it was at `now = 0`).
 - **Timeline `tb`.** Timed steps are scheduled against `tb`, not against instruction count, so
   untimed instructions between steps don't move wire timing.
   - An owner acts at the planned time.
@@ -167,6 +175,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - **Stall re-base.** If an owned step starts late because its owner stalled (`POP`, or a
     `src = FIFO` wait), it sets `tb := max(tb, start)` and logs nothing. `T5-stall` (§6) keeps
     the followers safe.
+    - A POP stall lasts until the next timed step: an owned one re-bases to its start; a followed
+      one takes its timing from the other party, and the stall re-bases nothing later.
+    - A `src = FIFO` step's start is the cycle it takes the word.
 - **Window accumulation.** Each follower keeps an anchor and the accumulated `(min, nom, max)`
   of the HOLD/XFER bits since it. These are 24-bit, and `max` carries an INF flag.
   - An edge check compares `e − anchor` against `[min − QUANT, max + QUANT]`.
@@ -188,7 +199,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - A partial XFER writes no `dst` and pushes nothing.
   - Only the failing role jumps (`T5-abort`). `abort_pc` is 0 unless set; the compiler warns on
     ABORT without it.
-- **Event register `evt`** (sticky): bit 0 START, 1 STOP (these two are the bus flags of §4.7), 2 TIMEOUT, 3 MISMATCH (LEVEL / EDGE /
+- **Event register `evt`** (sticky; it keeps its bits across RUN, and reset and SOFT_RESET clear it): bit 0 START, 1 STOP (these two are the bus flags of §4.7), 2 TIMEOUT, 3 MISMATCH (LEVEL / EDGE /
   CLK_PHASE), 4 OVERFLOW, 5 UNDERRUN.
   - `RAW EVT rd, mask` does `rd := evt`, then clears the masked bits, the bus flags included.
     `rd` is tainted.
@@ -204,7 +215,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 | EDGE | an unclocked XFER with CHK | fatal abort | logged; continue |
 | CLK_PHASE | a clocked follower with CHK (the first phase isn't checked) | fatal abort | logged; continue |
 | OVERFLOW, UNDERRUN | FIFOs (§4.9) | never aborts | logged |
-| ILLEGAL | a reserved opcode, `FZ` on engine 1 | the engine halts | the engine halts |
+| ILLEGAL | a reserved code (§3), `FZ` on engine 1 | the engine halts in the instruction's start cycle | same |
 
 - An edge and a timeout in the same cycle: the edge wins.
 - A clocked follower's timeout counts from the step start for the first edge, and from the last
@@ -228,7 +239,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - A followed START ignores STOP. A followed STOP that sees START is a bus event (§4.7); without
     ABORT it keeps waiting.
 - **MEAS:** on completion, `rd := min(max(m, 0), 0xFFFF)`. A do uses `action − tb`; a TIMEOUT writes
-  `0xFFFF`. `rd` is tainted.
+  `0xFFFF`; an abort writes nothing. `rd` is tainted.
 - **HOLD do:** at `max(now, tb)` drive `level`, then `tb := tb + nom`. The timeline doesn't move
   inside the issue slot. Completes that cycle.
 - **HOLD follow:** sample at `tb + nom//2 + EDGE_LAT`. A mismatch logs LEVEL (and aborts with
@@ -237,18 +248,22 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 ### 4.3 `XFER n, lane, owner, src, dst, msb, prof`
 - **`dst` = the wire value, in every role.** The owner reads its own bits back at the point a
   follower in its position samples them:
-  - on an OD line, someone else's 0 shows up;
-  - on a PP line it equals `src`.
+  - on an OD line, someone else's 0 shows up, and the owner completes on its last readback;
+  - on a PP line it equals `src`, and the owner completes on its last bit.
+  - Readback isn't a follower's sample: it adds no `tr_sample` (architecture §5).
 - `dst = FIFO` pushes only in follow mode. The owner takes `src` at step start.
 - **Empty `src = FIFO`:**
-  - An owner that owns the lane's clock, or an unclocked lane, waits for data (a clock owner
-    doesn't log OVERRUN; §4.1).
+  - An owner that owns the lane's clock, or an unclocked lane, waits for data, checking every
+    cycle (a step isn't tied to own cycles), and re-bases (§4.1; a clock owner doesn't log
+    OVERRUN).
   - An owner that doesn't own the clock **sends ONES**, logs UNDERRUN and consumes nothing.
 - Bit `k` is `value >> k` (LSB first) or `value >> (n−1−k)` (MSB).
 - **Unclocked lane** (`P = nom`):
   - Do: bit `k` at `max(now, tb + k·P)`, then `tb := tb + n·P`.
   - Follow: sample bit `k` at `a + (k − ak)·P + P//2 + EDGE_LAT`, from the anchor `(a, ak)`
     (initially `(tb, 0)`).
+  - At most one sample per cycle: bit `k` is sampled at the later of its planned cycle and one
+    cycle after bit `k − 1`. A late sample (after an OVERRUN) logs `OVERRUN(now − planned)`.
   - An edge seen before sample `k` belongs to boundary `k`. CHK checks it against the window
     anchor plus the accumulated window plus `k·(min, max)` of this step. Owners and followers
     both accumulate; a COND or a clocked XFER re-anchors the window. Out of window: `EDGE(m)`,
@@ -379,7 +394,7 @@ host clears it.
 | `R1-owner` | A timed step's owner field is the owner of its data line: COND/HOLD's line, XFER's lane `data`. It is a party, or `shared` on OD; on a SHARED OD line the owner field may be either party or `shared`. The clock and `data2` drivers come from their line owners. A lane's clock has a party owner, and a duplex `data2` owner differs from `data`'s. |
 | `R1-shared` | `shared` only on OD lines |
 | `R1-bus` | COND START/STOP is owned by the master line's owner (I2C: the `bus_b` owner; SELECT: the `bus_a` owner). It is follow-only for SE0. |
-| `R2-branch` | Outside role blocks, `BR Z/NZ` tests only clean registers: written by `XFER dst`, `LI`, `ALU` on clean inputs, or `CRC GET` of a clean state. Taints: `POP`, `RAW GET/EVT`, `COND meas`, any write in a role block, and every register at `abort_pc`. The CRC state is a ninth taint slot; it's a forward dataflow analysis. **Inside a role block any branch is allowed.** `RAW JPIN` and `BR TO` are only legal in role blocks. `BR ROLE` is a role split like `ROLE_IF`: the analysis follows each role's path, and `R3-escape` applies to its target. |
+| `R2-branch` | Outside role blocks, `BR Z/NZ` tests only clean registers: written by `XFER dst`, `LI`, `ALU` on clean inputs, or `CRC GET` of a clean state. Taints: `POP`, `RAW GET/EVT`, `COND meas`, any write in a role block, and every register at program entry (until written; §1) and at `abort_pc`. The CRC state is a ninth taint slot; it's a forward dataflow analysis. **Inside a role block any branch is allowed.** `RAW JPIN` and `BR TO` are only legal in role blocks. `BR ROLE` is a role split like `ROLE_IF`: the analysis follows each role's path, and `R3-escape` applies to its target. |
 | `R3-timed-in-role` | Role blocks contain no timed steps, except lead blocks |
 | `R3-lead` | `lead(party)`: one party. Every timed step in it is owned by that party, or uses a lane whose clock that party owns. It leaves either by its fall-through exit (the leader carries on with the next step; no timed step may lie on that path) or by a path that runs a bus COND START/STOP and then branches to `abort_pc`. The block's CFG fall-through successor is a timed step with ABORT, which the other roles follow speculatively. It may not have CHK, and its profile `max` must be INF. |
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
@@ -410,12 +425,13 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
 | `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows **or does** |
-| `T5-stall` | After an owner's possible stall (`POP`, `src = FIFO`), its next owned step must be an unbounded COND, a clocked XFER it clocks, or inside a lead block, so followers wait for it |
+| `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block. MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
 
 - Completion offsets relative to the step's end `tb`:
   - COND: do 0, follow `E` (START/STOP: `E + bus_confirm + 1`).
-  - HOLD: do `−nom`, follow `−nom + nom//2 + E`.
-  - Unclocked XFER: do `−P`, follow `−P + P//2 + E`.
+  - HOLD: do `−nom + max(0, L)` (it drives when it starts, at most `ISSUE` late), follow
+    `−nom + nom//2 + E`.
+  - Unclocked XFER: do `−P` (`n = 1`: `−P + max(0, L)`, as HOLD), follow `−P + P//2 + E`.
   - Clocked XFER: clock follower `E`; clock owner with the data 0; clock owner following the
     data `max(0, E − H)` (cpha 0) or `E` (cpha 1). Add `E` on a stretch lane.
   - **OD owners** read their data back, so they complete at the follow offsets: unclocked
@@ -470,8 +486,9 @@ per-iteration event mask:
   cut by a bus exit emits no DATA record.
 
 **Model trace.** The model also emits `StepRecord(pc, op, mode, value, cycle, tb)` per timed step,
-plus every event, sample point and branch outcome. Co-simulation compares at step boundaries,
-against the RTL trace port (architecture §5).
+plus every instruction start, event, MARK, sample point and branch outcome (every conditional
+decision: BR Z/NZ/TO/ROLE, RAW JPIN and ROLE_IF, with its cycle). Co-simulation
+compares each of them against the RTL trace port (architecture §5).
 
 ## 8. History
 The v0 text (review notes, the Task 7 audit, the mapping from the PIO-style team draft) is in git

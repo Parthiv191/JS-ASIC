@@ -330,6 +330,10 @@ def _instr(desc, s: Step, a: dict, target, lane_index) -> Instr:
         if not 1 <= n <= 0xFFF:
             raise ValueError(f"raw_delay {n} not in 1..4095")
         return Instr(Op.RAW, sub=int(RawOp.DELAY), operand=n)
+    if k == "raw_evt":
+        if not 0 <= a["mask"] <= 0x3F:
+            raise ValueError(f"raw_evt clear mask {a['mask']} not in 0..63")
+        return Instr(Op.RAW, rd=reg(a["rd"]), sub=int(RawOp.EVT), operand=a["mask"])
     if k == "raw_jpin":
         t = target(a["target"])
         if t >= 2048:
