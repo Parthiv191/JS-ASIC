@@ -651,3 +651,63 @@ def test_a_followed_start_may_start_until_its_confirm(delay, ok):
     (f,) = conds(t, 1)
     start = dict(t.engines[1].starts)[2]            # ROLE_IF, RAW DELAY, COND START
     assert start > SEEN and (f.cycle, f.tb) == (CONFIRMED + 1, NOM)
+
+
+def bus_sequence(nom2, ppm):
+    """START (nom 40), then STOP, START, STOP, each nom2 after the one before."""
+    d = Description("bus", parties=("a", "b"), tolerance_ppm=ppm)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="a", idle=1)
+    d.bus("i2c", sda, scl, confirm=CONFIRM)
+    d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+    p = d.profile("P", nom=40, min=0, max=INF)
+    q = d.profile("Q", nom=nom2, min=0, max=INF)
+    for i, k in enumerate(("start", "stop", "start", "stop")):
+        d.cond(k, owner="a", prof=p if i == 0 else q)
+    with d.only("a"):
+        d.raw_delay(200)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("ppm", [0, 20000])
+def test_back_to_back_bus_conds_are_spaced_by_the_confirm(ppm):
+    """A bus edge inside the previous one's confirm window replaces its candidate (isa §4.7), so
+    a START followed by a STOP too soon is never confirmed and the followers wait in the START
+    forever. T5-watch: a followed START/STOP right after another bus COND needs nom - drift -
+    QUANT >= bus_confirm. The shortest accepted spacing runs clean with the followers 2% off."""
+    def compiles(n):
+        try:
+            compile_desc(bus_sequence(n, ppm))
+            return True
+        except CompileError:
+            return False
+    shortest = next(n for n in range(1, 60) if compiles(n))
+    assert shortest >= CONFIRM
+    with pytest.raises(CompileError, match="T5-watch"):
+        compile_desc(bus_sequence(shortest - 1, ppm))
+    img = compile_desc(bus_sequence(shortest, ppm))
+    slow, fast = (2451, 10000), (2549, 10000)
+    for clocks in ([{}] if ppm == 0 else [{0: (2500, 10000), 1: slow, 2: slow}, {0: (2500, 10000), 1: fast, 2: fast}]):
+        t = run_sys(img, clocks=clocks)
+        for i in (1, 2):
+            assert [k for _, k in t.engines[i].bus_events] == ["START", "STOP", "START", "STOP"], (clocks, i)
+            assert len(conds(t, i)) == 4 and not t.engines[i].violations, (clocks, i)
+
+
+def test_a_followed_start_that_starts_when_the_flag_is_already_set():
+    """At 0 ppm the T5-watch bound lets the follower start in the very cycle the flag becomes
+    visible: it completes there, anchored on start_e, as an on-time follower does. With confirm
+    14 that cycle (SEEN + 14 + 1 = 26) is even, so an instruction can start in it."""
+    visible = SEEN + 14 + 1
+    def body(d, sda, scl, p):
+        with d.only("b"):
+            d.raw_delay(visible - 4)                 # ROLE_IF at 2, RAW DELAY at 4: START at 26
+        d.cond("start", owner="a", prof=p)
+    d = i2c_desc(body, confirm=14)
+    d.tolerance_ppm = 0
+    t = run_sys(compile_desc(d), roles=(Role.P0, Role.P1))
+    start = dict(t.engines[1].starts)[2]
+    (f,) = conds(t, 1)
+    assert start == visible and t.engines[1].bus_events == [(visible - 1, "START")]
+    assert (f.cycle, f.tb) == (visible, NOM)

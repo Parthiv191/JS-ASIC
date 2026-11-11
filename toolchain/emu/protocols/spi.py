@@ -7,7 +7,9 @@ controller takes the token with CS high, so it never selects the peripheral with
 POP stall ends at its own START, which the others wait for (isa §6 T5-stall). Each byte is a
 duplex clocked XFER: both parties send from their TX FIFO and push (MISO << 8) | MOSI. A
 peripheral with nothing to send sends ONES and logs UNDERRUN. CS rising mid-frame is a bus exit
-for the peripheral, back to the frame start, where it waits for the next START.
+for the peripheral, back to the frame start, where it waits for the next START. The peripheral
+takes its TX word when a byte starts, so a frame cut short (or a CS pulse with no clocks) drops
+that word: its later replies shift by one.
 """
 from __future__ import annotations
 

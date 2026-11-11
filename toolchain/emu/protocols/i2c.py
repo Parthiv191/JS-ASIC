@@ -2,7 +2,8 @@
 
 SDA is a shared OD line and SCL an OD line the controller owns; the bus is I2C (isa §4.7) with a
 cpol 1, cpha 1 lane on them. Each bit is a clocked XFER of half period H, MSB first. SDA moves
-`ldelay` cycles after SCL falls (the data hold time; isa §2 lane config), never with it.
+`ldelay` cycles after SCL falls (the data hold time; isa §2 lane config), never with it: the
+default 15 is I2C's 300 ns at 50 MHz.
 
 - The controller's host pushes the address byte (address << 1), then the data bytes. The
   controller takes the address with SCL and SDA high, so a POP stall ends at its own START, which
@@ -10,9 +11,12 @@ cpol 1, cpha 1 lane on them. Each bit is a clocked XFER of half period H, MSB fi
 - The target ACKs only its own address: a lead block for the target (isa §5 R3-lead) compares
   the address it received and either falls through into the ACK bit, which it drives low, or
   waits for the STOP and restarts at the frame start.
-- The controller reads the ACK: a lead block for the controller ends a NACKed transaction with
-  a STOP; the target, if it ACKed, follows the next data byte speculatively and the STOP makes
-  that a bus exit.
+- The controller reads the ACK: a lead block for the controller ends a NACKed transaction. It
+  drops the transaction's data bytes from its TX FIFO, pushes 1 (NACK) into RX for its host, and
+  STOPs; the target, if it ACKed, follows the next data byte speculatively and the STOP makes
+  that a bus exit. The host pushes `data_bytes` bytes after every address, ACKed or not.
+- The address XFER has ABORT: START and STOP flags left by noise on the idle bus make it a bus
+  exit, so the target re-syncs on the real START instead of losing the transaction.
 - Every data byte is ACKed by the target. The target and a monitor push each data byte into RX;
   the controller drives SDA, the lane's only data line, so it pushes nothing (isa §4.3).
 - The STOP: SCL low (the target lets SDA go, isa §4.3 let-go), SDA low, SCL high, then SDA rises
@@ -25,7 +29,7 @@ from ..isa import INF
 from . import ProtocolSpec
 
 
-def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldelay: int = 2,
+def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldelay: int = 15,
           tolerance_ppm: int = 20000) -> Description:
     H = half_cycles
     d = Description("i2c", parties=("ctl", "tgt"), tolerance_ppm=tolerance_ppm)
@@ -48,7 +52,7 @@ def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldela
     with d.only("ctl"):
         d.pop("r1")  # the address byte
     d.cond("start", owner="ctl", prof=wait)
-    d.xfer(8, lane, owner="ctl", prof=half, src="r1", dst="r2", msb_first=True)
+    d.xfer(8, lane, owner="ctl", prof=half, src="r1", dst="r2", msb_first=True, abort=True)
     with d.lead("tgt"):
         d.alu("ne", "r3", "r2", address << 1)
         d.br("nack", cond="nz", reg="r3")
@@ -60,7 +64,10 @@ def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldela
     d.xfer(1, lane, owner="tgt", prof=half, src="zero", dst="r4", abort=True)
     with d.lead("ctl"):
         d.br("data", cond="z", reg="r4")
-        stop()                                  # NACK: end the transaction
+        for _ in range(data_bytes):             # NACK: drop the transaction's bytes,
+            d.pop("r6")
+        d.push("r4")                            # tell the host (1),
+        stop()                                  # and end the transaction
         d.br("frame")
     d.label("data")
     for _ in range(data_bytes):
@@ -81,7 +88,7 @@ def payload(rng, n: int, data_bytes: int = 1, address: int = 0x5A, **_) -> dict[
 SPEC = ProtocolSpec(
     name="i2c",
     build=build,
-    defaults=dict(half_cycles=20, data_bytes=1, address=0x5A, ldelay=2, tolerance_ppm=20000),
+    defaults=dict(half_cycles=20, data_bytes=1, address=0x5A, ldelay=15, tolerance_ppm=20000),
     # 250 is 100 kHz at 50 MHz; ldelay 15 is 300 ns there
     space=dict(half_cycles=[20, 250], data_bytes=[1, 2, 4], address=[0x08, 0x5A, 0x77], ldelay=[1, 2, 15],
                tolerance_ppm=[0, 20000]),

@@ -74,15 +74,19 @@ def test_i2c_at_the_shortest_half_period_runs_clean_at_2pct():
     assert_clean(t, perm, p)
 
 
-def test_a_wrong_address_is_nacked_and_the_next_transaction_goes_through():
-    """The first transaction names another address: the target doesn't ACK, the controller
-    reads NACK and STOPs (its data byte is never sent), the target waits for that STOP; the second
-    transaction, to the target's address, is received."""
+@pytest.mark.parametrize("d0", [0x90, 0xB4, 0x11])
+def test_a_wrong_address_is_nacked_and_the_next_transaction_goes_through(d0):
+    """The first transaction names another address: the target doesn't ACK, the controller reads
+    NACK, drops the transaction's data byte (never sent), pushes 1 (NACK) for its host and STOPs;
+    the target waits for that STOP; the second transaction, to the target's address, is received.
+    A data byte that looks like an address (0x90: a write to 0x48; 0xB4: the target's own) is
+    never sent as one."""
     A = get("i2c").defaults["address"]
-    p = {"ctl": [(A ^ 1) << 1, (A << 1), 0x3C], "tgt": []}
+    p = {"ctl": [(A ^ 1) << 1, d0, A << 1, 0x3C], "tgt": []}
     t = run_roles(get("i2c").build(), (Role.P0, Role.P1, Role.MON), p)
-    for i in range(3):
-        assert t.engines[i].rx == ([] if i == 0 else [0x3C]), i
+    assert t.engines[0].rx == [1] and t.engines[0].tx_left == 0      # the NACK, for the host
+    for i in (1, 2):
+        assert t.engines[i].rx == [0x3C], i
     assert not t.engines[0].events and not t.engines[1].events
     # the monitor skips both lead blocks: it follows the first data byte speculatively, and the
     # controller's STOP after the NACK makes that a bus exit (a normal event, isa §4.7)
@@ -109,3 +113,27 @@ def test_every_i2c_space_point_compiles():
     keys = sorted(spec.space)
     for values in itertools.product(*(spec.space[k] for k in keys)):
         compile_desc(spec.build(**dict(zip(keys, values))))
+
+
+def test_a_glitch_on_the_idle_bus_costs_no_transaction():
+    """An SDA low pulse on the idle bus is a START and a STOP that no controller made; the flags
+    stay set until the next transaction, whose address XFER (ABORT) bus-exits on them, and the
+    target re-syncs on the real START: every byte arrives, in every follower."""
+    from emu.model.system import EngineSpec, Glitch, System
+    A = get("i2c").defaults["address"]
+    img = compile_desc(get("i2c").build())
+    s = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)], glitches=[Glitch(SDA, 500, 30, 0)])
+    s.host_push(0, [A << 1, 0x11, A << 1, 0x22, A << 1, 0x33], at_tick=2000)
+    t = s.run(500_000)
+    for i in (1, 2):
+        assert t.engines[i].rx == [0x11, 0x22, 0x33], i
+
+
+def test_the_default_data_hold_is_300_ns_at_50_mhz():
+    """I2C asks a transmitter for >= 300 ns of SDA hold after SCL falls: ldelay 15 at 50 MHz."""
+    assert get("i2c").defaults["ldelay"] == 15
+    t = run_roles(get("i2c").build(), (Role.P0, Role.P1), data(n=1))
+    sda, scl = t.wire_edges[SDA], t.wire_edges[SCL]
+    falls = scl[0::2]                              # SCL idles high: even edges fall
+    moves = [e for e in sda[1:-1]]                 # SDA edges other than START and STOP
+    assert all(min(e - f for f in falls if f <= e) >= 15 for e in moves)
