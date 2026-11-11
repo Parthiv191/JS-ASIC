@@ -628,3 +628,26 @@ def test_a_gated_data2_is_cut_by_a_stop_and_drives_the_next_frame():
     assert c < frame1_end and not [e for e in edges if c + 1 < e <= frame1_end]   # frame 1 cut
     assert len([e for e in edges if e <= c + 1]) % 2 == 0           # released: MISO reads 1
     assert len([e for e in edges if e > frame1_end]) >= 4            # frame 2 drives it
+
+
+# ---------------------------------------------------------------- bus timing in the analysis
+@pytest.mark.parametrize("delay,ok", [(16, True), (30, False)])
+def test_a_followed_start_may_start_until_its_confirm(delay, ok):
+    """T5-watch for a followed COND START/STOP (isa §6): the detector runs every cycle and its
+    flag is sticky, so the follower only has to be waiting by the confirm, E + bus_confirm + 1
+    after the owner's planned edge, not by the edge itself. P1 starts its followed START late (a
+    RAW DELAY first); within that bound it compiles with every timing rule and completes when an
+    on-time follower does; past it, T5-watch rejects it."""
+    def body(d, sda, scl, p):
+        with d.only("b"):
+            d.raw_delay(delay)
+        d.cond("start", owner="a", prof=p)
+    d = i2c_desc(body)
+    if not ok:
+        with pytest.raises(CompileError, match="T5-watch"):
+            compile_desc(d)
+        return
+    t = run_sys(compile_desc(d), roles=(Role.P0, Role.P1))
+    (f,) = conds(t, 1)
+    start = dict(t.engines[1].starts)[2]            # ROLE_IF, RAW DELAY, COND START
+    assert start > SEEN and (f.cycle, f.tb) == (CONFIRMED + 1, NOM)

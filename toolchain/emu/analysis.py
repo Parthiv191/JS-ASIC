@@ -499,10 +499,13 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             diags.add("T5-overrun", pc, f"owner starts at {o_hi}, after the planned action at {offset}")
         event = max(p.nom, o_lo)
         dr = drift(ppm, amax + p.nom)
+        # a followed START/STOP needs its follower waiting only by the confirm: the detector runs
+        # every cycle and the flag is sticky (isa §4.7), so bus_wait = bus_confirm + 1 more
+        seen_by = event + E + s.bus_wait
         for r in followers:
-            if st[r][1] + dr > event + E:
+            if st[r][1] + dr > seen_by:
                 diags.add("T5-watch", pc, f"{r.name} starts watching at {st[r][1]} but the event is "
-                                          f"visible at {event + E} (drift {dr})")
+                                          f"visible at {seen_by} (drift {dr})")
         if p.bounded or p.min > 0:
             late = max(p.nom, o_hi)
             m_lo, m_hi = event - dr - Q, late + dr + Q
