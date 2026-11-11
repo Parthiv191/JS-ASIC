@@ -192,6 +192,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 - **Window accumulation.** Each follower keeps an anchor and the accumulated `(min, nom, max)`
   of the HOLD/XFER bits since it. These are 24-bit, and `max` carries an INF flag.
   - An edge check compares `e − anchor` against `[min − QUANT, max + QUANT]`.
+  - Sums past `2^22` are outside the spec: the compiler rejects `A > 2^22` (§6), and a CHK
+    result there may differ between the model and the RTL.
   - A COND timeout without ABORT re-anchors at its new `tb`; an abort re-anchors at `now`.
   - RESYNC moves only the sampling anchor.
 - **24-bit time.** All time comparisons are signed 24-bit differences. In every engine cycle,

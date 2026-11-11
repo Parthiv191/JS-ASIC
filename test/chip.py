@@ -85,6 +85,9 @@ E_ROLE, E_STATUS, E_PC, E_VIOL, E_EVT, E_IRQ_ID = 0x00, 0x02, 0x04, 0x06, 0x08, 
 E_FV_PC, E_FV_KIND, E_REG_SEL, E_REG_DATA, E_TB, E_NOW = 0x0C, 0x0E, 0x12, 0x14, 0x16, 0x1A
 STATUS_HOST_ERR = 1 << 2
 E_RUNNING, E_HALTED = 1 << 0, 1 << 1
+E_TX_FULL, E_TX_EMPTY, E_RX_FULL, E_RX_EMPTY = 1 << 2, 1 << 3, 1 << 4, 1 << 5
+FIFOS_EMPTY = E_TX_EMPTY | E_RX_EMPTY
+E_FIFO_COUNTS, E_TXDATA, E_RXDATA = 0x03, 0x30, 0x32
 
 
 def line_byte(pin, od=False, owner=2, idle=1, gated=False):

@@ -11,6 +11,8 @@
 //          side effects; the bus must keep it that way.
 //   pair:  the address toggles bit 0 instead of incrementing.
 // A CS rise ends the frame (`frame_end`) and resets the bit and byte counters.
+// `sent` pulses when a read byte has fully shifted out (all 8 bits sampled): reads with a side
+// effect (RXDATA's pop) act on it, so read-ahead and a frame cut mid-byte have none.
 module host_spi (
     input  wire        clk,
     input  wire        rst_n,
@@ -23,7 +25,11 @@ module host_spi (
     output reg         wr,         // pulse: write `wdata` to `addr`
     output reg  [7:0]  wdata,
     output reg         rd,         // pulse: `addr` changed in a read frame
-    output reg         frame_end   // pulse: CS rose
+    output reg         frame_end,  // pulse: CS rose
+    output reg  [15:0] tx_addr,    // address of the byte now shifting out on MISO
+    output reg         tx_valid,   // tx_addr is a data byte (not the dummy)
+    output reg         sent,       // pulse: the byte at sent_addr has fully shifted out
+    output reg  [15:0] sent_addr
 );
 
   localparam CMD = 2'd0, ADDR_H = 2'd1, ADDR_L = 2'd2, DATA = 2'd3;
@@ -57,11 +63,16 @@ module host_spi (
       wdata     <= 8'd0;
       rd        <= 1'b0;
       frame_end <= 1'b0;
+      tx_addr   <= 16'd0;
+      tx_valid  <= 1'b0;
+      sent      <= 1'b0;
+      sent_addr <= 16'd0;
     end else begin
       sck_d     <= sck;
       cs_d      <= cs;
       wr        <= 1'b0;
       rd        <= 1'b0;
+      sent      <= 1'b0;
       frame_end <= cs_d & ~cs;
 
       // A write lands on the cycle after its last bit; advance after it.
@@ -71,6 +82,7 @@ module host_spi (
         bitcnt <= 3'd0;
         phase  <= CMD;
         tx     <= 8'd0;
+        tx_valid <= 1'b0;
       end else if (rise) begin
         bitcnt <= bitcnt + 3'd1;
         sr     <= byte_in[6:0];
@@ -90,13 +102,19 @@ module host_spi (
               addr[7:0] <= byte_in;
               phase     <= DATA;
               tx        <= 8'd0;     // the dummy byte
+              tx_valid  <= 1'b0;
               rd        <= is_read;
             end
             DATA: begin
               if (is_read) begin
-                tx   <= rdata;
-                addr <= next_addr;
-                rd   <= 1'b1;
+                // the byte in tx has now had all 8 bits sampled by the host
+                sent      <= tx_valid;
+                sent_addr <= tx_addr;
+                tx        <= rdata;
+                tx_addr   <= addr;
+                tx_valid  <= 1'b1;
+                addr      <= next_addr;
+                rd        <= 1'b1;
               end else begin
                 wdata <= byte_in;
                 wr    <= 1'b1;

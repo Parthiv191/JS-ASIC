@@ -96,13 +96,15 @@ module tt_um_prot_emu_SAP (
   wire [15:0] haddr;
   wire [7:0]  hwdata;
   reg  [7:0]  hrdata;
-  wire        hwr, hrd, hframe_end, miso;
+  wire        hwr, hrd, hframe_end, miso, htx_valid, hsent;
+  wire [15:0] htx_addr, hsent_addr;
 
   host_spi u_spi (
       .clk(clk), .rst_n(rst_n_sync),
       .sck(ui_s[0]), .mosi(ui_s[1]), .cs(~ui_s[2]),
       .rdata(hrdata), .miso(miso),
-      .addr(haddr), .wr(hwr), .wdata(hwdata), .rd(hrd), .frame_end(hframe_end)
+      .addr(haddr), .wr(hwr), .wdata(hwdata), .rd(hrd), .frame_end(hframe_end),
+      .tx_addr(htx_addr), .tx_valid(htx_valid), .sent(hsent), .sent_addr(hsent_addr)
   );
 
   wire       in_glob  = haddr[15:8] == 8'h00;
@@ -136,16 +138,25 @@ module tt_um_prot_emu_SAP (
   reg  [1:0]  e0_role;
   reg  [2:0]  e0_reg_sel;
   reg  [7:0]  e0_reg_lo;      // REG_DATA low byte, written with the high byte
+  reg  [7:0]  e0_tx_lo;       // TXDATA low byte; the high byte pushes the word
+  wire [2:0]  e0_tx_count;
+  wire [3:0]  e0_rx_count;
+  wire [15:0] e0_rx_head, e0_rx_next;
 
   wire soft_reset0 = gwr & (off == 8'h05) & hwdata[0];
   wire irq_clr0    = gwr & (off == 8'h06) & hwdata[0];
   wire e0_reg_we   = ewr & (off == 8'h15) & ~e0_running;
+  // TXDATA (0x30, pair) pushes on its high byte; RXDATA (0x32, pair) pops once its high byte has
+  // fully shifted out to the host (architecture §4), so read-ahead never pops
+  wire e0_tx_push  = ewr & (off == 8'h31);
+  wire e0_rx_pop   = hsent & (hsent_addr == 16'h2033);
   wire [15:0] e0_viol_clr = {(ewr && off == 8'h07) ? hwdata : 8'h00,
                              (ewr && off == 8'h06) ? hwdata : 8'h00};
 
   // Illegal accesses (architecture §4); the rest need later blocks
   wire mem_wr = hwr & (in_col1 | in_col2);
-  wire refuse = any_running & ((hwr & in_table) | (hwr & in_col1) | (ewr & off == 8'h15));
+  wire refuse = (any_running & ((hwr & in_table) | (hwr & in_col1) | (ewr & off == 8'h15))) |
+                (e0_tx_push & (e0_tx_count == 3'd4));   // TX full: the word is dropped
 
   integer k;
   always @(posedge clk or negedge rst_n_sync) begin
@@ -161,6 +172,7 @@ module tt_um_prot_emu_SAP (
       e0_role       <= 2'd0;
       e0_reg_sel    <= 3'd0;
       e0_reg_lo     <= 8'h00;
+      e0_tx_lo      <= 8'h00;
       for (k = 0; k < 8; k = k + 1) line_cfg[8*k +: 8] <= 8'h68 + k[7:0];  // released OD
       prof_all      <= 384'h0;
       lane_all      <= 128'h0;
@@ -193,6 +205,7 @@ module tt_um_prot_emu_SAP (
           8'h00: e0_role    <= hwdata[1:0];
           8'h12: e0_reg_sel <= hwdata[2:0];
           8'h14: e0_reg_lo  <= hwdata;
+          8'h30: e0_tx_lo   <= hwdata;
           default: ;
         endcase
       end
@@ -221,7 +234,9 @@ module tt_um_prot_emu_SAP (
       .reg_rdata(e0_reg), .viol_clr(e0_viol_clr), .irq_clr(irq_clr0),
       .running(e0_running), .halted(e0_halted), .viol(e0_viol), .evt(e0_evt),
       .irq(e0_irq), .irq_id(e0_irq_id), .xpc(e0_pc), .fv_pc(e0_fv_pc), .fv_kind(e0_fv_kind),
-      .now_o(e0_now), .tb_o(e0_tb)
+      .now_o(e0_now), .tb_o(e0_tb),
+      .tx_push(e0_tx_push), .tx_wdata({hwdata, e0_tx_lo}), .tx_count(e0_tx_count),
+      .rx_pop(e0_rx_pop), .rx_count(e0_rx_count), .rx_head(e0_rx_head), .rx_next(e0_rx_next)
   );
 
   // No boot controller yet (Plus), so boot is always done and never fails.
@@ -278,7 +293,16 @@ module tt_um_prot_emu_SAP (
   always @* begin
     e_val = 24'h0; e_byte = 2'd0; e_multi = 1'b0;
     case (off)
-      8'h02:        e_val = {22'h0, e0_halted, e0_running};
+      // STATUS: running, halted, TX full, TX empty, RX full, RX empty; FIFO counts: TX [3:0], RX [7:4]
+      8'h02:        e_val = {18'h0, e0_rx_count == 4'd0, e0_rx_count == 4'd8,
+                             e0_tx_count == 3'd0, e0_tx_count == 3'd4, e0_halted, e0_running};
+      8'h03:        e_val = {16'h0, e0_rx_count, 1'b0, e0_tx_count};
+      // RXDATA. Its low byte is fetched one byte ahead: if the byte now shifting out is RXDATA's
+      // high byte, it pops when it finishes, so the low byte comes from the next entry
+      8'h32:        e_val = (htx_valid && htx_addr == 16'h2033) ?
+                              ((e0_rx_count >= 4'd2) ? {8'h0, e0_rx_next} : 24'h0) :
+                              ((e0_rx_count != 4'd0) ? {8'h0, e0_rx_head} : 24'h0);
+      8'h33:        e_val = (e0_rx_count != 4'd0) ? {16'h0, e0_rx_head[15:8]} : 24'h0;
       8'h04, 8'h05: begin e_val = {15'h0, e0_pc};      e_multi = 1'b1; end
       8'h06, 8'h07: begin e_val = {8'h0, e0_viol};     e_multi = 1'b1; end
       8'h08:        e_val = {18'h0, e0_evt};
