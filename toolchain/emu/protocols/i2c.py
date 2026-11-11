@@ -3,7 +3,7 @@
 SDA is a shared OD line and SCL an OD line the controller owns; the bus is I2C (isa §4.7) with a
 cpol 1, cpha 1 lane on them. Each bit is a clocked XFER of half period H, MSB first. SDA moves
 `ldelay` cycles after SCL falls (the data hold time; isa §2 lane config), never with it: the
-default 15 is I2C's 300 ns at 50 MHz.
+default 12 is I2C's 300 ns at the 40 MHz sign-off clock.
 
 - The controller's host pushes the address byte (address << 1), then the data bytes. The
   controller takes the address with SCL and SDA high, so a POP stall ends at its own START, which
@@ -29,7 +29,7 @@ from ..isa import INF
 from . import ProtocolSpec
 
 
-def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldelay: int = 15,
+def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldelay: int = 12,
           tolerance_ppm: int = 20000) -> Description:
     H = half_cycles
     d = Description("i2c", parties=("ctl", "tgt"), tolerance_ppm=tolerance_ppm)
@@ -88,9 +88,9 @@ def payload(rng, n: int, data_bytes: int = 1, address: int = 0x5A, **_) -> dict[
 SPEC = ProtocolSpec(
     name="i2c",
     build=build,
-    defaults=dict(half_cycles=20, data_bytes=1, address=0x5A, ldelay=15, tolerance_ppm=20000),
-    # 250 is 100 kHz at 50 MHz; ldelay 15 is 300 ns there
-    space=dict(half_cycles=[20, 250], data_bytes=[1, 2, 4], address=[0x08, 0x5A, 0x77], ldelay=[1, 2, 15],
+    defaults=dict(half_cycles=20, data_bytes=1, address=0x5A, ldelay=12, tolerance_ppm=20000),
+    # 200 is 100 kHz at 40 MHz and 52 is 385 kHz; ldelay 12 is 300 ns there
+    space=dict(half_cycles=[20, 52, 200], data_bytes=[1, 2, 4], address=[0x08, 0x5A, 0x77], ldelay=[1, 2, 12, 15],
                tolerance_ppm=[0, 20000]),
     payload=payload,
 )

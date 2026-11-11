@@ -130,10 +130,10 @@ def test_a_glitch_on_the_idle_bus_costs_no_transaction():
 
 
 def test_the_default_data_hold_is_300_ns_at_50_mhz():
-    """I2C asks a transmitter for >= 300 ns of SDA hold after SCL falls: ldelay 15 at 50 MHz."""
-    assert get("i2c").defaults["ldelay"] == 15
+    """I2C asks a transmitter for >= 300 ns of SDA hold after SCL falls: ldelay 12 at 40 MHz."""
+    assert get("i2c").defaults["ldelay"] == 12
     t = run_roles(get("i2c").build(), (Role.P0, Role.P1), data(n=1))
     sda, scl = t.wire_edges[SDA], t.wire_edges[SCL]
     falls = scl[0::2]                              # SCL idles high: even edges fall
     moves = [e for e in sda[1:-1]]                 # SDA edges other than START and STOP
-    assert all(min(e - f for f in falls if f <= e) >= 15 for e in moves)
+    assert all(min(e - f for f in falls if f <= e) >= 12 for e in moves)
