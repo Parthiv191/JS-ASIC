@@ -108,6 +108,9 @@ class Engine:
         self.start_e = self.stop_e = 0
         self.bus_events: list[tuple[int, str]] = []     # (cycle confirmed, START/STOP)
         self._step: Instr | None = None                   # the timed step a bus flag may exit
+        # gated lines (isa §2): shut at RUN and after a SELECT STOP, an abort, a bus exit or HALT
+        # released them; drives to them do nothing until the next timed step starts
+        self._gate_shut = True
         # clocks the owner stretch-waits on (isa §4.3): those of lanes with `stretch`
         self._stretch_clocks = {la.clk for la in image.lanes if la.stretch and la.clk is not None}
         self.pc = 0
@@ -202,6 +205,8 @@ class Engine:
             self.start_e = c - EDGE_LAT
         else:
             self.stop_e = c - EDGE_LAT
+            if self._bus_kind == BusKind.SELECT:
+                self._close_gates()  # CS rising releases the gated lines (isa §4.7)
         self.bus_events.append((self.now, "START" if bit == START_BIT else "STOP"))
         return True
 
@@ -221,6 +226,7 @@ class Engine:
         for i, ln in enumerate(self.lines):
             if ln.kind == "od":
                 self.drv[i] = None
+        self._close_gates()
         self.tb = self.now
         self._reanchor(self.now)
         self.pc = self.image.abort_pc
@@ -265,8 +271,17 @@ class Engine:
                 del self._letgo[d]
 
     # ------------------------------------------------------------------ helpers
+    def _close_gates(self) -> None:
+        """Release the gated lines (isa §2) until the next timed step starts."""
+        for i, ln in enumerate(self.lines):
+            if ln.gated:
+                self.drv[i] = None
+        self._gate_shut = True
+
     def drive(self, line: int, value: int) -> None:
         self._letgo.pop(line, None)  # an explicit drive cancels a pending let-go (isa §4.3)
+        if self.lines[line].gated and self._gate_shut:
+            return  # released by a SELECT STOP or an abort earlier in this step
         if self.lines[line].kind == "pp":
             self.drv[line] = value & 1
         else:
@@ -281,6 +296,7 @@ class Engine:
         re-base, isa §4.1). A followed step takes its timing from the other party instead, and a
         clock owner's clocked XFER re-bases by its own rule (`rebase` False)."""
         self.to = False
+        self._gate_shut = False  # a timed step opens the gated lines again (isa §2)
         stalled, self._stalled = self._stalled, False
         if stalled and rebase and self.does(ins):
             self.tb = max(self.tb, self.now)
@@ -360,6 +376,7 @@ class Engine:
         for i, ln in enumerate(self.lines):
             if ln.kind == "od":
                 self.drv[i] = None
+        self._close_gates()
         self.tb = self.now
         self._reanchor(self.now)
         self.pc = self.image.abort_pc
@@ -407,11 +424,13 @@ class Engine:
                 yield from self.wait_until(self._next_start(start, self.now - 1))
 
     def _halt(self) -> Gen:
-        # isa §4.1: PP lines keep their level, OD lines are released
+        # isa §4.1: PP lines keep their level, OD and gated lines are released (a halted engine
+        # runs no detector, so it would never see the STOP that releases a gated line)
         self._letgo.clear()
         for i, ln in enumerate(self.lines):
             if ln.kind == "od":
                 self.drv[i] = None
+        self._close_gates()
         self.halted = True
         self.halt_cycle = self.now
         self.idle = True

@@ -76,7 +76,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     def err(rule: str, step: Step, msg: str) -> None:
         diags.append(Diagnostic(rule, step.index, step.loc, msg))
 
-    lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle) for ln in desc.lines]
+    lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle, gated=ln.gated) for ln in desc.lines]
     profiles = [IDLE] + list(desc.profiles)
     lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha,
                      data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay,
@@ -188,6 +188,17 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                                f"{len(lanes)} lanes (max {NUM_LANES}), {len(lines)} lines (max {NUM_LINES})")
     if len(instrs) > prog_depth:
         err("S-range", desc.steps[-1], f"program has {len(instrs)} words (max {prog_depth})")
+    sel_master = (lines[desc.bus_cfg[1].index].owner
+                  if desc.bus_cfg is not None and desc.bus_cfg[0] == "select" else None)
+    for ln in lines:
+        anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
+        if ln.gated and ln.kind != "pp":
+            err("S-line", anchor, f"line {ln.name!r}: `gated` only on push-pull lines (isa §2)")
+        if ln.gated and ln.idle != 1:
+            err("S-line", anchor, f"gated line {ln.name!r} needs idle 1: released, it reads the pull-up")
+        if ln.gated and ln.owner == sel_master:
+            err("S-line", anchor, f"gated line {ln.name!r} is owned by the SELECT master, which runs no "
+                                  f"detector, so no STOP would release it")
 
     abort_pc = 0
     if desc.abort_label is not None:

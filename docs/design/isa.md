@@ -12,8 +12,7 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
 (§4.1) and clocked XFER, duplex and OD data with the let-go included (§4.3, with CLK_PHASE,
 TIMEOUT and UNDERRUN) and clock stretching, the I2C and SELECT bus detector with COND START/STOP and
-bus exits (§4.7), and COND MEAS are v1. Still to come: `gated` lines and their release on a SELECT
-STOP, and lead blocks (`R3-lead`). The model keeps fractional clocks only to stand in for external devices.
+bus exits (§4.7), COND MEAS and `gated` lines are v1. Still to come: lead blocks (`R3-lead`). The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -45,9 +44,17 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
 - **Line config:** `kind ∈ {PP (push-pull), OD (open-drain)}`, `owner ∈ {P0, P1, SHARED (OD only), SWITCHED (reserved,
   for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`, and `pin`: the uio pin it maps to (default: its
   index). Each line has its own pin; the image rejects two lines on one pin.
-  - `gated` (PP only): the owner drives the line only from its first owned step on it until
-    the next STOP on a SELECT bus, or an abort; otherwise the line is released. For example, SPI
-    MISO on a shared bus.
+  - `gated` (PP, idle 1): the owner drives the line only from the first step that drives it
+    until the next STOP on a SELECT bus, or an abort; otherwise the line is released and reads
+    the pull-up. For example, SPI MISO on a shared bus.
+    - Each engine has one gate for its gated lines. It is shut at RUN, and opens at the start of
+      each timed step. While it is shut, drives to gated lines (RAW SET too) do nothing.
+    - The gate shuts, and the engine's gated lines are released, when its own detector confirms
+      a STOP on a SELECT bus, and with an abort, a bus exit or HALT (§4.1). The line is undriven
+      from the next cycle. A step cut by a STOP drives none of its later bits.
+    - A release in the cycle a timed step starts wins: the detector runs at the end of the cycle
+      (§4.7), so that step drives nothing.
+    - The SELECT master runs no detector, so it may not own a gated line (`S-line`).
   - Before RUN, every pin is an input. In `s0` (§4.0) each non-gated PP line the engine's role owns is
     driven to `idle`, so the drive is on the wire from `now = 1`, like any drive; every other line stays
     released. At `now = 0` a line reads what the pin reads: an owned idle-0 line with a pull-up reads 1,
@@ -199,7 +206,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - A fatal abort logs `ABORT(pc)`, a VIOL bit and a first-violation entry. A bus exit is
     **normal**: it adds no record of its own (the detector already logged the BUS record), sets no
     VIOL bit and causes no fuzzer hang.
-  - Both release OD lines, set `tb := now` and go to `abort_pc` (§4.0).
+  - Both release OD and gated lines (§2), set `tb := now` and go to `abort_pc` (§4.0).
   - A partial XFER writes no `dst` and pushes nothing.
   - Only the failing role jumps (`T5-abort`). `abort_pc` is 0 unless set; the compiler warns on
     ABORT without it.
@@ -225,7 +232,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 - A clocked follower's timeout counts cycles from the step start for the first edge, and from
   the cycle it detected the last edge after that: TIMEOUT when `now − ref > max + QUANT`. A
   timeout without ABORT re-anchors at its new `tb` (`now`).
-- **HALT** (and ILLEGAL): the engine stops. PP lines keep their level, OD lines are released,
+- **HALT** (and ILLEGAL): the engine stops. PP lines keep their level, OD and gated lines are released,
   the FIFOs stay readable, and STATUS shows halted.
 
 ### 4.2 `COND kind, line, owner, prof [, meas=rd]` and `HOLD line, level, owner, prof`
@@ -427,7 +434,7 @@ host clears it.
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit or to `abort_pc`. `abort_pc` is not inside a block body. |
 | `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
-| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines |
+| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines with idle 1, and not on a line the SELECT master owns (`S-line`) |
 | `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 
 ## 6. Timing rules (compiler)

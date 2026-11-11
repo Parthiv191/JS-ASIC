@@ -50,6 +50,7 @@ class LineDecl:
     kind: str
     owner: str
     idle: int
+    gated: bool = False  # PP, idle 1: driven from a timed step until a SELECT STOP, an abort, a bus exit or HALT
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ class Description:
         self._block: frozenset[str] | None = None
 
     # ---- declarations ---------------------------------------------------------------
-    def line(self, name: str, kind: str = "pp", *, owner: str, idle: int = 1) -> LineRef:
+    def line(self, name: str, kind: str = "pp", *, owner: str, idle: int = 1, gated: bool = False) -> LineRef:
         if kind not in ("pp", "od"):
             raise ValueError(f"line kind must be 'pp' or 'od', got {kind!r}")
         if owner not in self.parties + (SHARED,):
@@ -111,7 +112,7 @@ class Description:
         if idle not in (0, 1):
             raise ValueError("idle must be 0 or 1")
         self._unique(name, [ln.name for ln in self.lines], "line")
-        self.lines.append(LineDecl(name, kind, owner, idle))
+        self.lines.append(LineDecl(name, kind, owner, idle, bool(gated)))
         return LineRef(name, len(self.lines) - 1)
 
     def profile(self, name: str, nom: int, min: int | None = None, max: int | None = None) -> ProfRef:
