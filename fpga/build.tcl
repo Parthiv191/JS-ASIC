@@ -1,5 +1,5 @@
 # Vivado non-project build of the Basys 3 harness: synthesis, place and route, reports, bitstream.
-#   vivado -mode batch -nojournal -nolog -source fpga/build.tcl
+#   cd fpga; vivado -mode batch -nojournal -nolog -source build.tcl
 # Outputs go to fpga/build/: basys3_top.bit, timing.rpt, utilization.rpt.
 # The design's sources are the PROJECT_SOURCES list in test/Makefile (devOps's list), so the FPGA
 # build follows the chip; fpga/sram_fpga.v stands in for the IHP SRAM macro.
@@ -8,6 +8,7 @@ set here [file normalize [file dirname [info script]]]
 set root [file normalize "$here/.."]
 set out  "$here/build"
 file mkdir $out
+cd $out                ;# Vivado writes scratch files (clockInfo.txt) to the working directory
 
 set mk [open "$root/test/Makefile" r]
 set sources {}

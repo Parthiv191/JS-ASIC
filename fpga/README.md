@@ -31,8 +31,10 @@ SPI port through a UART-to-SPI bridge in the FPGA, so the only cable is the boar
 ## Build
 
 ```sh
-# from the repo root; the 2026.1 install (the 2026.1.1 one rejects the license tier)
-D:\2026.1\Vivado\bin\vivado.bat -mode batch -nojournal -nolog -source fpga/build.tcl
+# from fpga/, so Vivado's scratch files (.Xil/) stay where .gitignore covers them;
+# the 2026.1 install (the 2026.1.1 one rejects the license tier)
+cd fpga
+D:\2026.1\Vivado\bin\vivado.bat -mode batch -nojournal -nolog -source build.tcl
 ```
 
 ## Bring-up session (architecture §5's order; stop at the first failure)
