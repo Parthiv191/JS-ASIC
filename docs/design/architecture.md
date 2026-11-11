@@ -256,7 +256,7 @@ self-contained bring-up rig.
 | Check | How |
 |---|---|
 | **Routing congestion** from the macro power bridges | the downward VDD!/VSS! bridges take up to ~50% of Metal4 across ~65% of the 6x4 die width (re-check on 8x4). Count the bridge shapes in the DEF. If congested, end the downward bridges a few rows below the halo and re-run check_power_grid. |
-| Fail on global-route overflow | the template sets `GRT_ALLOW_CONGESTION = 1`, which lets overflow pass silently |
+| Fail on global-route overflow | done: `src/config.json` sets `GRT_ALLOW_CONGESTION = 0` (the template's 1 let overflow pass silently) |
 | Placement blockages | the ~13 µm sliver between the macros, the right-edge sliver, the rows above the macros |
 | **IR drop** | one VPWR/VGND pin pair at x ≈ 368 feeds the right two-thirds of the 6x4 die, and more of the wider 8x4 die. Run OpenROAD's power-grid analysis (PSM) with realistic activity. If needed, promote the full-height straps left of macro 1 to pins (verify how TT connects power). |
 
