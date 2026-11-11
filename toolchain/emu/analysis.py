@@ -199,10 +199,9 @@ def _steps(low: Lowered) -> dict[int, _Step]:
                         ow = img.lines[x].owner
                         od |= {Role.P0, Role.P1} if ow == Owner.SHARED else {Role(int(ow))}
                 kw["od_drivers"] = frozenset(od)
-        if ins.op in (Op.COND, Op.HOLD) and ins.line in stretch_clocks:
-            # isa §4.3: HOLD clk 1 and COND RISE clk wait for the release to be seen
-            kw["stretch_wait"] = (ins.operand & 1 == 1 if ins.op == Op.HOLD
-                                  else unpack_cond(ins.operand)[0] == CondKind.RISE)
+        if ins.op == Op.COND and ins.line in stretch_clocks:
+            # isa §4.3: COND RISE clk waits for the release to be seen
+            kw["stretch_wait"] = ins.op == Op.COND and unpack_cond(ins.operand)[0] == CondKind.RISE
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
     return out
 

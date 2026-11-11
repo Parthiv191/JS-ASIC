@@ -321,13 +321,17 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     until it reads `clk = 1` at cycle `c ≥ t + EDGE_LAT`, and takes `e = c − EDGE_LAT`.
   - If `e > t`, the rest of the step and `tb` shift by `e − t`.
   - While it waits it makes no later edge and takes no sample; a sample on that release (a
-    capture edge) is taken when it sees it. Launches go on at their planned time plus the shift
-    so far: the owner can't know about a stretch sooner.
-  - The wait is bounded by `max`: TIMEOUT when `now − EDGE_LAT − t > max + QUANT`, then ABORT,
-    or `to` set, `tb := now` and the step ends.
+    capture edge) is taken when it sees it. A launch stays tied to its launching edge: the edge's
+    real drive cycle + `ldelay`, so a stretch delays it with its edge.
+  - The wait is bounded by `max`, counted as the followers count: from the previous edge
+    (`t − H`) in a clocked XFER, from `tb` in a COND RISE. TIMEOUT when
+    `now − EDGE_LAT − ref > max + QUANT`, then ABORT, or `to` set, `tb := now` and the step
+    ends.
   - RTL note: when `e > t`, add the shift to the step's offset counter; don't re-add it to
     every planned time.
-  - `HOLD clk 1` and `COND RISE clk` on a stretch lane's clock wait the same way.
+  - `COND RISE clk` done on a stretch lane's clock waits the same way, and its `tb` is the real
+    rise. `HOLD clk 1` there is rejected (`S-bus`): a HOLD's followers sample its midpoint
+    rather than anchor on the edge, so they would keep the unstretched timeline.
   - **The chip never stretches as a target** (v1).
 
 ### 4.4 `CRC`
@@ -420,8 +424,8 @@ host clears it.
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit or to `abort_pc`. `abort_pc` is not inside a block body. |
 | `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
-| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol`, and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines |
-| `S-bus` | I2C: `bus_a` and `bus_b` are OD, and START/STOP steps are used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`. |
+| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines |
+| `S-bus` | I2C: `bus_a` and `bus_b` are OD, and START/STOP steps are used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 
 ## 6. Timing rules (compiler)
 
@@ -457,7 +461,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
     (`cpol = 1`), the clock owner completes when it sees it: at least `E`.
   - **OD owners** read their data back, so they complete at the follow offsets: unclocked
     `−P + P//2 + E`, clocked at the last capture `+ E`. PP owners don't sample.
-  - Stretched HOLD/COND on a stretch clock: `+E`. A timed-out followed COND:
+  - A COND RISE done on a stretch clock: `+E`. A timed-out followed COND:
     `max − nom + QUANT + E + 1`.
   - Abort into `abort_pc`: the decision cycle + 4 (+ `FZ_HANG_CYCLES` for a fatal abort while armed). For a bus
     exit the decision is `bus_e + E + bus_confirm + 1`, which sets the timing of I2C's repeated START

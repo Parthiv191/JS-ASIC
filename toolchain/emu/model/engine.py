@@ -210,16 +210,16 @@ class Engine:
         while self.now < t:
             yield
 
-    def _await_release(self, line: int, t: int, p) -> Gen:
+    def _await_release(self, line: int, t: int, p, ref: int) -> Gen:
         """Clock stretching (isa §4.3): after releasing `line` in cycle t, wait until it reads 1,
         at the earliest EDGE_LAT later; return e = that cycle - EDGE_LAT. Bounded by the profile's
-        max: TIMEOUT when the release is still not seen, now - EDGE_LAT - t > max + QUANT; then
-        returns None. The caller continues in the cycle it returns."""
+        max, counted from `ref` as the followers count: TIMEOUT when now - EDGE_LAT - ref >
+        max + QUANT; then returns None. The caller continues in the cycle it returns."""
         while True:
             if self.now >= t + EDGE_LAT and self.inp[line] == 1:
                 return self.now - EDGE_LAT
-            if p.max != INF and self.now - EDGE_LAT - t > p.max + QUANT:
-                self.log("TIMEOUT", measured=self.now - EDGE_LAT - t, lo=p.min, hi=p.max)
+            if p.max != INF and self.now - EDGE_LAT - ref > p.max + QUANT:
+                self.log("TIMEOUT", measured=self.now - EDGE_LAT - ref, lo=p.min, hi=p.max)
                 return None
             yield
 
@@ -431,7 +431,8 @@ class Engine:
             self.drive(ins.line, level)
             act = self.now
             if level == 1 and ins.line in self._stretch_clocks:
-                e = yield from self._await_release(ins.line, act, p)
+                # timed from tb, as its followers time the edge (isa §4.2)
+                e = yield from self._await_release(ins.line, act, p, ref=self.tb)
                 if e is None:
                     yield from self._stretch_timeout(ins)
                     return
@@ -477,13 +478,6 @@ class Engine:
             if ins.prof != 0:  # IDLE steps never overrun
                 self._late(planned, slot0=True)
             self.drive(ins.line, level)
-            if level == 1 and ins.line in self._stretch_clocks:
-                t = self.now
-                e = yield from self._await_release(ins.line, t, p)
-                if e is None:
-                    yield from self._stretch_timeout(ins)
-                    return
-                planned += max(0, e - t)  # the rest of the step and tb shift by the stretch
             self.tb = planned + p.nom
             self._accumulate(p, 1)
             self._record(ins, "do", level)
@@ -676,8 +670,11 @@ class Engine:
             self.tb = max(self.tb, start) if cpha == 0 else max(self.tb, start - H)
             base = self.tb
             edges = [(base + j * H, cpol ^ (j & 1)) for j in range(1, 2 * n + 1)]
-            launch = (([base] + [base + 2 * k * H + ld for k in range(1, n)] if cpha == 0
-                       else [base + (2 * k + 1) * H + ld for k in range(n)]) if drives else [])
+            # bit k's launching edge (an index into edges): cpha 0, the trailing edge of bit k-1
+            # (bit 0 goes out at base); cpha 1, the leading edge of bit k. A launch is at that
+            # edge's real drive cycle + ldelay, so a stretch delays it with its edge.
+            launch_edge = [2 * k - 1 if cpha == 0 else 2 * k for k in range(n)] if drives else []
+            driven_at: list[int] = []
             samp = [base + (2 * k + 1 + cpha) * H + EDGE_LAT for k in range(n)] if reads else []
             end = max([base + 2 * n * H] + samp)  # the later of the last edge and the last sample
             ei = li = si = 0
@@ -691,8 +688,9 @@ class Engine:
                     if self.now >= wait + EDGE_LAT and self.inp[clk] == 1:
                         shift += max(0, self.now - EDGE_LAT - wait)
                         wait = None
-                    elif p.max != INF and self.now - EDGE_LAT - wait > p.max + QUANT:
-                        self.log("TIMEOUT", measured=self.now - EDGE_LAT - wait, lo=p.min, hi=p.max)
+                    elif p.max != INF and self.now - EDGE_LAT - (wait - H) > p.max + QUANT:
+                        # counted from the previous edge (t - H), as a clock follower counts
+                        self.log("TIMEOUT", measured=self.now - EDGE_LAT - (wait - H), lo=p.min, hi=p.max)
                         if ins.flags & F_ABORT:
                             self._abort()
                             yield
@@ -709,10 +707,15 @@ class Engine:
                         return
                 while wait is None and ei < len(edges) and edges[ei][0] + shift <= self.now:
                     self.drive(clk, edges[ei][1])
+                    driven_at.append(self.now)
                     if lane.stretch and edges[ei][1] == 1:
                         wait = self.now
                     ei += 1
-                while li < len(launch) and launch[li] + shift <= self.now:
+                while li < len(launch_edge):
+                    j = launch_edge[li]
+                    at = base if j < 0 else (driven_at[j] + ld if j < len(driven_at) else None)
+                    if at is None or at > self.now:
+                        break
                     launch_bit(li)
                     li += 1
                 if wait is None and si < len(samp) and self.now >= samp[si] + shift:
