@@ -368,11 +368,9 @@ def test_t5_rejects_an_abort_target_that_starts_with_a_hold():
     assert diag_rules(d) == {"T5-abort"}
 
 
-def test_t5_accepts_an_abort_target_whose_first_cond_the_aborting_role_owns():
-    """isa §6 T5-abort (v1, decisions 11-05): the first timed step at abort_pc is an unbounded COND
-    the aborting role follows or does. b aborts on a's HOLD and restarts by making its own edge;
-    the COND is unbounded, so a waits for it. (v0 accepted only a followed COND, which made an
-    I2C controller's restart at a COND START it does unwritable.)"""
+def test_t5_rejects_an_abort_target_whose_first_cond_the_aborting_role_owns():
+    """b aborts on a's HOLD; at the target b would drive its own edge into a's frame. Only a COND
+    START/STOP the aborting role does is accepted (isa §6 T5-abort): on a bus the others exit on it."""
     d = Description("t", parties=("a", "b"))
     la = d.line("la", owner="a", idle=1)
     lb = d.line("lb", owner="b", idle=1)
@@ -383,7 +381,7 @@ def test_t5_accepts_an_abort_target_whose_first_cond_the_aborting_role_owns():
     d.label("x")
     d.cond("fall", lb, owner="b")
     d.halt()
-    assert diag_rules(d) == set()
+    assert diag_rules(d) == {"T5-abort"}
 
 
 def test_t5_accepts_uart_abort_to_frame_start():

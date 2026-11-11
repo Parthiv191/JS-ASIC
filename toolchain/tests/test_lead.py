@@ -194,19 +194,6 @@ def test_timed_steps_in_a_lead_block_are_the_leaders():
     assert "R3-lead" in rule_diags(i2c(target=blk_bad))
 
 
-def test_any_role_block_may_branch_to_abort_pc():
-    """isa §5 R3-escape: a branch out of a role block may go to its exit or to abort_pc."""
-    d = Description("x", parties=("a", "b"))
-    ln = d.line("l", owner="a", idle=1)
-    d.abort_to("top")
-    d.label("top")
-    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=10, min=0, max=INF))
-    with d.only("a"):
-        d.br("top")
-    d.halt()
-    assert not lower(d).diags
-
-
 def controller_block(P, body_before_stop=lambda P: None):
     """c ends the frame early when r5 != 0 (clearing r5 for the next round); else it sends DATA."""
     d = P.d
@@ -266,3 +253,169 @@ def test_the_others_follow_the_successor_until_the_leaders_stop():
     assert [e.kind for e in t.engines[1].events] == ["BUS"]
     assert xfer_values(t, 1)[-1] == DATA and not t.engines[0].violations
     assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP", "START", "STOP"]
+
+
+# ---------------------------------------------------------------- review of #40
+def short_successor_block(P, succ):
+    """c leads: on r5 != 0 it ends the frame with its STOP sequence (one SCL pulse, then STOP);
+    `succ(P)` is the block's successor, followed speculatively by t."""
+    d = P.d
+    with d.lead("c"):
+        d.br("data", cond="z", reg="r5")
+        d.li("r5", 0)
+        stop_seq(P)
+        d.br("top")
+    d.label("data")
+    succ(P)
+    d.xfer(8, P.L, owner="c", prof=P.bit, src="r6", dst="r7", msb_first=True)   # no abort
+    stop_and_halt(P)
+
+
+@pytest.mark.parametrize("kind", ["1-bit xfer", "cond fall scl", "cond fall sda", "cond stop", "hold", "unclocked"])
+def test_the_exit_path_may_not_complete_the_successor(kind):
+    """R3-lead: the others wait in the successor S for the leader's bus COND. A leader that makes
+    as many clock edges as S needs (a 1-bit S, one SCL pulse), drives S's COND line, or an S that
+    completes without the leader (COND STOP, which the leader's STOP completes; HOLD; an
+    unclocked XFER) would let them run on past S, into steps without ABORT."""
+    def succ(P):
+        d = P.d
+        if kind == "1-bit xfer":
+            d.xfer(1, P.L, owner="c", prof=P.bit, src="r6", abort=True)
+        elif kind == "cond fall scl":
+            d.cond("fall", P.scl, owner="c", prof=P.wait, abort=True)
+        elif kind == "cond fall sda":
+            d.cond("fall", P.sda, owner="c", prof=P.wait, abort=True)
+        elif kind == "cond stop":
+            d.cond("stop", owner="c", prof=P.wait, abort=True)
+        elif kind == "hold":
+            d.hold(P.scl, 0, owner="c", prof=d.profile("Hi", nom=H, min=0, max=INF), abort=True)
+        else:
+            u = d.line("u", owner="c", idle=1)
+            d.xfer(8, u, owner="c", prof=d.profile("U", nom=H, min=0, max=INF), src="r6", abort=True, check=False)
+    d = i2c(after=lambda P: short_successor_block(P, succ))
+    assert "R3-lead" in rule_diags(d)
+
+
+def test_an_eight_bit_successor_outlasts_the_stop_sequence():
+    """The same block with an 8-bit S: the STOP sequence's one SCL pulse (2 edges) is fewer than
+    the 16 edges S needs, so the STOP still finds t in S."""
+    d = i2c(after=lambda P: short_successor_block(
+        P, lambda P: P.d.xfer(8, P.L, owner="c", prof=P.bit, src="r6", dst="r7", msb_first=True, abort=True)))
+    assert "R3-lead" not in rule_diags(d)
+
+
+def i2c_start_successor(at_role_if, exit_start=False, start_before=False):
+    """c may send a bus-clearing STOP before the first START, in a lead block whose successor is
+    the followed START; abort_pc is that START, or the block's own ROLE_IF."""
+    d = Description("i2c", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    d.bus("i2c", sda, scl)
+    P = SimpleNamespace(d=d, sda=sda, scl=scl, L=d.lane("L", sda, clk=scl, cpol=1, cpha=1),
+                        bit=d.profile("B", nom=H, min=0, max=INF), wait=d.profile("W", nom=H, min=0, max=INF),
+                        hold=d.profile("Ho", nom=H))
+    d.abort_to("top")
+    d.li("r1", ADDR)
+    d.li("r5", 1)
+    if at_role_if:
+        d.label("top")
+    if start_before:            # abort_pc runs another START before reaching S
+        d.cond("start", owner="c", prof=P.wait)
+    with d.lead("c"):
+        d.br("go", cond="z", reg="r5")
+        d.li("r5", 0)
+        if exit_start:          # the exit's bus COND is a (repeated) START: it completes S
+            d.cond("start", owner="c", prof=P.wait)
+        else:
+            stop_seq(P)
+        d.br("top")
+    d.label("go" if at_role_if else "top")
+    if not at_role_if:
+        d.label("go")
+    d.cond("start", owner="c", prof=P.wait, abort=True)
+    d.xfer(8, P.L, owner="c", prof=P.bit, src="r1", dst="r2", msb_first=True)
+    ack_bit(P)
+    stop_and_halt(P)
+    return d
+
+
+@pytest.mark.parametrize("at_role_if", [False, True], ids=["abort_pc=S", "abort_pc=ROLE_IF"])
+def test_a_followed_start_successor_with_the_exit_back_to_it(at_role_if):
+    """A followed START waits through the leader's STOP, and the leader's next timed step from
+    abort_pc is that START: R3-lead accepts it (the path walk checks the exit to abort_pc first).
+    With abort_pc at the START it compiles and runs clean. At the block's ROLE_IF, T5-abort still
+    rejects it: from there a restarted controller's first timed step may be the STOP sequence's
+    SCL fall, not a COND START/STOP."""
+    d = i2c_start_successor(at_role_if)
+    assert "R3-lead" not in rule_diags(d)
+    if at_role_if:
+        with pytest.raises(CompileError, match="T5-abort"):
+            compile_desc(d)
+        return
+    t = run(d)
+    assert not t.engines[0].violations and not t.engines[1].violations
+    assert xfer_values(t, 0)[1] == 0                                     # t ACKed
+
+
+def test_nothing_timed_after_the_exit_paths_bus_cond():
+    def blk(P):
+        with P.d.lead("t"):
+            P.d.alu("ne", "r3", "r2", ADDR)
+            P.d.br("ack", cond="z", reg="r3")
+            P.d.cond("stop", owner="c", prof=P.wait)
+            P.d.xfer(1, P.L, owner="t", prof=P.bit, src="ones")   # the leader's own, but after the exit's STOP
+            P.d.br("top")
+    assert "R3-lead" in rule_diags(i2c(target=blk))
+
+
+def test_a_pop_in_a_lead_block_needs_a_successor_that_waits_for_the_leader():
+    """T5-stall: a step in a lead block makes the others wait only if its successor S does (an
+    unbounded COND the leader does, or a clocked XFER it clocks). Here t leads and POPs, but S, the
+    ACK bit, is clocked by c, which never waits for t. The POP is on the exit path only, so the
+    next timed step after it is the in-block STOP."""
+    def blk(P):
+        with P.d.lead("t"):
+            P.d.alu("ne", "r3", "r2", ADDR)
+            P.d.br("ack", cond="z", reg="r3")
+            P.d.pop("r6")
+            P.d.cond("stop", owner="c", prof=P.wait)
+            P.d.br("top")
+    with pytest.raises(CompileError, match="T5-stall"):
+        compile_desc(i2c(target=blk))
+
+
+def test_only_a_lead_block_may_branch_to_abort_pc():
+    """R3-escape: an only() block that branches to abort_pc restarts its roles on a different
+    timed step from the others, and no rule checks that; only a lead block's exit (R3-lead) may."""
+    d = Description("x", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.abort_to("top")
+    d.label("top")
+    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=10, min=0, max=INF))
+    with d.only("a"):
+        d.br("top")
+    d.halt()
+    assert "R3-escape" in {dg.rule for dg in lower(d).diags}
+
+
+@pytest.mark.parametrize("variant", ["exit_start", "start_before"])
+def test_a_start_successor_needs_a_stop_exit_and_a_way_back_to_it(variant):
+    """A START exit completes the others' followed START; a way back from abort_pc that runs
+    another START first completes it there. Either way the others run on past S."""
+    # abort_pc at S itself for the START exit, so only the exit check can catch it
+    d = i2c_start_successor(at_role_if=variant == "start_before", **{variant: True})
+    assert "R3-lead" in rule_diags(d)
+
+
+def test_a_cond_successor_on_the_bus_line_is_completed_by_the_exits_own_bus_cond():
+    """S is c's COND FALL on SDA; the exit is a bare STOP, whose own SDA edge would complete S."""
+    def after(P):
+        d = P.d
+        with d.lead("c"):
+            d.br("data", cond="z", reg="r5")
+            d.cond("stop", owner="c", prof=P.wait)
+            d.br("top")
+        d.label("data")
+        d.cond("fall", P.sda, owner="c", prof=P.wait, abort=True)
+        stop_and_halt(P)
+    assert "R3-lead" in rule_diags(i2c(after=after))
