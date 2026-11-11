@@ -105,6 +105,10 @@ def test_cs_rising_mid_frame_ends_it_and_the_next_frame_is_clean():
     # frame 1's partial byte is dropped (its TX word too); frame 2 pairs the next words
     assert t.engines[1].rx == [(p["per"][1] << 8) | ctl_bytes(p)[1]]
     assert not t.engines[0].events
+    # MISO (gated) released by the STOP: it reads 1 from the bus exit until frame 2 drives it
+    (bus,) = [e for e in t.engines[1].events if e.kind == "BUS"]
+    miso = t.wire_edges[3]
+    assert len([e for e in miso if e <= bus.cycle + 1]) % 2 == 0      # high (idle 1) after the exit
 
 
 def test_every_spi_space_point_compiles():

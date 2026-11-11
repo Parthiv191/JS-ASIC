@@ -409,6 +409,14 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T5-timeout", prev.pc, f"a follower that times out here finishes up to {late} "
                                                  f"cycles late, off the owner's timeline; the next timed "
                                                  f"step (pc {nxt_pc}) must be an unbounded COND, or add abort")
+            if prev is not None and prev.bus_wait and s.bus_wait:
+                # a bus edge inside the previous one's confirm window replaces its candidate
+                # (isa §4.7): that START or STOP is never confirmed, and its followers hang
+                confirm = s.bus_wait - 1
+                if s.prof.nom - drift(ppm, s.prof.nom) - Q < confirm:
+                    diags.add("T5-watch", nxt_pc, f"this bus edge comes {s.prof.nom} after the previous "
+                                                  f"one: it needs nom - drift - QUANT >= bus_confirm "
+                                                  f"{confirm}, or it replaces that one's candidate")
             if s.owner_role is None:
                 continue  # SHARED steps: Phase 4 (ARB)
             st = {}
