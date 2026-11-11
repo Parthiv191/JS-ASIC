@@ -321,16 +321,18 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     owner: the cycle it drives that edge; others: the cycle they detect it). That is the next
     leading edge with `cpha = 1`. With `cpha = 0` it is a trailing edge: for an XFER that ran to
     the end, its own last edge, because the next leading edge captures the next step's bit 0;
-  - it releases `D` `ldelay` cycles after that edge (same rule as launch), unless it launches a
-    new bit on `D` then. The let-go is taken the cycle after the XFER completes, so the release
+  - it releases `D` `ldelay` cycles after that edge (same rule as launch; after a stretched
+    edge, from its real rise), unless it launches a new bit on `D` then. The let-go is taken the cycle after the XFER completes, so the release
     is at the later of that cycle and the time above (it matters with `cpha = 0`, whose edge is
     the step's own last one);
   - any explicit drive of `D` cancels the pending release;
   - one tracker per engine, for the lane of its last let-go, watches that lane's clock every
     cycle, whatever instruction is running, so a release can happen during later HOLD, COND or
     untimed instructions. Taking a new let-go releases at once every line the old one held that
-    the new one doesn't. (Per-line trackers differ only when two lanes' let-gos overlap, which no
-    library protocol does.)
+    the new one doesn't. `R1-od-lane` allows one clocked lane with OD data per description, and
+    on one lane the lane's own edges release the old let-go before a new XFER completes (except
+    after a TIMEOUT before its first launching edge). So the tracker behaves as per-line ones
+    would; across two lanes, a taken let-go could release SDA while SCL is high.
   - With I2C (cpol 1, cpha 1) a release never happens while SCL is high.
 - **Clock stretching (lanes with `stretch`).**
   - After each release of `clk` (an edge it drives to 1) planned at `t`, the clock owner waits
@@ -434,6 +436,7 @@ host clears it.
 |---|---|
 | `R1-owner` | A timed step's owner field is the owner of its data line: COND/HOLD's line, XFER's lane `data`. It is a party, or `shared` on OD; on a SHARED OD line the owner field may be either party or `shared`. The clock and `data2` drivers come from their line owners. A lane's clock has a party owner. A duplex step has a party owner, and `data2` belongs to the other party. |
 | `R1-shared` | `shared` only on OD lines |
+| `R1-od-lane` | At most one clocked lane with an OD data line (`data` or `data2`) per description: the engine has one OD let-go tracker (§4.3) |
 | `R1-bus` | COND START/STOP is owned by the master line's owner (I2C: the `bus_b` owner; SELECT: the `bus_a` owner). It is follow-only for SE0. |
 | `R2-branch` | Outside role blocks, `BR Z/NZ` tests only clean registers: written by `XFER dst`, `LI`, `ALU` on clean inputs, or `CRC GET` of a clean state. Taints: `POP`, `RAW GET/EVT`, `COND meas`, `XFER dst` on a lane with an OD data line (`data` or `data2`; the wire can differ from what was sent), any write in a role block, and every register at program entry (until written; §1) and at `abort_pc`. The CRC state is a ninth taint slot; it's a forward dataflow analysis. **Inside a role block any branch is allowed.** `RAW JPIN` and `BR TO` are only legal in role blocks. `BR ROLE` is a role split like `ROLE_IF`: the analysis follows each role's path, and `R3-escape` applies to its target. |
 | `R3-timed-in-role` | Role blocks contain no timed steps, except lead blocks |

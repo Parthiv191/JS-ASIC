@@ -749,7 +749,8 @@ def test_one_let_go_tracker_per_engine(sender, role):
     releases at once any line the old one held that it doesn't. Here lane A's let-go (cpha 1)
     still waits for SCL A's next falling edge when lane B's XFER (cpha 0, ldelay 0) completes:
     both lines go then. (With one tracker per line, D1 stayed low until HALT, and D2 went in
-    B's completion cycle because another let-go was pending.)"""
+    B's completion cycle because another let-go was pending.) R1-od-lane rejects two clocked
+    lanes with OD data, so this is a hand-built image (lower() without the rules)."""
     d = Description("od", parties=("a", "b"))
     scl_a = d.line("scl_a", owner="a", idle=1)
     scl_b = d.line("scl_b", owner="a", idle=1)
@@ -762,7 +763,8 @@ def test_one_let_go_tracker_per_engine(sender, role):
     d.xfer(8, lane_b, owner=sender, prof=h, src="zero")
     d.raw_delay(60)
     d.halt()
-    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1))
+    assert {x.rule for x in lower(d).diags} == {"R1-od-lane"}
+    t = run_sys(lower(d).image, roles=(Role.P0, Role.P1))
     rec_b = xfers(t, role)[1]
     for wire in (2, 3):
         rise = [x for x in t.wire_edges[wire] if x > rec_b.tb]
@@ -790,6 +792,29 @@ def test_a_launching_edge_in_the_take_cycle_counts(ld):
     assert c.tb == x.cycle + 1                       # the edge is in the take cycle
     rise = [e for e in t.wire_edges[1] if e > x.tb]
     assert rise and rise[0] == c.tb + ld + 1, (x, c, rise)
+
+
+
+def test_a_replaced_let_go_counting_down_goes_when_the_new_one_is_taken():
+    """The old let-go (lane A, cpha 0, ldelay 15) is counting down its ldelay when lane B's
+    XFER (cpha 0, ldelay 0) completes: taking the new one releases D1 then, before its own
+    release time. Hand-built (R1-od-lane)."""
+    d = Description("od", parties=("a", "b"))
+    scl_a = d.line("scl_a", owner="a", idle=1)
+    scl_b = d.line("scl_b", owner="a", idle=1)
+    d1 = d.line("d1", "od", owner="shared", idle=1)
+    d2 = d.line("d2", "od", owner="shared", idle=1)
+    lane_a = d.lane("A", d1, clk=scl_a, cpol=1, cpha=0, ldelay=15)
+    lane_b = d.lane("B", d2, clk=scl_b, cpol=1, cpha=0, ldelay=0)
+    d.xfer(1, lane_a, owner="a", prof=d.profile("HA", nom=16, min=15, max=INF), src="zero")
+    d.xfer(1, lane_b, owner="a", prof=d.profile("HB", nom=3, min=2, max=INF), src="zero")
+    d.raw_delay(60)
+    d.halt()
+    t = run_sys(lower(d).image, roles=(Role.P0, Role.P1))
+    xa, xb = xfers(t, 0)
+    assert xb.cycle + 1 < xa.tb + 15                 # D1's own release would come later
+    d1_rise = [x for x in t.wire_edges[2] if x > xa.tb]
+    assert d1_rise and d1_rise[0] == xb.cycle + 2, (xa, xb, d1_rise)
 
 
 def test_no_let_go_without_a_drive():
@@ -945,6 +970,27 @@ def test_cond_rise_on_a_stretch_clock_waits_too():
     assert t.wire_edges[0][1:3] == [x + K for x in p_edges[1:3]]
     tbs = {tuple(r.tb for r in t.engines[i].records) for i in range(3)}
     assert len(tbs) == 1 and not any(t.engines[i].events for i in range(3))
+
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_a_stretched_cond_rise_records_its_measurement(timeout):
+    """The value of a COND RISE on a stretch clock is MEAS's: the real rise - tb (stretched by
+    K), or 0xFFFF on a TIMEOUT without ABORT (the owner's stretch-timeout path), in every role."""
+    K = 60 if timeout else 9
+
+    def body(d, scl, sda, lane, prof):
+        d.cond("fall", scl, owner="a", prof=prof)
+        d.cond("rise", scl, owner="a", prof=prof, meas="r4")
+    img = stretch_img(body=body, hi=HS + 4) if timeout else stretch_img(body=body)
+    plain = run_sys(img)
+    at = drive_cycles(plain.wire_edges[0])[1] + 1 if timeout else plain.wire_edges[0][1]
+    t = run_sys(img, glitches=[Glitch(0, at, K, 0)])
+    for i in range(3):
+        fall, rise = t.engines[i].records[:2]
+        want = 0xFFFF if timeout else rise.tb - fall.tb
+        assert rise.value == want and (timeout or want > HS), (i, fall, rise)
+    assert ("TIMEOUT" in kinds(t, 0)) == timeout
 
 
 def test_hold_1_on_a_stretch_clock_is_rejected():
