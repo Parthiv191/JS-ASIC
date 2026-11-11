@@ -78,7 +78,8 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
 
     lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle) for ln in desc.lines]
     profiles = [IDLE] + list(desc.profiles)
-    lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha)
+    lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha,
+                     data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay)
              for la in desc.lanes]
 
     # ---- pass 1: layout (pcs, labels, spans) ----
@@ -271,6 +272,15 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
             # engines tell a leading edge by the level the clock goes to (isa §4.3)
             err("S-lane", s, f"clock line {lines[clk].name!r} idles at {lines[clk].idle}, "
                              f"not at the lane's cpol {la.cpol}")
+        if s.kind == "xfer" and isinstance(ref, LaneRef) and la.data2 is not None:
+            d2 = lines[la.data2.index]
+            if clk is None:
+                err("S-lane", s, f"data2 line {d2.name!r} on an unclocked lane (duplex needs a clock)")
+            if d2.owner not in (Owner.P0, Owner.P1) or d2.owner == ln.owner:
+                err("R1-owner", s, f"duplex data2 line {d2.name!r} needs a party owner other than "
+                                   f"{ln.name!r}'s")
+            if a["n"] > 8:
+                err("S-range", s, f"duplex XFER of {a['n']} bits: dst packs both lines, so n <= 8")
         if s.kind == "xfer" and clk is None and a["abort"] and not a["check"]:
             err("S-flags", s, "abort on an unclocked xfer needs check: an out-of-window edge is its "
                               "only fatal failure")

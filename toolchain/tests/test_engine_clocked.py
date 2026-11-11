@@ -362,15 +362,145 @@ def test_t3_rejects_a_short_half_period(h):
             assert got(t, 0) == VALUE
 
 
-@pytest.mark.parametrize("what", ["data2", "stretch", "od"])
+@pytest.mark.parametrize("what", ["stretch", "od"])
 def test_part_2_features_fail_loudly(what):
     img = spi()
     lane = img.lanes[0]
-    if what == "data2":
-        img = replace(img, lanes=[replace(lane, data2=0)])
-    elif what == "stretch":
+    if what == "stretch":
         img = replace(img, lanes=[replace(lane, stretch=1)])
     else:
         img = replace(img, lines=[img.lines[0], replace(img.lines[1], kind="od")])
     with pytest.raises(NotImplementedError, match="part 2"):
         run_sys(img)
+
+
+# ---------------------------------------------------------------- duplex (isa §4.3)
+A, B = 0x4B, 0xC6  # P0's MOSI word, P1's MISO word
+
+
+def duplex_desc(cpha=0, src="r0", dst="r1", n=N, h=H, lo=H - 1, hi=INF, ppm=20000, ldelay=0,
+                miso_owner="b"):
+    """P0 owns the clock and MOSI (`data`); MISO (`data2`) belongs to `miso_owner`. Each party
+    loads its own word into r0, and the one XFER sends r0 on the line it owns."""
+    d = Description("spi2", parties=("a", "b"), tolerance_ppm=ppm)
+    sck = d.line("sck", owner="a", idle=0)
+    mosi = d.line("mosi", owner="a", idle=1)
+    miso = d.line("miso", owner=miso_owner, idle=1)
+    lane = d.lane("L", mosi, clk=sck, cpha=cpha, data2=miso, ldelay=ldelay)
+    half = d.profile("H", nom=h, min=lo, max=hi)
+    with d.only("a"):
+        d.li("r0", A)
+    with d.only("b"):
+        d.li("r0", B)
+    d.xfer(n, lane, owner="a", prof=half, src=src, dst=dst, msb_first=True)
+    d.halt()
+    return d
+
+
+def duplex(timing=False, **kw):
+    return compile_desc(duplex_desc(**kw), check_timing=timing)
+
+
+@pytest.mark.parametrize("cpha", [0, 1])
+def test_duplex_exchanges_both_words(cpha):
+    """Each data line follows the clocked rules with its own owner, and dst := (v2 << n) | v1
+    in every role: P0 sends A on MOSI and samples MISO, P1 sends B on MISO and samples MOSI."""
+    t = run_sys(duplex(cpha=cpha))
+    for i in range(3):
+        assert not t.engines[i].events and got(t, i) == B << N | A, (i, hex(got(t, i) or 0))
+    # P0 samples MISO only; P1 samples MOSI only; MON samples both
+    assert {s.line for s in t.engines[0].samples} == {2} and {s.line for s in t.engines[1].samples} == {1}
+    assert len(t.engines[2].samples) == 2 * N
+
+
+def test_duplex_pushes_in_every_engine():
+    """dst = FIFO: every engine that drives fewer than all of the step's data lines pushes the
+    packed value, here all three."""
+    t = run_sys(duplex(dst="fifo"))
+    assert [t.engines[i].rx for i in range(3)] == [[B << N | A]] * 3
+
+
+@pytest.mark.parametrize("cpha", [0, 1])
+def test_duplex_completion_matches_the_compiler(cpha):
+    """With duplex the clock owner also follows a data line (MISO), so it completes at the
+    follow offset, as analysis.completion() says."""
+    d = duplex_desc(cpha=cpha)
+    step = next(s for s in _steps(lower(d)).values() if s.clocked)
+    t = run_sys(compile_desc(d, check_timing=False))
+    for i, r in enumerate((Role.P0, Role.P1, Role.MON)):
+        (rec,) = [x for x in t.engines[i].records if x.op == "XFER"]
+        assert rec.cycle - rec.tb == completion(step, r)[0], r
+
+
+def test_duplex_underrun_on_miso():
+    """src = FIFO: P0 owns the clock and waits for its word; P1 doesn't, finds its FIFO empty,
+    sends ONES on MISO and logs UNDERRUN."""
+    t = run_sys(duplex(src="fifo"), tx={0: [A]})
+    assert kinds(t, 1) == ["UNDERRUN"] and got(t, 0) == 0xFF << N | A
+
+
+def test_duplex_t3_covers_the_miso_owner():
+    """T3's data-owner bound applies to data2's owner too: at H = 4 it isn't the clock owner."""
+    with pytest.raises(CompileError, match="T3"):
+        duplex(timing=True)
+
+
+@pytest.mark.parametrize("cpha", [0, 1])
+@pytest.mark.parametrize("slow,phase", [(None, 0), (0, 1), (1, 0), (1, 3)])
+def test_accepted_duplex_runs_clean_at_2pct(cpha, slow, phase):
+    """The rule cross-check for duplex. P1 reaches the XFER 8 cycles after tb (two ROLE_IF blocks
+    load the words), so with cpha 0 its bit 0 needs H = 12 (T3); cpha 1 takes H = 8."""
+    h = 12 if cpha == 0 else 8
+    img = duplex(cpha=cpha, h=h, lo=h - 1, timing=True)
+    on = {None: (), 0: (0,), 1: (1, 2)}[slow]
+    t = run_sys(img, clocks={i: (49, 50) for i in on}, phases={i: phase for i in on})
+    for i in range(3):
+        assert not t.engines[i].violations and got(t, i) == B << N | A, (i, t.engines[i].events)
+
+
+# ---------------------------------------------------------------- lane config rules
+def test_lane_carries_data2_and_ldelay_into_the_image():
+    img = duplex(ldelay=2)
+    (lane,) = img.lanes
+    assert (lane.data, lane.clk, lane.data2, lane.ldelay) == (1, 0, 2, 2)
+
+
+def test_data2_needs_a_clocked_lane():
+    d = Description("t", parties=("a", "b"))
+    lane = d.lane("L", d.line("d", owner="a"), data2=d.line("d2", owner="b"))
+    d.xfer(8, lane, owner="a", prof=d.profile("P", nom=16))
+    d.halt()
+    with pytest.raises(CompileError, match="S-lane"):
+        compile_desc(d, check_timing=False)
+
+
+def test_data2_owner_differs_from_data_owner():
+    with pytest.raises(CompileError, match="R1-owner"):
+        duplex(miso_owner="a")
+
+
+def test_duplex_n_at_most_8():
+    with pytest.raises(CompileError, match="S-range"):
+        duplex(n=9)
+
+
+@pytest.mark.parametrize("bad", [-1, 16])
+def test_ldelay_is_4_bits(bad):
+    with pytest.raises(ValueError, match="ldelay"):
+        duplex_desc(ldelay=bad)
+
+
+def test_t4_bounds_ldelay():
+    """T4: ldelay <= H - EDGE_LAT - 2 (when there is an ldelay): 3 is the most at H = 8."""
+    duplex(cpha=1, h=8, lo=7, ldelay=3, timing=True)
+    with pytest.raises(CompileError, match="T4"):
+        duplex(cpha=1, h=8, lo=7, ldelay=4, timing=True)
+
+
+def test_t3_counts_ldelay():
+    """T3's data-owner bound has ldelay in it: H >= EDGE_LAT + 1 + ldelay + ceil(d*2H). At H = 12
+    and 5% that allows ldelay 6, while T4 (ldelay <= H - EDGE_LAT - 2) would allow 7."""
+    duplex(h=12, lo=11, ldelay=6, ppm=50000, timing=True)
+    with pytest.raises(CompileError, match="T3") as e:
+        duplex(h=12, lo=11, ldelay=7, ppm=50000, timing=True)
+    assert "T4" not in str(e.value)
