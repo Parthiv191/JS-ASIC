@@ -65,7 +65,7 @@ Each risk names the role that decides it and the date it's decided by.
 
 | Week of | Done | Next | Risks | Gate |
 |---|---|---|---|---|
-| Nov 11 | engine untimed half (#13), bring-up layers 1–4 (#10–#12), model V3b mostly done (#29–#33), fuzzer model beats the baseline (#34), timed steps (#14), area pass (#36), FIFOs (#38) | the area decision (risk 1), co-sim (#16 merged, #25), FPGA bring-up (#46); sign-off clock 40 MHz (#45) | two engines fail sign-off (risk 1); thin timing margin | model half met; FPGA half not started |
+| Nov 11 | engine untimed half (#13), bring-up layers 1–4 (#10–#12), model V3b mostly done (#29–#33), fuzzer model beats the baseline (#34), timed steps (#14), area pass (#36), FIFOs (#38), sign-off clock 40 MHz and the engine order (#45), CI apt retries (#47) | the area decision (risk 1), co-sim (#16 merged, #25), FPGA bring-up (#46); the clocked XFER on one engine (order from #45) | two engines fail sign-off (risk 1); thin timing margin | model half met; FPGA half not started |
 | Nov 10 | v1 encoding, trace port, model v1 timing (#5–#8, #17–#19), CI filter (#9); engine stack in review (#10–#14), co-sim draft (#16) | merge #10–#14, FIFOs, co-sim | area trend, slow corner, no fuzzer model | not started; 5 weeks out |
 
 ## 5. Open asks
@@ -76,17 +76,18 @@ Each status PR refreshes the table and closes rows that are done.
 | # | Ask | From | To | Since | Status |
 |---|---|---|---|---|---|
 | A1 | Wire co-sim into CI: `make -C test/cosim` after test, `make GATES=yes` after gl_test | verification | devOps | 11-10 | Agreed; waits on #25 |
-| A2 | `.gitattributes` with `docs/design/decisions.md merge=union`, so appended rows stop conflicting | verification | devOps | 11-11 | Agreed |
 | A3 | The D9 area verdict for two engines plus FIFOs (risk 1), with a date | supervisor, verification | devOps | 11-11 | Open; Nov 18 proposed |
-| A4 | A retry or cache on CI's apt installs (the runner DNS outage of 11-11 failed every test and docs job for ~6 h) | verification | devOps | 11-11 | Agreed |
-| A5 | Engine order: the clocked XFER on one engine, then the area pass, then engine 1 | verification | devOps | 11-11 | Open (#45) |
-| A6 | `toolchain/emu/fuzz/campaign.py`: the "~0.8 s at 50 MHz" comment to 40 MHz | verification | devOps | 11-11 | Open (#45) |
 | A7 | `src/uart_tx.v` is unused but still in `info.yaml` `source_files` and `test/Makefile` | supervisor | devOps | 11-10 | Open |
-| A8 | Competitor comparison, posted to the board with sources | verification | supervisor | 11-11 | Open; by 11-12 |
 | A9 | Agree or change the dates marked * in §2 | supervisor | verification, devOps | 11-10 | Open |
 | A10 | The demo board MCU: architecture §8 and chip-spec §3 say RP2040, the brief says RP2350 (challenge Q1, working answer RP2350) | supervisor | verification | 11-10 | Open |
 | A11 | Review `docs/demo.md` (**Proposed**), which verification runs on the FPGA | supervisor | verification | 11-10 | Open |
 
-Closed: Core-scope trims for risk 1 (supervisor → verification, answered in #45); `clock_hz` to
-40 MHz and challenge.md's timing row (verification → supervisor, this PR); the LFSR draw sequence
-(devOps → verification, confirmed in #41).
+Closed:
+- A2, `.gitattributes` union merge for `decisions.md` (#47);
+- A4, apt retries in CI (#47);
+- A5, the engine order, decided in #45 (D7 follows it);
+- A6, `campaign.py`'s comment at 40 MHz (#47);
+- A8, the competitor comparison, posted to the board 11-11;
+- Core-scope trims for risk 1 (supervisor → verification, answered in #45);
+- `clock_hz` to 40 MHz and challenge.md's timing row (verification → supervisor, this PR);
+- the LFSR draw sequence (devOps → verification, confirmed in #41).
