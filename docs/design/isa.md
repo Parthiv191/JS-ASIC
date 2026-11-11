@@ -424,7 +424,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
 | `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows **or does** |
-| `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, a clocked XFER it clocks, or a step inside a lead block. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
+| `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block. MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
 
 - Completion offsets relative to the step's end `tb`:
   - COND: do 0, follow `E` (START/STOP: `E + bus_confirm + 1`).
