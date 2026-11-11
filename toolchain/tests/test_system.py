@@ -1,6 +1,6 @@
 from emu.compiler import compile_desc
 from emu.desc import Description
-from emu.isa import EDGE_LAT, Role
+from emu.isa import Role
 from emu.model.system import EngineSpec, Glitch, System
 
 
@@ -9,20 +9,37 @@ def test_edge_latency_between_engines():
     d = Description("t", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     with d.only("a"):
-        d.raw_delay(3)   # cycles 1-3 (ROLE_IF is cycle 0)
-        d.raw_set(ln, 0)  # cycle 4
+        d.raw_delay(3)   # starts at 4 (ROLE_IF at 2), takes 4 (3 rounded up to U)
+        d.raw_set(ln, 0)  # now 8
     with d.only("b"):
         d.nop()
-        d.label("wait")            # inside the block, so the poll is one cycle per check
+        d.label("wait")            # inside the block, so the poll is one check per U
         d.raw_jpin(ln, 1, "wait")
         d.mark(1)
     d.halt()
     image = compile_desc(d, check_timing=False)
     trace = System([EngineSpec(image, Role.P0), EngineSpec(image, Role.P1)]).run(100)
     marks = [e for e in trace.engines[1].events if e.kind == "MARK"]
-    # the JPIN that first sees the low runs at cycle 4 + EDGE_LAT, and MARK follows it
-    assert [m.cycle for m in marks] == [4 + EDGE_LAT + 1]
-    assert trace.wire_edges[0] == [5]  # driven in tick 4, visible on the wire from tick 5
+    # the low is on the wire from 9 and seen from 9 + SYNC_LAT = 11 = 8 + EDGE_LAT, so the first
+    # JPIN to see it is the one at 12 (own cycles are even); MARK follows at 14
+    assert [m.cycle for m in marks] == [14]
+    assert trace.wire_edges[0] == [9]  # driven in tick 8, visible on the wire from tick 9
+
+
+def test_idle_0_line_reads_the_pin_until_its_owner_drives_it():
+    """isa §2: the owner's idle drive is made in s0 and is on the wire from tick 1, so tick 0
+    reads the pull-up. Every engine of the same RUN, the owner too, sees that 1 at now = 2 and
+    the idle level from now = 3."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=0)
+    d.raw_get("r0", ln)  # now 2
+    d.raw_get("r1", ln)  # now 4
+    d.halt()
+    image = compile_desc(d, check_timing=False)
+    s = System([EngineSpec(image, Role.P0), EngineSpec(image, Role.P1)])
+    trace = s.run(100)
+    assert trace.wire_edges[0] == [1]  # 1 at tick 0, the owner's 0 from tick 1
+    assert [e.regs[:2] for e in s.engines] == [[1, 0], [1, 0]]
 
 
 def test_clock_enable_ratio():
@@ -82,7 +99,7 @@ def test_host_push_is_delivered_at_tick():
     sys_ = System([EngineSpec(raw_image(b), Role.P0)])
     sys_.host_push(0, [0x41], at_tick=50)
     trace = sys_.run(10_000)
-    assert trace.wire_edges[0] == [52]  # pop in tick 50, drive in tick 51, visible at 52
+    assert trace.wire_edges[0] == [53]  # pop at 50 (an own cycle), drive at 52, visible at 53
 
 
 def test_glitch_overrides_wire():
@@ -94,7 +111,7 @@ def test_glitch_overrides_wire():
 def test_contention_reported():
     image = raw_image(lambda d, ln: d.raw_delay(100))
     trace = System([EngineSpec(image, Role.P0), EngineSpec(image, Role.P0)]).run(5)
-    assert trace.contention and trace.contention[0] == (0, 0)
+    assert trace.contention and trace.contention[0] == (1, 0)  # the s0 drives land at tick 1
 
 
 def test_quiescence_waits_for_an_edge_in_flight():
@@ -113,10 +130,10 @@ def test_quiescence_waits_for_an_edge_in_flight():
 
 
 def test_sub_cycle_phase_follower_sees_owner_edge_at_cycle_0():
-    """Engines leave reset together; a follower whose clock is a fraction of a cycle behind
-    starts after the owner's first drive is on the wire. Its synchronizer starts from the
-    bus's reset state (the tick-0 wire), as the RTL's input flops reset to the idle level,
-    so the edge is still seen."""
+    """A follower whose clock is a fraction of a cycle behind sees the owner's edge a cycle sooner.
+    The owner's COND acts at its now = 2 (tick 8), on the wire from tick 9; the follower samples it
+    at its now = 2 (tick 9) and detects it at 4, so e = 4 - EDGE_LAT = 1, one cycle before the
+    owner's tb = 2: the QUANT the windows allow."""
     d = Description("t", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")
@@ -128,4 +145,82 @@ def test_sub_cycle_phase_follower_sees_owner_edge_at_cycle_0():
                     EngineSpec(image, Role.P1, clock=(1, 4), phase=1)]).run(1000)
     assert [e.kind for e in trace.engines[1].events] == ["MARK"]
     (rec,) = trace.engines[1].records
-    assert rec.tb == -1  # seen a cycle sooner than at phase 0: the QUANT the windows allow
+    assert (rec.cycle, rec.tb) == (4, 1)
+    assert trace.engines[0].records[0].tb == 2
+
+
+def _pop_then_halt():
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    d.pop("r0")
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+def test_pop_stall_forever_is_quiescent():
+    """A POP that never gets data waits on the host: the run must still end as quiescent, so the
+    idle flag holds across the odd cycles POP skips (isa §4.0 stalls). Two engines one clk apart,
+    as on chip, so that on every tick one of them is in a skipped cycle."""
+    img = _pop_then_halt()
+    trace = System([EngineSpec(img, Role.P0), EngineSpec(img, Role.P1, phase=1)]).run(1000)
+    assert trace.quiescent and trace.ticks < 100
+    assert [et.starts for et in trace.engines] == [[(0, 2)], [(0, 2)]]
+
+
+def test_phase_1_engine_is_shifted_one_tick():
+    """Engine 1 runs one clk behind engine 0 (isa §4.0). Parity is per-engine `now`, so its trace in
+    engine time is identical and its cycles land one tick later."""
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    d.li("r0", 1)
+    d.raw_delay(3)
+    d.halt()
+    image = compile_desc(d, check_timing=False)
+    t0 = System([EngineSpec(image, Role.P0, phase=0)]).run(100, stop_when_quiescent=False)
+    t1 = System([EngineSpec(image, Role.P0, phase=1)]).run(100, stop_when_quiescent=False)
+    assert t0.engines[0].starts == t1.engines[0].starts == [(0, 2), (1, 4), (2, 8)]
+    assert t1.engines[0].cycle_tick[:9] == [c + 1 for c in t0.engines[0].cycle_tick[:9]]
+
+
+def _pop_loop(n):
+    """P0 pops n words, pushing each into its RX FIFO."""
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    for _ in range(n):
+        d.pop("r0")
+        d.push("r0")
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+def test_host_keeps_the_tx_fifo_at_most_4_deep():
+    """isa §1: TX holds 4 words. The model's host writes only while there is room, so a backlog
+    of 8 reaches the engine in order as POP frees space."""
+    s = System([EngineSpec(_pop_loop(8), Role.P0)])
+    s.host_push(0, list(range(8)))
+    s.run(1, stop_when_quiescent=False)
+    assert list(s.engines[0].tx) == [0, 1, 2, 3]
+    s2 = System([EngineSpec(_pop_loop(8), Role.P0)])
+    s2.host_push(0, list(range(8)))
+    t = s2.run(1000)
+    assert t.engines[0].rx == list(range(8)) and t.engines[0].tx_left == 0 and not t.engines[0].events
+
+
+def test_without_host_reads_the_rx_fifo_overflows_after_8():
+    """With host_reads_rx=False the host reads RX only after the run (as co-sim's host does):
+    the 9th word is dropped with OVERFLOW. By default the host drains RX every tick."""
+    t = System([EngineSpec(_pop_loop(9), Role.P0)], host_reads_rx=False)
+    t.host_push(0, list(range(9)))
+    tr = t.run(1000)
+    assert tr.engines[0].rx == list(range(8)) and [e.kind for e in tr.engines[0].events] == ["OVERFLOW"]
+    s = System([EngineSpec(_pop_loop(9), Role.P0)])
+    s.host_push(0, list(range(9)))
+    tr = s.run(1000)
+    assert tr.engines[0].rx == list(range(9)) and not tr.engines[0].events
+
+
+def test_tx_left_counts_words_the_host_never_wrote():
+    """tx_left: words the engine never popped, also those the host still had to write."""
+    s = System([EngineSpec(_pop_loop(0), Role.P0)])
+    s.host_push(0, [1, 2], at_tick=5000)
+    assert s.run(1000).engines[0].tx_left == 2

@@ -199,3 +199,16 @@ def test_role_if_operand_roundtrip():
     assert unpack_role_if(role_if_operand(mask, 300)) == (0b110, 300)
     with pytest.raises(ValueError):
         role_if_operand(mask, 512)
+
+
+@pytest.mark.parametrize("ins", [
+    Instr(Op.ALU, sub=AluOp.LT), Instr(Op.BR, sub=BrCond.ROLE), Instr(Op.RAW, sub=RawOp.EVT),
+    Instr(Op.CRC, sub=CrcOp.GET), Instr(Op.FZ, sub=FzOp.END), Instr(Op.PROF, sub=7),
+    Instr(Op.HOLD, owner=Owner.SHARED, line=7, prof=7),
+    Instr(Op.XFER, owner=Owner.P1, line=3, prof=7, operand=xfer_operand(16, Src.R7, Dst.R7)),
+    Instr(Op.XFER, owner=Owner.P0, operand=xfer_operand(1, Src.FZ, Dst.FIFO)),
+])
+def test_highest_defined_codes_are_not_reserved(ins):
+    """The other side of test_reserved_code_halts_as_illegal's boundary (isa §3): the highest
+    defined sub, src and dst codes and the last built line, lane and profile run normally."""
+    assert isa.reserved(ins) is None

@@ -6,6 +6,10 @@ on:
     branches: none
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   fpga:
     runs-on: ubuntu-24.04
