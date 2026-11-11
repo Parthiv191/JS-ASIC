@@ -9,21 +9,44 @@ You can also include images in this folder and reference them in the markdown. E
 
 ## How it works
 
-Bring-up design: a fixed UART transmitter (115200 baud, 8N1 at 50 MHz) and a trial harness for the protocol emulator's program memory, a 256 x 32 SRAM built from two IHP `RM_IHPSG13_1P_256x16` macros. Both will be replaced by the protocol emulator.
+A programmable emulator for serial buses (UART, SPI, I2C), built for debugging and reverse
+engineering. Each protocol is a short program for a timing engine, written once as an
+owner-labelled description. The same program runs in any role: controller, target or monitor.
+
+- **Two identical engines** share a 512-instruction program SRAM (engine 0 fetches on even
+  cycles, engine 1 on odd). Each engine has 8 registers and TX/RX FIFOs, and can play any party
+  on the bus or monitor it.
+- **Protocol pins** are `uio[7:0]` (IO0–IO7). Lines can be push-pull or open-drain; every output
+  comes straight from a flop.
+- **A host** (the demo board's microcontroller, or a PC through an FPGA bridge) loads the program
+  and tables over SPI, starts the engines and moves data through the FIFOs.
+- **Debug:** TESTMODE pad test, LOOPBACK (the two engines talk on-chip), GPIO override, halt and
+  register readback.
+- **Planned, behind build parameters:** an on-chip learning bus fuzzer, a capture log with
+  timing, standalone boot from SPI flash with a text report on `uo[6]`.
+
+Full design: `docs/design/` in the repository (chip spec, architecture, ISA).
 
 ## How to test
 
-UART: put a byte on ui_in[7:0], then raise uio_in[0] to send it. The byte comes out on uo_out[0] (TX). uo_out[1] is high while sending.
+**Pad test (no host needed).** Hold `ui[7]` high through reset to enter TESTMODE. With `ui[6]`
+high, `uio` outputs follow `ui_in` two clocks later; with `ui[6]` low, `uo_out` follows `uio_in`.
 
-Memory: hold a byte on ui_in[7:0] and raise one strobe at a time (each needs about 3 clock cycles high and low):
+**Host SPI.** Mode 0, MSB first, SCK at most clk/8, on `ui[0]` SCK, `ui[1]` MOSI, `ui[2]` CS_N and
+`uo[0]` MISO. A frame is a command byte (bit 7 = read), a 16-bit address, then data; a read
+returns one dummy byte first.
 
-- uio_in[1] ADDR sets the address.
-- uio_in[2] DATA shifts the byte into the 32-bit write word (send the most significant byte first).
-- uio_in[3] WRITE writes the word.
-- uio_in[4] READ reads the word at the address.
-
-While uio_in[6] (VIEW) is high, uo_out shows byte ui_in[1:0] of the last word read. While uio_in[5] (CHASE) is high, the memory reads the address held in the low byte of its last output, once per clock, which walks a linked list stored in memory.
+1. Read address 0x0000: the ID is 0x5E.
+2. Write any byte to SCRATCH (0x0002) and read it back.
+3. Load a program into 0x1000 and the tables into 0x0400 (the toolchain's `Image.host_writes()`
+   produces the bytes), set ROLE at 0x2000, then write 1 to RUN (0x0004).
+4. Watch `uo[7]` ACT go high while the engine runs, and `uo[2]` ERR for any violation.
 
 ## External hardware
 
-A USB-UART adapter on uo_out[0] to read the bytes.
+- A host that speaks SPI mode 0: the TT demo board's microcontroller, or any microcontroller or
+  FPGA.
+- Pull-up resistors on open-drain protocol lines: 2.2–4.7 kΩ for I2C. The demo board's I/O is 3.3 V.
+- The device under test on `uio`: a sensor, EEPROM, SPI flash or microcontroller.
+- Optional, for standalone mode (planned): an SPI flash on `ui[3]` and `uo[3..5]`, and a
+  USB-UART adapter on `uo[6]` REPORT (115200 baud).
