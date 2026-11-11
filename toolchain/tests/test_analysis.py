@@ -369,7 +369,8 @@ def test_t5_rejects_an_abort_target_that_starts_with_a_hold():
 
 
 def test_t5_rejects_an_abort_target_whose_first_cond_the_aborting_role_owns():
-    """b aborts on a's HOLD; at the target b would drive its own edge into a's frame."""
+    """b aborts on a's HOLD; at the target b would drive its own edge into a's frame. Only a COND
+    START/STOP the aborting role does is accepted (isa §6 T5-abort): on a bus the others exit on it."""
     d = Description("t", parties=("a", "b"))
     la = d.line("la", owner="a", idle=1)
     lb = d.line("lb", owner="b", idle=1)

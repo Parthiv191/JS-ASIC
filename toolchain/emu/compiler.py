@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from .desc import MON, SHARED, Description, LaneRef, LineRef, Step
 from .image import IDLE, BusCfg, Image, LaneCfg, LineCfg
 from .isa import (
-    F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, NUM_LANES, NUM_LINES, NUM_PROFILES, PROG_DEPTH,
+    F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, NUM_LANES, NUM_LINES, NUM_PROFILES, PROG_DEPTH, TIMED_OPS,
     AluOp, BrCond, BusKind, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
-    role_if_operand, role_mask, xfer_operand,
+    role_if_operand, role_mask, unpack_cond, unpack_xfer, xfer_operand,
 )
 
 TIMED = ("cond", "hold", "xfer")
@@ -47,6 +47,7 @@ class Span:
     start: int
     end: int
     roles: frozenset[Role]
+    lead: bool = False  # a lead block (isa §5 R3-lead): one party, may hold timed steps
 
 
 @dataclass
@@ -94,7 +95,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
             i += 1
             continue
         j = i
-        while j < len(steps) and steps[j].block == s.block:
+        while j < len(steps) and steps[j].block == s.block and steps[j].lead == s.lead:
             j += 1
         layout.append(("role_if", s.block, j - i))
         layout.extend(("step", t, t.index) for t in steps[i:j])
@@ -112,7 +113,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
             for lb in first.labels:  # a label on a block's first step names the block
                 labels[lb] = pc
             roles = frozenset(_role(desc, r) for r in obj)
-            spans.append(Span(pc, pc + 1, pc + 1 + extra, roles))
+            spans.append(Span(pc, pc + 1, pc + 1 + extra, roles, lead=first.lead))
             pc_step.append(first.index)
             pc += 1
             for _, t, _ in layout[k + 1:k + 1 + extra]:
@@ -149,6 +150,17 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
             lanes.append(cfg)
         return lanes.index(cfg)
 
+    abort_pc = 0
+    if desc.abort_label is not None:
+        anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
+        if desc.abort_label in labels:
+            abort_pc = labels[desc.abort_label]
+            if span_of(abort_pc) is not None:
+                err("R3-escape", anchor, f"abort target {desc.abort_label!r} is inside a role block; "
+                                         f"an abort would skip the block's role check")
+        else:
+            err("S-label", anchor, f"unknown abort label {desc.abort_label!r}")
+
     # ---- pass 2: rules + instructions ----
     instrs: list[Instr] = []
     pc = 0
@@ -173,8 +185,10 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
             here, there = span_of(pc), span_of(t)
             # here.end is the block's exit, where every role resumes, so `<=` allows an early exit.
             # With adjacent blocks it is the next block's ROLE_IF, so that role check still runs.
-            if here is not None and not (here.start <= t <= here.end or t == here.role_if_pc):
-                err("R3-escape", s, "branch leaves its role block")
+            to_abort = here is not None and here.lead and desc.abort_label is not None and t == abort_pc
+            if here is not None and not (here.start <= t <= here.end or t == here.role_if_pc or to_abort):
+                err("R3-escape", s, "branch leaves its role block (only to its exit, or from a lead "
+                                    "block to abort_pc)")
             if here is None and there is not None:
                 err("R3-escape", s, "branch enters a role block from outside")
             if here is not None and there is not None and here != there:
@@ -188,6 +202,9 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                                f"{len(lanes)} lanes (max {NUM_LANES}), {len(lines)} lines (max {NUM_LINES})")
     if len(instrs) > prog_depth:
         err("S-range", desc.steps[-1], f"program has {len(instrs)} words (max {prog_depth})")
+    for sp in spans:
+        if sp.lead:
+            _check_lead(desc, sp, instrs, pc_step, abort_pc, profiles, lines, lanes, err)
     sel_master = (lines[desc.bus_cfg[1].index].owner
                   if desc.bus_cfg is not None and desc.bus_cfg[0] == "select" else None)
     for ln in lines:
@@ -199,17 +216,6 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
         if ln.gated and ln.owner == sel_master:
             err("S-line", anchor, f"gated line {ln.name!r} is owned by the SELECT master, which runs no "
                                   f"detector, so no STOP would release it")
-
-    abort_pc = 0
-    if desc.abort_label is not None:
-        anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
-        if desc.abort_label in labels:
-            abort_pc = labels[desc.abort_label]
-            if span_of(abort_pc) is not None:
-                err("R3-escape", anchor, f"abort target {desc.abort_label!r} is inside a role block; "
-                                         f"an abort would skip the block's role check")
-        else:
-            err("S-label", anchor, f"unknown abort label {desc.abort_label!r}")
 
     words = []
     for ins in instrs:
@@ -275,8 +281,8 @@ def compile_desc(desc: Description, *, check_timing: bool = True,
 def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err) -> None:
     a = s.args
     if s.kind in TIMED:
-        if s.block is not None:
-            err("R3-timed-in-role", s, f"{s.kind} inside a role block")
+        if s.block is not None and not s.lead:
+            err("R3-timed-in-role", s, f"{s.kind} inside a role block (only a lead block may hold timed steps)")
         if s.owner is None:
             err("R1-owner", s, "timed step without an owner")
             return
@@ -349,6 +355,148 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
             if not allowed:
                 err("R3-raw-drive", s, f"raw drive of push-pull line {ln.name!r} outside an "
                                        f"only({_name(desc, ln.owner)!r}) block")
+
+
+def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_pc: int,
+                profiles, lines: list[LineCfg], lanes: list[LaneCfg], err) -> None:
+    """R3-lead (isa §5). The others skip the block and follow its fall-through successor S
+    speculatively, so S has ABORT, no CHK and max INF. The leader leaves by the fall-through exit
+    with no timed step on the way, or runs a bus COND START/STOP and branches to abort_pc. Every
+    timed step in the block is the leader's (owned, or on a lane it clocks), except the bus COND,
+    which the master line's owner owns (R1-bus).
+
+    When S's events come from the leader (it clocks S, or owns S), the others wait in S for the
+    leader's bus COND, so an exit path may not complete S for them first: fewer clock edges than
+    S needs, no edge on S's COND line, and a START successor only behind a STOP exit whose way
+    back from abort_pc reaches S before any START. A COND STOP, HOLD or unclocked XFER of the
+    leader's completes without it, so it can't be S."""
+    from .analysis import successors  # analysis imports this module
+
+    (leader,) = sp.roles
+    at = lambda pc: desc.steps[pc_step[pc]]  # noqa: E731
+    apc = abort_pc if desc.abort_label is not None else None
+    bus_a = desc.bus_cfg[1].index if desc.bus_cfg is not None else None
+
+    def mine(owner) -> bool:
+        return int(owner) == int(leader)
+
+    def drives(ins: Instr, line: int) -> bool:
+        """The leader drives `line` in this timed step."""
+        if ins.op in (Op.COND, Op.HOLD):
+            return ins.line == line and (mine(ins.owner) or ins.owner == Owner.SHARED)
+        la = lanes[ins.line] if ins.line < len(lanes) else None
+        return la is not None and (
+            (la.data == line and (mine(ins.owner) or ins.owner == Owner.SHARED))
+            or (la.data2 == line and mine(lines[line].owner))
+            or (la.clk == line and mine(lines[line].owner)))
+
+    def edges_on(ins: Instr, line: int) -> int:
+        if ins.op == Op.XFER and ins.line < len(lanes) and lanes[ins.line].clk == line:
+            return 2 * unpack_xfer(ins.operand)[0] if mine(lines[line].owner) else 0
+        return 1 if drives(ins, line) else 0
+
+    succ = instrs[sp.end] if sp.end < len(instrs) else None
+    kind, watch, need = None, None, 0  # what S waits for, when its events come from the leader
+    if succ is None or succ.op not in TIMED_OPS:
+        err("R3-lead", at(sp.role_if_pc), "a lead block's fall-through successor must be a timed step: "
+                                          "the others follow it while the leader decides")
+        succ = None
+    elif not succ.flags & F_ABORT or succ.flags & F_CHK or profiles[succ.prof].max != INF:
+        err("R3-lead", at(sp.end), "the step after a lead block is followed speculatively: it needs "
+                                   "abort, no check and a profile with max INF")
+    if succ is not None:
+        clocked = succ.op == Op.XFER and succ.line < len(lanes) and lanes[succ.line].clk is not None
+        if clocked:
+            if mine(lines[lanes[succ.line].clk].owner):
+                kind, watch, need = "clock", lanes[succ.line].clk, 2 * unpack_xfer(succ.operand)[0]
+        elif mine(succ.owner):
+            ck = unpack_cond(succ.operand)[0] if succ.op == Op.COND else None
+            if ck in (CondKind.FALL, CondKind.RISE) and succ.line != bus_a:
+                kind, watch, need = "line", succ.line, 1
+            elif ck == CondKind.START:
+                kind = "start"
+            else:
+                err("R3-lead", at(sp.end), "the step after a lead block must wait for the leader: a "
+                                           "COND STOP, HOLD, unclocked XFER, or COND on the bus line "
+                                           "would complete before the leader's exit reaches its bus COND")
+
+    def back_to_start_ok() -> bool:
+        """From abort_pc the leader reaches S before any COND START of its own."""
+        seen, stack = set(), [apc]
+        while stack:
+            pc = stack.pop()
+            if pc in seen or pc >= len(instrs):
+                continue
+            seen.add(pc)
+            if pc == sp.end:
+                continue
+            ins = instrs[pc]
+            if ins.op == Op.COND and unpack_cond(ins.operand)[0] == CondKind.START:
+                return False
+            stack.extend(successors(instrs, pc, leader))
+        return True
+
+    def leaders(ins: Instr) -> bool:
+        if ins.owner in (Owner.P0, Owner.P1) and mine(ins.owner):
+            return True
+        if ins.op == Op.XFER and ins.line < len(lanes):
+            clk = lanes[ins.line].clk
+            return clk is not None and mine(lines[clk].owner)
+        return False
+
+    seen: set[tuple] = set()
+    # (pc, a timed step so far, the exit's bus COND kind so far, edges the leader made on S's watch)
+    stack: list[tuple] = [(sp.start, False, None, 0)]
+    while stack:
+        state = stack.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        pc, timed, bus, edges = state
+        if apc is not None and pc == apc and bus is not None:  # the exit to abort_pc, checked first
+            if kind == "start" and (bus == CondKind.START or not back_to_start_ok()):
+                err("R3-lead", at(sp.end), "a START successor waits through the exit's STOP only: the "
+                                           "exit's bus COND must be a STOP, and from abort_pc the leader "
+                                           "must reach this START before any other")
+            continue
+        if pc == sp.end:
+            if timed:
+                err("R3-lead", at(sp.end), "a timed step lies on a path to the lead block's fall-through "
+                                           "exit; the others are already in the next step")
+            continue
+        if not sp.role_if_pc <= pc < sp.end:
+            if pc == apc:
+                err("R3-lead", at(sp.role_if_pc), "a lead block's exit to abort_pc must run a bus COND "
+                                                  "START/STOP first, so the others leave their step too")
+            continue  # any other target is R3-escape's
+        ins = instrs[pc]
+        if ins.op == Op.HALT:
+            err("R3-lead", at(pc), "a lead block leaves by its exit, or by a bus COND START/STOP and a "
+                                   "branch to abort_pc; not by HALT")
+            continue
+        if ins.op in TIMED_OPS:
+            ck = unpack_cond(ins.operand)[0] if ins.op == Op.COND else None
+            if bus is not None:
+                err("R3-lead", at(pc), "nothing timed between the exit's bus COND and its branch to "
+                                       "abort_pc: the others have already left")
+                continue
+            if ck in (CondKind.START, CondKind.STOP):
+                bus = ck
+                if kind == "clock" and watch == bus_a:
+                    edges += 1
+            else:
+                if not leaders(ins):
+                    err("R3-lead", at(pc), f"a timed step in a lead block is the leader's: owned by "
+                                           f"{_name(desc, Owner(int(leader)))!r}, or on a lane it clocks")
+                if kind in ("clock", "line"):
+                    edges = min(need, edges + edges_on(ins, watch))
+                    if edges >= need:
+                        err("R3-lead", at(pc), "this exit path completes the lead block's successor for "
+                                               "the others before its bus COND (as many edges as it waits "
+                                               "for), so they would run on past it")
+                        continue
+            timed = True
+        stack.extend((nxt, timed, bus, edges) for nxt in successors(instrs, pc, leader))
 
 
 def _name(desc, owner: Owner) -> str:
