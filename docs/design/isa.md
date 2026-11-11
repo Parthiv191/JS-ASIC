@@ -10,9 +10,8 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 **Model status:** the encoding, the image, fetch and issue timing (§4.0), reserved codes (§3),
 `BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
-(§4.1) and clocked XFER on push-pull data lines, duplex included (§4.3, with CLK_PHASE, TIMEOUT
-and UNDERRUN), are v1. Still to come: OD data and stretching on clocked lanes, COND START/STOP and
-MEAS. The model keeps fractional clocks only to stand in for external devices.
+(§4.1) and clocked XFER, duplex and OD data with the let-go included (§4.3, with CLK_PHASE,
+TIMEOUT and UNDERRUN), are v1. Still to come: clock stretching, COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -252,7 +251,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 ### 4.3 `XFER n, lane, owner, src, dst, msb, prof`
 - **`dst` = the wire value, in every role.** The owner reads its own bits back at the point a
   follower in its position samples them:
-  - on an OD line, someone else's 0 shows up, and the owner completes on its last readback;
+  - on an OD line, someone else's 0 shows up, and the owner completes on its last readback. On a
+    clocked lane the readback is at the capture points: the clock owner's at capture + EDGE_LAT,
+    a clock follower's when it sees the capture edge;
   - on a PP line it equals `src`, and the owner completes on its last bit.
   - Readback isn't a follower's sample: it adds no `tr_sample` (architecture §5).
 - `dst = FIFO` pushes only in follow mode. The owner takes `src` at step start.
@@ -303,9 +304,12 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - `dst := (v2 << n) | v1`, so `n ≤ 8`.
   - A `dst = FIFO` push sends that same packed value, in every engine that drives fewer than all
     of the step's data lines.
-- **OD let-go.** After an XFER in which it drove an OD data line `D`:
-  - the engine keeps the last bit until the lane's next leading clock edge as it sees it (the
-    clock owner: the cycle it drives that edge; others: the cycle they detect it);
+- **OD let-go.** After a clocked XFER in which it drove an OD data line `D` (also one that timed
+  out after driving it):
+  - the engine keeps the last bit until the lane's next launching edge as it sees it (the clock
+    owner: the cycle it drives that edge; others: the cycle they detect it). That is the next
+    leading edge with `cpha = 1`. With `cpha = 0` it is a trailing edge: for an XFER that ran to
+    the end, its own last edge, because the next leading edge captures the next step's bit 0;
   - it releases `D` `ldelay` cycles after that edge (same rule as launch), unless it launches a
     new bit on `D` then;
   - any explicit drive of `D` cancels the pending release;
@@ -407,7 +411,7 @@ host clears it.
 | `R1-owner` | A timed step's owner field is the owner of its data line: COND/HOLD's line, XFER's lane `data`. It is a party, or `shared` on OD; on a SHARED OD line the owner field may be either party or `shared`. The clock and `data2` drivers come from their line owners. A lane's clock has a party owner. A duplex step has a party owner, and `data2` belongs to the other party. |
 | `R1-shared` | `shared` only on OD lines |
 | `R1-bus` | COND START/STOP is owned by the master line's owner (I2C: the `bus_b` owner; SELECT: the `bus_a` owner). It is follow-only for SE0. |
-| `R2-branch` | Outside role blocks, `BR Z/NZ` tests only clean registers: written by `XFER dst`, `LI`, `ALU` on clean inputs, or `CRC GET` of a clean state. Taints: `POP`, `RAW GET/EVT`, `COND meas`, any write in a role block, and every register at program entry (until written; §1) and at `abort_pc`. The CRC state is a ninth taint slot; it's a forward dataflow analysis. **Inside a role block any branch is allowed.** `RAW JPIN` and `BR TO` are only legal in role blocks. `BR ROLE` is a role split like `ROLE_IF`: the analysis follows each role's path, and `R3-escape` applies to its target. |
+| `R2-branch` | Outside role blocks, `BR Z/NZ` tests only clean registers: written by `XFER dst`, `LI`, `ALU` on clean inputs, or `CRC GET` of a clean state. Taints: `POP`, `RAW GET/EVT`, `COND meas`, `XFER dst` on a lane with an OD data line (`data` or `data2`; the wire can differ from what was sent), any write in a role block, and every register at program entry (until written; §1) and at `abort_pc`. The CRC state is a ninth taint slot; it's a forward dataflow analysis. **Inside a role block any branch is allowed.** `RAW JPIN` and `BR TO` are only legal in role blocks. `BR ROLE` is a role split like `ROLE_IF`: the analysis follows each role's path, and `R3-escape` applies to its target. |
 | `R3-timed-in-role` | Role blocks contain no timed steps, except lead blocks |
 | `R3-lead` | `lead(party)`: one party. Every timed step in it is owned by that party, or uses a lane whose clock that party owns. It leaves either by its fall-through exit (the leader carries on with the next step; no timed step may lie on that path) or by a path that runs a bus COND START/STOP and then branches to `abort_pc`. The block's CFG fall-through successor is a timed step with ABORT, which the other roles follow speculatively. It may not have CHK, and its profile `max` must be INF. |
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
@@ -432,7 +436,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 |---|---|
 | `T1-sample` | Follower sample of slot `k`: `ceil(d·(A + (k+1)·P)) + QUANT + ISSUE < P//2` |
 | `T2-window` | A bounded COND, and the accumulated CHK windows: `min ≤ nom − ceil(d·(A + nom)) − QUANT` (COND: only if `min > 0`) and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. The anchor rule: a CHK unclocked XFER at `A = 0` is rejected; drop `check` or put a timed step first. |
-| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner (of `data` or `data2`) that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. A bounded clock follower: the first edge, seen at `F = (cpha 0: max(0, L_clk) + H; cpha 1: max(H, L_clk)) + EDGE_LAT`, needs `F + ceil(d·(A + H)) − L_lo ≤ max + QUANT`, where `L_clk` is the clock owner's latest start and `L_lo` the follower's earliest; and `H + ceil(d·H) ≤ max + QUANT`. |
+| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner (of `data` or `data2`), or a party that may drive an OD data line of the lane (it can hold a let-go into this step), that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. A bounded clock follower: the first edge, seen at `F = (cpha 0: max(0, L_clk) + H; cpha 1: max(H, L_clk)) + EDGE_LAT`, needs `F + ceil(d·(A + H)) − L_lo ≤ max + QUANT`, where `L_clk` is the clock owner's latest start and `L_lo` the follower's earliest; and `H + ceil(d·H) ≤ max + QUANT`. |
 | `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. Stretch lanes: `H ≥ EDGE_LAT + 2`. A lane with an `ldelay`: `ldelay ≤ H − EDGE_LAT − 2`. |
 | `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample) |
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
