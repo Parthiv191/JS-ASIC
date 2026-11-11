@@ -1,5 +1,9 @@
 name: toolchain
 on: [push, workflow_dispatch]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   pytest:
     runs-on: ubuntu-24.04

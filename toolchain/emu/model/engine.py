@@ -12,12 +12,19 @@ from typing import Iterator
 
 from ..image import Image
 from ..isa import (
-    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, AluOp,
-    BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, li_imm, reg_of, unpack_cond, unpack_role_if,
-    unpack_xfer,
+    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, MEAS_MAX, NUM_REGS, QUANT, REG_MASK, RX_DEPTH,
+    SYNC_LAT,
+    TIME_CLAMP, U, AluOp,
+    BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved, unpack_cond,
+    unpack_role_if, unpack_xfer,
 )
 
-VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE"})
+VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE", "OVERFLOW", "UNDERRUN"})
+SATURATING = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "EDGE", "CLK_PHASE"})  # measured in cycles
+# the sticky event register's bits (isa §4.1); 0 START and 1 STOP come with the bus detector
+EVT_BIT = {"TIMEOUT": 1 << 2, "LEVEL": 1 << 3, "EDGE": 1 << 3, "CLK_PHASE": 1 << 3,
+           "OVERFLOW": 1 << 4, "UNDERRUN": 1 << 5}
+EVT_MASK = 0x3F
 BIG = 1 << 40  # upper edge of an accumulated window that contains an unbounded step
 
 
@@ -55,63 +62,74 @@ class Sample:
 
 @dataclass(frozen=True)
 class Branch:
+    """A conditional decision: BR Z/NZ/TO/ROLE, RAW JPIN or ROLE_IF (architecture §5 `tr_br`).
+    `taken`: the pc left the fall-through path (for ROLE_IF, the block was skipped)."""
     pc: int
     taken: bool
+    cycle: int
 
 
 Gen = Iterator[None]
 
 
+def _decode(w: int) -> Instr | None:
+    try:
+        return decode(w)
+    except ValueError:  # a free opcode (20-31): ILLEGAL when it runs
+        return None
+
+
 class Engine:
-    def __init__(self, image: Image, role: Role, name: str = ""):
+    def __init__(self, image: Image, role: Role, name: str = "", regs: list[int] | None = None,
+                 evt: int = 0):
         self.image = image
         self.role = Role(role)
         self.name = name or self.role.name
-        self.instrs: list[Instr] = image.instrs()
+        self.instrs: list[Instr | None] = [_decode(w) for w in image.words]  # None: a free opcode
         self.lines = image.lines
         self.pc = 0
-        self.regs = [0] * NUM_REGS
+        # r0-r7 keep their values across RUN; reset clears them (isa §1)
+        self.regs = [0] * NUM_REGS if regs is None else [v & REG_MASK for v in regs]
+        if len(self.regs) != NUM_REGS:
+            raise ValueError(f"need {NUM_REGS} registers, got {len(self.regs)}")
+        self.evt = evt & EVT_MASK  # sticky; survives RUN like r0-r7 (reset and SOFT_RESET clear it)
         self.tb = 0
         self.to = False            # timeout flag (isa-v0 §4)
         self.anchor = 0            # cycle of the last re-anchoring event (COND, clocked XFER, abort)
         self.acc = (0, 0, 0)       # accumulated (nom, min, max) of HOLD/XFER bits since the anchor
         self.now = -1
-        self.drv: list[int | None] = [
-            ln.idle if ln.kind == "pp" and self.role != Role.MON and int(ln.owner) == int(self.role) else None
-            for ln in self.lines
-        ]
-        self.inp: list[int] | None = None
+        self.drv: list[int | None] = [None] * len(self.lines)  # before RUN every pin is an input
+        # The synchronizer is preloaded with each line's idle level when RUN rises (isa §4.1):
+        # the engine sees idle at now 0-1 and the wire from now 2 (as it was at now 0).
+        idle = [ln.idle for ln in self.lines]
+        self._pipe: list[list[int]] = [idle] * SYNC_LAT
+        self.inp: list[int] = idle
         self.prev_inp: list[int] | None = None
-        self._pipe: list[list[int]] | None = None
         self.tx: deque[int] = deque()
         self.rx: list[int] = []
         self.records: list[StepRecord] = []
         self.events: list[Event] = []
         self.samples: list[Sample] = []
         self.branches: list[Branch] = []
+        self.starts: list[tuple[int, int]] = []  # (pc, now) per instruction start: the tr_issue trace
+        self._abort_at: int | None = None        # decision cycle of an abort, until abort_pc starts
+        self._stalled = False                    # POP waited since the last timed step (isa §4.1)
         self.halted = False
         self.halt_cycle: int | None = None
         self.idle = False
         self._proc = self._run()
 
     # ------------------------------------------------------------------ clocking
-    def preload(self, wire: list[int]) -> None:
-        """Start the synchronizer from the bus's reset state, as the RTL's input flops reset to
-        the idle level. An edge made before this engine's first cycle (a sub-cycle phase
-        offset) is then still seen."""
-        w = list(wire[: len(self.lines)])
-        self._pipe = [w] * SYNC_LAT
-        self.inp = w
-
     def cycle(self, wire: list[int]) -> None:
         """Advance one engine cycle with the current (unsynchronized) wire values."""
         if self.halted:
             return
         w = list(wire[: len(self.lines)])
-        if self._pipe is None:  # preload: as if the wire had always looked like this
-            self._pipe = [w] * SYNC_LAT
-            self.inp = w
         self.now += 1
+        # 24-bit time (isa §4.1): tb and the anchor never trail now by more than 2^22
+        floor = self.now - TIME_CLAMP
+        self.tb = max(self.tb, floor)
+        self.anchor = max(self.anchor, floor)
         self._pipe.insert(0, w)
         self.prev_inp = self.inp
         self.inp = self._pipe.pop()
@@ -131,7 +149,26 @@ class Engine:
     def does(self, ins: Instr) -> bool:
         return self.role != Role.MON and (ins.owner == Owner.SHARED or int(ins.owner) == int(self.role))
 
+    def _step_start(self, ins: Instr) -> None:
+        """A timed step starts: clear `to`, and end any stall. If the owner stalled since its last
+        timed step, an owned step starts on its own time: tb := max(tb, start) (the stall
+        re-base, isa §4.1). A followed step takes its timing from the other party instead."""
+        self.to = False
+        stalled, self._stalled = self._stalled, False
+        if stalled and self.does(ins):
+            self.tb = max(self.tb, self.now)
+
+    def _push_rx(self, v: int) -> None:
+        """Into the RX FIFO; when it is full the word is dropped with OVERFLOW (isa §4.9)."""
+        if len(self.rx) >= RX_DEPTH:
+            self.log("OVERFLOW")
+        else:
+            self.rx.append(v & REG_MASK)
+
     def log(self, kind: str, measured=None, lo=None, hi=None) -> None:
+        if kind in SATURATING and measured is not None:
+            measured = min(measured, MEAS_MAX)
+        self.evt |= EVT_BIT.get(kind, 0)
         self.events.append(Event(kind, self.pc, self.now, measured, lo, hi))
 
     def wait_until(self, t: int) -> Gen:
@@ -152,9 +189,9 @@ class Engine:
 
     def _late(self, planned: int, slot0: bool) -> None:
         """OVERRUN for an owner action after its planned cycle. The issue slot lets an action
-        planned at a step's start (offset 0) happen one cycle late."""
+        planned at a step's start (offset 0) happen up to ISSUE cycles late (isa §4.1)."""
         late = self.now - planned
-        if late > (1 if slot0 else 0):
+        if late > (ISSUE if slot0 else 0):
             self.log("OVERRUN", measured=late)
 
     def _abort(self) -> None:
@@ -167,19 +204,51 @@ class Engine:
         self.tb = self.now
         self._reanchor(self.now)
         self.pc = self.image.abort_pc
+        self._abort_at = self.now
 
     # ------------------------------------------------------------------ interpreter
+    @staticmethod
+    def _next_start(start: int, done: int) -> int:
+        """The successor's start: the first own cycle (even `now`) >= max(done + 1, start + U),
+        for an instruction that started at `start` and completed at `done` (isa §4.0)."""
+        t = max(done + 1, start + U)
+        return t + (t & 1)
+
     def _run(self) -> Gen:
+        # s0 (now = 0) drives each non-gated PP line the role owns to idle, on the wire from
+        # now = 1 (isa §2), and presents address 0; the word lands two cycles later, so
+        # instruction 0 starts at now = 2 (isa §4.0).
+        if self.role != Role.MON:
+            for i, ln in enumerate(self.lines):
+                if ln.kind == "pp" and not ln.gated and int(ln.owner) == int(self.role):
+                    self.drv[i] = ln.idle
+        yield
+        yield
         while True:
             if self.pc >= len(self.instrs):
                 yield from self._halt()
             ins = self.instrs[self.pc]
+            start = self.now
+            self.starts.append((self.pc, start))
+            if ins is None or reserved(ins):  # isa §3: halts in its start cycle, as HALT does
+                self.log("ILLEGAL")
+                yield from self._halt()
             handler = getattr(self, f"_op_{ins.op.name.lower()}", None)
             if handler is None:
-                raise NotImplementedError(f"{ins.op.name} is not in the v0 model yet (pc {self.pc})")
-            yield from handler(ins)
+                raise NotImplementedError(f"{ins.op.name} is not in the model yet (pc {self.pc})")
+            yield from handler(ins)  # its last yield ends its completion cycle
+            if self._abort_at is not None:
+                # abort_pc is fetched on the first own cycle >= t + 1 and starts 2 later (isa §4.0)
+                t, self._abort_at = self._abort_at, None
+                yield from self.wait_until(t + 1 + ((t + 1) & 1) + 2)
+            else:
+                yield from self.wait_until(self._next_start(start, self.now - 1))
 
     def _halt(self) -> Gen:
+        # isa §4.1: PP lines keep their level, OD lines are released
+        for i, ln in enumerate(self.lines):
+            if ln.kind == "od":
+                self.drv[i] = None
         self.halted = True
         self.halt_cycle = self.now
         self.idle = True
@@ -213,32 +282,37 @@ class Engine:
 
     def _op_br(self, ins: Instr) -> Gen:
         cond = BrCond(ins.sub)
-        if cond == BrCond.ROLE:
-            raise NotImplementedError(f"BR ROLE lands with the v1 model (pc {self.pc})")
         if cond == BrCond.ALWAYS:
             taken = True
         else:
-            if cond == BrCond.TO:
+            if cond == BrCond.ROLE:
+                taken = bool(ins.ra >> int(self.role) & 1)
+            elif cond == BrCond.TO:
                 taken = self.to
             else:
                 zero = self.regs[ins.ra] == 0
                 taken = zero if cond == BrCond.Z else not zero
-            self.branches.append(Branch(self.pc, taken))
+            self.branches.append(Branch(self.pc, taken, self.now))
         self.pc = ins.operand if taken else self.pc + 1
         yield
 
     def _op_role_if(self, ins: Instr) -> Gen:
         mask, count = unpack_role_if(ins.operand)
-        self.pc += 1 if mask >> int(self.role) & 1 else 1 + count
+        skip = not mask >> int(self.role) & 1
+        self.branches.append(Branch(self.pc, skip, self.now))
+        self.pc += 1 + count if skip else 1
         yield
 
     def _op_push(self, ins: Instr) -> Gen:
-        self.rx.append(self.regs[ins.ra])
+        self._push_rx(self.regs[ins.ra])
         self.pc += 1
         yield
 
     def _op_pop(self, ins: Instr) -> Gen:
-        while not self.tx:
+        while not self.tx:  # retried only on own cycles; idle (waiting on the host) throughout
+            self._stalled = True
+            self.idle = True
+            yield
             self.idle = True
             yield
         self.regs[ins.rd] = self.tx.popleft() & REG_MASK
@@ -255,19 +329,22 @@ class Engine:
         line = ins.ra
         nxt = self.pc + 1
         if op == RawOp.EVT:
-            raise NotImplementedError(f"RAW EVT lands with the v1 model (pc {self.pc})")
-        if op == RawOp.SET:
+            self.regs[ins.rd] = self.evt
+            self.evt &= ~ins.operand & EVT_MASK
+        elif op == RawOp.SET:
             self.drive(line, ins.operand & 1)
         elif op == RawOp.REL:
             self.drv[line] = None
         elif op == RawOp.GET:
             self.regs[ins.rd] = self.inp[line]
         elif op == RawOp.JPIN:
-            if self.inp[line] == ins.operand >> 11 & 1:
+            taken = self.inp[line] == ins.operand >> 11 & 1
+            self.branches.append(Branch(self.pc, taken, self.now))
+            if taken:
                 nxt = ins.operand & 0x7FF
-        elif op == RawOp.DELAY:
+        elif op == RawOp.DELAY:  # n cycles, rounded up to a multiple of U
             self.pc = nxt
-            for _ in range(max(1, ins.operand)):
+            for _ in range(-(-max(1, ins.operand) // U) * U):
                 yield
             return
         self.pc = nxt
@@ -282,7 +359,7 @@ class Engine:
         if kind not in (CondKind.FALL, CondKind.RISE):
             raise NotImplementedError(f"COND {kind.name} lands in Phase 4 (pc {self.pc})")
         level = 1 if kind == CondKind.RISE else 0
-        self.to = False
+        self._step_start(ins)
         if self.does(ins):
             planned = self.tb + p.nom
             yield from self.wait_until(planned)
@@ -323,7 +400,7 @@ class Engine:
     def _op_hold(self, ins: Instr) -> Gen:
         p = self.image.profiles[ins.prof]
         level = ins.operand & 1
-        self.to = False
+        self._step_start(ins)
         planned = self.tb
         if self.does(ins):
             yield from self.wait_until(planned)
@@ -363,7 +440,7 @@ class Engine:
         msb = bool(ins.flags & F_MSB)
         if src == Src.FZ:
             raise NotImplementedError(f"XFER src=FZ lands in Task 20 (pc {self.pc})")
-        self.to = False
+        self._step_start(ins)
         line, P, mask = lane.data, p.nom, (1 << n) - 1
 
         def pos(k: int) -> int:  # value bit carried by wire slot k
@@ -371,9 +448,11 @@ class Engine:
 
         if self.does(ins):
             if src == Src.FIFO:
-                while not self.tx:
-                    self.idle = True
-                    yield
+                if not self.tx:
+                    while not self.tx:  # checked every cycle: a step isn't tied to own cycles
+                        self.idle = True
+                        yield
+                    self.tb = max(self.tb, self.now)  # the stall re-base: the step starts now
                 v = self.tx.popleft()
             elif src == Src.ZERO:
                 v = 0
@@ -383,13 +462,30 @@ class Engine:
                 v = self.regs[reg_of(src)]
             v &= mask
             base = self.tb
-            for k in range(n):
-                planned = base + k * P
-                yield from self.wait_until(planned)
-                self._late(planned, slot0=k == 0)
-                self.drive(line, v >> pos(k) & 1)
-                if k < n - 1:
+            if self.lines[line].kind == "pp":  # dst = src; complete on the last bit
+                for k in range(n):
+                    planned = base + k * P
+                    yield from self.wait_until(planned)
+                    self._late(planned, slot0=k == 0)
+                    self.drive(line, v >> pos(k) & 1)
+                    if k < n - 1:
+                        yield
+            else:
+                # an OD owner reads each bit back where a follower samples it (a 0 from someone
+                # else shows up), at most one per cycle, and completes on the last one
+                got, k, j = 0, 0, 0
+                while True:
+                    if k < n and self.now >= base + k * P:
+                        self._late(base + k * P, slot0=k == 0)
+                        self.drive(line, v >> pos(k) & 1)
+                        k += 1
+                    if self.now >= base + j * P + P // 2 + EDGE_LAT:
+                        got |= self.inp[line] << pos(j)
+                        j += 1
+                        if j == n:
+                            break
                     yield
+                v = got
             self.tb = base + n * P
             mode = "do"
         else:
@@ -422,13 +518,13 @@ class Engine:
                     k += 1
                     if k == n:
                         break
-                    continue
+                # at most one sample per cycle: an overdue one waits for the next (isa §4.3)
                 yield
                 fresh = True
             self.tb = a + (n - ak) * P
             mode = "follow"
             if dst == Dst.FIFO:
-                self.rx.append(v)
+                self._push_rx(v)
         if dst >= Dst.R0:
             self.regs[reg_of(dst)] = v & REG_MASK
         self._accumulate(p, n)

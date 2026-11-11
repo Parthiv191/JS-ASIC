@@ -25,3 +25,8 @@ __pycache__/
 # personal Claude Code instructions (role files are handed out, never committed)
 CLAUDE.md
 CLAUDE.local.md
+
+# flow leftovers
+tt/
+gds_render.png
+test/output/

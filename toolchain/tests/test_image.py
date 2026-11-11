@@ -34,10 +34,10 @@ def test_profile_slots_min_nom_max_le():
 def test_line_byte_pin_od_owner_idle_gated():
     """LINE byte, LSB first: pin[2:0] od[3] owner[5:4] idle[6] gated[7]."""
     t = image(lines=[LineCfg("a", "od", Owner.P1, idle=1, pin=5),
-                     LineCfg("b", "pp", Owner.P0, idle=0, gated=True, pin=2),
+                     LineCfg("b", "pp", Owner.P0, idle=0, gated=True, pin=3),
                      LineCfg("c", "od", Owner.SHARED, idle=1)]).table_bytes()
     assert t[0x30] == 5 | 1 << 3 | 1 << 4 | 1 << 6
-    assert t[0x31] == 2 | 1 << 7
+    assert t[0x31] == 3 | 1 << 7
     assert t[0x32] == 2 | 1 << 3 | 2 << 4 | 1 << 6  # pin defaults to the line's index
 
 
@@ -47,6 +47,22 @@ def test_unused_line_slots_are_released():
     t = image().table_bytes()
     for i in range(1, 8):
         assert t[0x30 + i] == i | 1 << 3 | 2 << 4 | 1 << 6
+
+
+def test_unused_line_slots_take_the_free_pins():
+    """The chip merges the slots per pin (its OD mask, the preload), so an unused slot on a line's
+    pin would mark that line OD: HALT would release a PP line. Unused slots take the pins no line
+    uses, in ascending order (architecture §4)."""
+    t = image(lines=[LineCfg("a", "pp", Owner.P0, 1, pin=5), LineCfg("b", "od", Owner.P1, 1, pin=2),
+                     LineCfg("c", "pp", Owner.P1, 1, pin=6)]).table_bytes()
+    assert [b & 7 for b in t[0x33:0x38]] == [0, 1, 3, 4, 7]
+    assert {b & ~7 for b in t[0x33:0x38]} == {1 << 3 | 2 << 4 | 1 << 6}
+
+
+def test_two_lines_on_one_pin_are_rejected():
+    """isa §2: each line has its own pin. The second line here defaults to pin 1."""
+    with pytest.raises(ValueError, match="pin 1"):
+        image(lines=[LineCfg("a", "pp", Owner.P0, 1, pin=1), LineCfg("b", "pp", Owner.P0, 1)]).table_bytes()
 
 
 def test_lane_bytes():

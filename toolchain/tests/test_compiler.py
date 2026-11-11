@@ -268,3 +268,19 @@ def test_abort_without_abort_to_warns():
     d.halt()
     with pytest.warns(CompileWarning, match="abort_to"):
         compile_desc(d)
+
+
+def test_raw_evt_lowers_to_rd_and_a_6_bit_clear_mask():
+    """isa §3: RAW EVT, rd, operand [5:0] the clear mask."""
+    from emu.isa import Op, RawOp, decode
+    d = Description("t", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    d.raw_evt("r3", 0b100101)
+    d.halt()
+    ins = decode(compile_desc(d).words[0])
+    assert (ins.op, ins.sub, ins.rd, ins.operand) == (Op.RAW, RawOp.EVT, 3, 0b100101)
+    d2 = Description("t", parties=("a", "b"))
+    d2.line("l", owner="a", idle=1)
+    d2.raw_evt("r0", 64)
+    with pytest.raises(CompileError, match="S-range.*mask"):
+        compile_desc(d2)
