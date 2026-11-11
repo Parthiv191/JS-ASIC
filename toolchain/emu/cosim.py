@@ -142,6 +142,18 @@ def pins(trace: Trace, e: int, ticks: range) -> list[tuple[int, int]]:
     return [(0, 0) if t < 0 else byte(drives[min(t, len(drives) - 1)]) for t in ticks]
 
 
+ACT_FROM = 2  # ACT first reads 1 in the cycle with now = 2 (architecture §8)
+
+
+def act(trace: Trace, e: int, ticks: range) -> list[int]:
+    """Per tick, the ACT pin (uo_out[7]) for model engine `e`: its running state through one
+    flop (architecture §8). It runs from now = 1 through its HALT's start cycle, so ACT reads 1
+    from now = 2 through that cycle + 1, and stays 1 if it never halts."""
+    h = trace.engines[e].halt_cycle
+    last = None if h is None else h + 1
+    return [int(t >= ACT_FROM and (last is None or t <= last)) for t in ticks]
+
+
 def _pin_state(oe: int, out: int, p: int) -> str:
     return f"driven {out >> p & 1}" if oe >> p & 1 else "released"
 

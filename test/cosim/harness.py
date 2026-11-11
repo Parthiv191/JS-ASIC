@@ -13,7 +13,7 @@ sys.path.insert(0, str(HERE.parents[1] / "toolchain"))
 from cocotb.triggers import RisingEdge  # noqa: E402
 
 from chip import E_ROLE, ENG0, RUN, Host, get_reg, reset  # noqa: E402
-from emu.cosim import Mismatch, PinMismatch, Replay, compare, compare_pins, pins  # noqa: E402
+from emu.cosim import ACT_FROM, Mismatch, PinMismatch, Replay, act, compare, compare_pins, pins  # noqa: E402
 from emu.isa import NUM_REGS, Role  # noqa: E402
 
 from monitor import Monitor  # noqa: E402
@@ -24,7 +24,6 @@ GATES = os.environ.get("COSIM_GATES") == "1"
 # cycle with now = 0). It depends on chip.py's SPI timing and the RTL's RUN path; every RTL run
 # checks it against the engine's `run` input and tr_now, every run against ACT (README §1).
 RUN_S0 = 263
-ACT_NOW = 2  # ACT (a flop of `running`, which is 0 in s0) first reads 1 in the cycle with now = 2
 
 
 class CosimMismatch(AssertionError):
@@ -59,15 +58,24 @@ def _check_alignment(mon: Monitor) -> None:
             errs.append(f"s0 ended at edge {mon.run_edge}, not RUN_S0 = {RUN_S0}")
         elif mon.bad_now is not None:
             errs.append("tr_now is not the tick in a running cycle: (tick, tr_now) = %s" % (mon.bad_now,))
-    k = RUN_S0 + ACT_NOW  # the edge that ends the cycle with now = ACT_NOW
+    k = RUN_S0 + ACT_FROM  # the edge that ends the cycle with now = ACT_FROM
     first = mon.act.find(1) + 1
     if first != k:
-        errs.append(f"ACT first read 1 at edge {first or None}, not {k} (now = {ACT_NOW})")
+        errs.append(f"ACT first read 1 at edge {first or None}, not {k} (now = {ACT_FROM})")
     if errs:
         raise CosimMismatch("co-sim alignment (README §1):\n  " + "\n  ".join(errs))
 
 
+def _check_build(dut) -> None:
+    """COSIM_GATES must match the build: a stale COSIM_GATES=1 on RTL would skip the trace."""
+    rtl = hasattr(dut.user_project, "u_eng0")
+    if rtl == GATES:
+        raise RuntimeError(f"COSIM_GATES={int(GATES)}, but the design {'has a' if rtl else 'has no'} "
+                           "trace port: run make, or make GATES=yes for the netlist")
+
+
 async def cosim(dut, rep: Replay, role: Role, margin: int = 64) -> None:
+    _check_build(dut)
     await reset(dut)
     dut.uio_in.value = rep.stimulus[0]
     host = Host(dut)
@@ -88,11 +96,17 @@ async def cosim(dut, rep: Replay, role: Role, margin: int = 64) -> None:
     pm = compare_pins(want, mon.pins, first)
     if pm is not None:
         raise CosimMismatch(pin_report(pm, rep), pin=pm)
+    # ACT every cycle: at gate level the only view of when the engine halts
+    want_act = act(rep.trace, rep.engine, range(first, first + len(mon.act)))
+    bad = next((k for k, (w, g) in enumerate(zip(want_act, mon.act)) if w != g), None)
+    if bad is not None:
+        raise CosimMismatch(f"ACT differs at tick {first + bad}: expected {want_act[bad]}, observed "
+                            f"{mon.act[bad]} (model HALT at {rep.trace.engines[rep.engine].halt_cycle})")
     # the trace port has no register writes: read r0-r7 back over the host port
     want = rep.trace.engines[rep.engine].regs
     got = [await get_reg(host, i) for i in range(NUM_REGS)]
     if got != want:
         diff = [f"  r{i}: expected {w:#06x}, observed {g:#06x}" for i, (w, g) in enumerate(zip(want, got)) if w != g]
         raise CosimMismatch("registers after the run differ:\n" + "\n".join(diff))
-    what = "pins" if GATES else f"{len(rep.expected)} pulses, pins"
+    what = "pins, ACT" if GATES else f"{len(rep.expected)} pulses, pins, ACT"
     dut._log.info(f"co-sim: {what} and r0-r7 match, {mon.clk} clk, model end at tick {rep.trace.ticks}")

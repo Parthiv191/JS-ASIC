@@ -157,8 +157,9 @@ def follower(**flags):
 @cocotb.test()
 @cocotb.parametrize(msb=[False, True], check=[False, True], resync=[False, True])
 async def test_xfer_follower(dut, msb, check, resync):
-    """Unclocked XFER follower with each combination of MSB, CHK and RESYNC (isa §4.3). The
-    owner's bit order shows only on its pins, which co-sim doesn't compare yet (README §4)."""
+    """Unclocked XFER follower with each combination of MSB, CHK and RESYNC (isa §4.3). As the
+    owner, the RTL's bit order shows only on its pins: `uart frame` in role tx checks it, LSB
+    first only."""
     flags = dict(msb=msb, check=check, resync=resync)
     rep = follower(**flags)
     for f in FLAGS:
@@ -244,10 +245,14 @@ async def test_od_release(dut, case):
     d.label("end")
     d.halt()
     img = compile_desc(d, check_timing=False)
-    img = replace(img, lines=[replace(x, pin=p) for x, p in zip(img.lines, (5, 2, 6))])
+    img = replace(img, lines=[replace(x, pin=p) for x, p in zip(img.lines, (5, 2, 6), strict=True)])
     rep = model(img, Role.P1, peers=case == "halt")
-    drv = rep.trace.engines[0].drives
-    assert ("ABORT" in kinds(rep)) == (case == "abort") and (None, 0, 0) in drv and drv[-1] == (None, None, 0)
+    et = rep.trace.engines[0]
+    drv, h = et.drives, et.halt_cycle
+    # the release lands the cycle after the HALT starts, or after the abort and before the HALT
+    end = h if case == "halt" else next(ev.cycle for ev in et.events if ev.kind == "ABORT")
+    assert ("ABORT" in kinds(rep)) == (case == "abort") == (end < h)
+    assert drv[end] == (None, 0, 0) and drv[end + 1] == (None, None, 0) and drv[-1] == (None, None, 0)
     await cosim(dut, rep, Role.P1)
 
 

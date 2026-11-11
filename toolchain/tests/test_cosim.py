@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from emu.compiler import compile_desc
-from emu.cosim import Kind, Pulse, compare, compare_pins, expected, pins, replay
+from emu.cosim import Kind, Pulse, act, compare, compare_pins, expected, pins, replay
 from emu.desc import Description
 from emu.isa import Role
 from emu.model.engine import Event
@@ -236,3 +236,20 @@ def test_compare_pins_reports_a_wrong_level():
 def test_compare_pins_ignores_out_on_released_pins():
     """uio_out of a pin with uio_oe = 0 never reaches the wire."""
     assert compare_pins([(0x01, 0x01)], [(0x01, 0xFF)], first=0) is None
+
+
+def test_act_reads_running_through_one_flop():
+    """architecture §8: ACT is engine 0's running state through one flop. It runs from now = 1
+    through its HALT's start cycle, so ACT reads 1 from now = 2 through that cycle + 1."""
+    t = System([EngineSpec(_holds(), Role.P0)]).run(100)
+    h = t.engines[0].halt_cycle
+    assert act(t, 0, range(-1, h + 4)) == [0, 0, 0] + [1] * h + [0, 0]
+
+
+def test_act_stays_1_without_a_halt():
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a")  # unbounded, and no one makes the fall
+    t = System([EngineSpec(compile_desc(d, check_timing=False), Role.P1)]).run(200)
+    assert t.engines[0].halt_cycle is None and act(t, 0, range(0, 5)) == [0, 0, 1, 1, 1]
+    assert act(t, 0, range(t.ticks, t.ticks + 3)) == [1, 1, 1]

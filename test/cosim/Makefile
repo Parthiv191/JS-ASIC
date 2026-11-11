@@ -16,6 +16,7 @@ SIM_BUILD        = sim_build/rtl
 COMPILE_ARGS    += -DFUNCTIONAL
 VERILOG_SOURCES += $(SRAM_MODELS)
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
+export COSIM_GATES = 0
 
 else
 

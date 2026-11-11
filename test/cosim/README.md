@@ -3,7 +3,7 @@
 Status: built (2026-11-10), owner: verification role. One image runs on the Python model
 (`toolchain/emu`) and on the chip. On RTL, every trace-port pulse (architecture §5) is compared,
 with its `(pc, now)` and fields, then the pins every cycle, then r0–r7. The gate-level netlist has
-no trace port, so there the pins and r0–r7 are compared. Layer 3 of `docs/design/verification.md`.
+no trace port, so there the pins, ACT and r0–r7 are compared. Layer 3 of `docs/design/verification.md`.
 
 ## 1. How it works
 
@@ -25,10 +25,11 @@ reset ─► load over host SPI ─► ROLE, RUN ─► drive uio_in by clk coun
 | `stimulus(trace, e)` | same | per tick, the wire of every engine except `e`, with the model's glitches, mapped onto `uio_in` through `LINE.pin` |
 | `compare(expected, observed)` | same | the first mismatch, with context (§3), or None |
 | `pins(trace, e, ticks)`, `compare_pins` | same | per tick, the `(uio_oe, uio_out)` engine `e` must drive; the first tick and pins that differ (§2) |
+| `act(trace, e, ticks)` | same | per tick, the ACT pin (architecture §8) |
 | per-tick drives | `toolchain/emu/model/system.py` | `System.run` records each engine's drives per tick, and the drive after the run, so the wire can be rebuilt without engine `e` |
 | monitor | `test/cosim/monitor.py` | every clk: records the pins and ACT, drives `uio_in`, and on RTL samples `tb.user_project.u_eng0.tr_*` into the same pulses |
 | `replay(specs, e, glitches)` | `toolchain/emu/cosim.py` | runs the model and checks the rules below; returns the expected pulses and the stimulus |
-| harness | `test/cosim/harness.py` | `cosim(dut, rep, role)`: reset, load, run, check the alignment, compare the pulses and the pins, then read back r0–r7 |
+| harness | `test/cosim/harness.py` | `cosim(dut, rep, role)`: reset, load, run, check the alignment, compare the pulses, the pins and ACT, then read back r0–r7 |
 | tests | `test/cosim/test_cosim.py` | §4 |
 
 The model side is plain Python, so pytest checks it without a simulator. The cocotb side imports
@@ -88,6 +89,12 @@ caught.
   so it isn't compared.
 - This is the only check of the chip's own drives. The trace port shows when a step drives, not
   which pin or what level, and nothing on it shows HALT or an abort releasing the OD lines.
+- ACT (`uo_out[7]`) every cycle: 1 from `now = 2` through the model HALT's start cycle + 1
+  (architecture §8). At gate level it is the only view of when the engine halts, so a follower
+  test that drives no pin and writes no register still checks something there.
+- `COSIM_GATES` must match the build: the harness stops if it is 1 and the design has a trace
+  port, or 0 and it has none. The Makefile sets it in both modes, so a stale shell value can't
+  turn off the trace checks.
 
 **Registers:** the trace port has no register writes, so after the pulses agree the harness reads
 r0–r7 over the host port and compares them with the model's final registers.
@@ -130,6 +137,7 @@ checks (11-10):
 | HALT releases the PP lines too | 9 |
 | an abort keeps the OD lines | 1 (od release) |
 | timed-step drives land on the neighbouring pin | 8 |
+| ACT stays 1 after HALT | 36 (every test that halts) |
 
 An OD line driven high for its 1s also fails, in the OD readback test, through the trace.
 
@@ -151,8 +159,8 @@ An OD line driven high for its 1s also fails, in the OD readback test, through t
 | illegal | P0 | a reserved code halts as ILLEGAL: `expect_fail` until devOps's #13 fix |
 | role branches | P0 | `tr_br` for ROLE_IF and RAW JPIN: `expect_fail` until devOps's #13 fix. Until then the other programs avoid both. |
 
-Every test compares the pins. At gate level the two gap tests are skipped, because their gaps
-show only on the trace port.
+Every test compares the pins and ACT. At gate level the two gap tests are skipped, because
+their gaps show only on the trace port.
 
 **Later**, each its own PR:
 1. The UART protocol program in every role, once the RTL and the model (step 3b) have FIFOs.
