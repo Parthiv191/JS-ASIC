@@ -407,7 +407,7 @@ def test_abort_restart_costs_3_or_4(mx, t, cost):
 
 
 def test_violations_set_their_evt_bits():
-    """isa §4.1: TIMEOUT sets evt bit 2 and LEVEL bit 3, aborting or not. A follower with no
+    """isa §4.1: TIMEOUT sets evt bit 2 and LEVEL bit 3. A follower with no
     owner: a stuck-low line gives the fall, the bounded rise times out (no ABORT), then the
     HOLD 1 reads 0."""
     d = Description("e", parties=("a", "b"))
