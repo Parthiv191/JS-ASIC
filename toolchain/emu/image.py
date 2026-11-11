@@ -128,8 +128,14 @@ class Image:
         for i, p in enumerate(self.profiles):
             for k, v in enumerate((p.min, p.nom, p.max)):
                 _put16(t, _PROF + 6 * i + 2 * k, v, f"profile {p.name}")
+        used = [i if ln.pin is None else ln.pin for i, ln in enumerate(self.lines)]
+        for i, pin in enumerate(used):
+            _check(pin not in used[:i], f"line {self.lines[i].name} is on pin {pin}, as line "
+                                        f"{self.lines[used.index(pin)].name} is: each line has its own pin")
+        free = [p for p in range(NUM_LINES) if p not in used]
         for i in range(NUM_LINES):
-            t[_LINE + i] = _line_byte(self.lines[i], i) if i < len(self.lines) else _UNUSED_LINE | i
+            t[_LINE + i] = (_line_byte(self.lines[i], i) if i < len(self.lines)
+                            else _UNUSED_LINE | free[i - len(self.lines)])
         for i, la in enumerate(self.lanes):
             t[_LANE + 4 * i:_LANE + 4 * i + 4] = _lane_bytes(la)
         _check(0 <= self.abort_pc < PROG_DEPTH, f"abort_pc {self.abort_pc} outside the program")
@@ -194,6 +200,7 @@ class Image:
 
 
 # An unused LINE slot: a released OD line (owner SHARED, idle 1), so no engine ever drives its pin.
+# The chip merges the slots per pin, so unused slots take the pins no line uses (architecture §4).
 _UNUSED_LINE = 1 << 3 | int(Owner.SHARED) << 4 | 1 << 6
 
 
