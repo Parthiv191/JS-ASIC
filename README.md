@@ -16,10 +16,14 @@ Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
   Milestones: a first end-to-end chip by Nov 29, Core complete by Dec 13, then improvement rounds
   until the Jan 17 submission ([chip-spec §4](docs/design/chip-spec.md), [plan](docs/plan.md)).
 - **On the chip today:** TESTMODE, the host SPI port (ID, SCRATCH, STATUS), GPIO override and
-  LOOPBACK, and both 512x32 SRAM columns through the host. CI hardens it at 8x4 and passes
-  precheck and the gate-level tests. Engine 0 (fetch/issue and the timed steps) is in review.
+  LOOPBACK, and both 512x32 SRAM columns through the host. Engine 0's fetch/issue and untimed
+  instructions (#13). CI hardens it at 8x4 and passes precheck and the gate-level tests. The timed
+  steps are in review.
 - **Toolchain:** the encoding, image format and the reference model's fetch and issue timing are
-  at ISA v1; a UART runs in every role from one description. Co-sim against the RTL is in review.
+  at ISA v1; a UART runs in every role from one description, and the model now covers clocked lanes, clock
+  stretching and the I2C bus detector. Co-sim against the RTL is in review.
+- **Fuzzer:** in the model, the learning fuzzer finds every planted behaviour with partial feedback
+  in 5 of 5 seeds; the no-feedback baseline finds none (#34).
 - **Challenge compliance:** [docs/challenge.md](docs/challenge.md).
 
 ## Layout
