@@ -314,6 +314,52 @@ async def test_now_counts(dut):
         prev = now
 
 
+
+def reserved_words():
+    """Reserved codes from isa §3, one instruction each (the encoder refuses free opcodes)."""
+    from emu.isa import CondKind, Dst, Owner, Src, cond_operand, xfer_operand
+    hold = lambda **k: Instr(Op.HOLD, **({"owner": Owner.P0, "line": 0, "prof": 0} | k))
+    xf = lambda src=Src.ZERO, dst=Dst.DISCARD, **k: Instr(
+        Op.XFER, **({"owner": Owner.P0, "line": 0, "prof": 0, "operand": xfer_operand(1, src, dst)} | k))
+    return {
+        "ALU sub 10": Instr(Op.ALU, sub=10), "ALU sub 15": Instr(Op.ALU, sub=15),
+        "BR 5": Instr(Op.BR, sub=5), "BR 15": Instr(Op.BR, sub=15),
+        "RAW 6": Instr(Op.RAW, sub=6), "RAW 15": Instr(Op.RAW, sub=15),
+        "step owner 3": hold(owner=Owner.NONE),
+        "profile 8": hold(prof=8), "line 8": hold(line=8),
+        "COND line 8": Instr(Op.COND, owner=Owner.P0, line=8, prof=0, operand=cond_operand(CondKind.FALL)),
+        "lane 4": xf(line=4),
+        "src 4": Instr(Op.XFER, owner=Owner.P0, line=0, prof=0, operand=4 << 4),
+        "src 7": Instr(Op.XFER, owner=Owner.P0, line=0, prof=0, operand=7 << 4),
+        "dst 1": Instr(Op.XFER, owner=Owner.P0, line=0, prof=0, operand=1 << 8),
+        "dst 3": Instr(Op.XFER, owner=Owner.P0, line=0, prof=0, operand=3 << 8),
+        "dst 7": Instr(Op.XFER, owner=Owner.P0, line=0, prof=0, operand=7 << 8),
+        "free opcode 20": 20 << 27,
+    }
+
+
+@cocotb.test()
+async def test_reserved_illegal(dut):
+    """Every reserved code halts as ILLEGAL in its start cycle (isa §3): NOP at 2, the reserved
+    instruction at 4 (VIOL bit 10, FIRST_VIOL at pc 1), nothing after it runs, NOW stays 4."""
+    try:
+        from emu.isa import reserved   # the model's list (verification #15), once merged
+    except ImportError:
+        reserved = None
+    await reset(dut)
+    host = Host(dut)
+    for name, ins in reserved_words().items():
+        if reserved is not None and not isinstance(ins, int):
+            assert reserved(ins), f"{name}: the model does not call it reserved"
+        await set_reg(host, 1, 0)
+        await run_program(host, words([NOP, ins, li(1, 1), HALT]))
+        await wait_halted(host)
+        assert await eng_read(host, E_VIOL, 2) == 1 << K_ILLEGAL, name
+        assert await eng_read(host, E_FV_PC, 2) == 1, name
+        assert await get_reg(host, 1) == 0, f"{name}: ran past it"
+        assert await eng_read(host, E_NOW, 3) == 4, name
+        await host.write(ENG0 + E_VIOL, [0xFF, 0xFF])  # clear for the next one
+
 # ---------------------------------------------------------------- trace port (RTL only)
 
 def expected_starts(prog, role=0):
@@ -368,7 +414,8 @@ async def test_trace_port(dut):
     await wait_halted(host)
     want = expected_starts(prog)
     assert starts == want, f"starts {starts}\n want {want}"
-    assert branches == [(6, 1), (6, 1), (6, 0)]
+    # ROLE_IF at 3 is a branch whose `taken` means skipped (P0 is not in its P1 mask)
+    assert branches == [(3, 1), (6, 1), (6, 1), (6, 0)]
     assert marks == [(1, 0x42, 4)]
     assert int(eng.tr_halted.value) == 1
     assert int(eng.tr_tb.value) == 0

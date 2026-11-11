@@ -122,3 +122,59 @@ async def run_program(host, words, role=0, lines=None):
     if lines is not None:
         await host.write(LINE, list(lines))
     await host.write(RUN, [1])
+
+
+# ---------------------------------------------------------------- tables and a cycle-exact bench
+PROF, LANE_T, ABORT_PC = 0x0400, 0x0438, 0x044A
+ACT = 1 << 7
+
+
+async def write_tables(host, profs=None, lanes=None, abort_pc=None):
+    """profs: {i: (min, nom, max)}; lanes: {i: data line} (unclocked); abort_pc: a word address."""
+    for i, (lo, nom, hi) in (profs or {}).items():
+        await host.write(PROF + 6 * i, [lo & 0xFF, lo >> 8, nom & 0xFF, nom >> 8, hi & 0xFF, hi >> 8])
+    for i, data in (lanes or {}).items():
+        await host.write(LANE_T + 4 * i, [data & 7, 0, 0, 0])
+    if abort_pc is not None:
+        await host.write(ABORT_PC, [abort_pc & 0xFF, abort_pc >> 8])
+
+
+class Bench:
+    """Samples the pins every clk and maps each sample to the engine's `now`.
+
+    The ACT pin (uo_out[7], a flop of engine 0's running) first reads high in the cycle with
+    now = 2. A cocotb read at a rising edge returns the value during the cycle that edge ends,
+    so sample k has now = k - k_act + 2. `at[w] = v` puts uio_in = v on the wire from now = w:
+    a write made right after the edge ending cycle w - 1 is on the wire during cycle w."""
+
+    def __init__(self, dut, probe=None):
+        self.dut, self.k, self.k_act, self.probe = dut, 0, None, probe
+        self.samples = []      # (uo_out, uio_out, uio_oe) per cycle
+        self.probed = []       # probe() per cycle, if given (RTL-only signals)
+        self.at = {}           # now -> uio_in from that cycle on
+        cocotb.start_soon(self._run())
+
+    async def _run(self):
+        from cocotb.triggers import RisingEdge
+        d = self.dut
+        while True:
+            await RisingEdge(d.clk)
+            uo = int(d.uo_out.value)
+            self.samples.append((uo, int(d.uio_out.value), int(d.uio_oe.value)))
+            if self.probe:
+                self.probed.append(self.probe())
+            if self.k_act is None and uo & ACT:
+                self.k_act = self.k
+            if self.k_act is not None:
+                now = self.k - self.k_act + 2   # this sample's cycle
+                if now + 1 in self.at:          # on the wire from the next cycle
+                    d.uio_in.value = self.at[now + 1]
+            self.k += 1
+
+    def now_of(self, k):
+        return k - self.k_act + 2
+
+    def pin(self, now, p):
+        """(uio_out bit, uio_oe bit) of pin p during cycle `now`."""
+        _, out, oe = self.samples[now + self.k_act - 2]
+        return (out >> p) & 1, (oe >> p) & 1

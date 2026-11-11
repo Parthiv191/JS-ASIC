@@ -6,7 +6,8 @@
 //   3. GPIO override and LOOPBACK: the host drives the pins through PIN_CTRL,
 //      PIN_OUT and PIN_OE_SET, and reads them back through PINS and PIN_OE.
 //   4. Host access to both SRAM columns (0x1000, 0x3000).
-//   5. Engine 0 running a program from column 1 (engine.v).
+//   5. Engine 0 running a program from column 1 (engine.v), with the shared
+//      PROF, LINE, LANE and ABORT_PC tables.
 // Pins as in architecture §8.
 module tt_um_prot_emu_SAP (
     input  wire [7:0] ui_in,    // Dedicated inputs
@@ -129,6 +130,9 @@ module tt_um_prot_emu_SAP (
   reg  [1:0]  run, run_eff;   // run_eff: RUN, taking effect on the next ph = 0 cycle
   reg         host_err;
   reg  [63:0] line_cfg;       // LINE[0..7]
+  reg  [383:0] prof_all;      // PROF[0..7], 6 bytes each (min, nom, max LE); PROF0 is ignored
+  reg  [127:0] lane_all;      // LANE[0..3], 4 bytes each
+  reg  [8:0]   abort_pc;
   reg  [1:0]  e0_role;
   reg  [2:0]  e0_reg_sel;
   reg  [7:0]  e0_reg_lo;      // REG_DATA low byte, written with the high byte
@@ -158,6 +162,9 @@ module tt_um_prot_emu_SAP (
       e0_reg_sel    <= 3'd0;
       e0_reg_lo     <= 8'h00;
       for (k = 0; k < 8; k = k + 1) line_cfg[8*k +: 8] <= 8'h68 + k[7:0];  // released OD
+      prof_all      <= 384'h0;
+      lane_all      <= 128'h0;
+      abort_pc      <= 9'd0;
     end else begin
       if (ph) run_eff <= run;   // the next cycle has ph = 0
       if (soft_reset0) run[0] <= 1'b0;
@@ -173,8 +180,14 @@ module tt_um_prot_emu_SAP (
           default: ;
         endcase
       end
-      if (hwr && in_table && !any_running && off[7:3] == 5'b00110)  // 0x0430-0x0437
-        line_cfg[{off[2:0], 3'd0} +: 8] <= hwdata;
+      // the shared tables (0x0400), written only while no engine runs
+      if (hwr && in_table && !any_running) begin
+        if (off < 8'h30)                    prof_all[{off[5:0], 3'd0} +: 8] <= hwdata;
+        else if (off < 8'h38)               line_cfg[{off[2:0], 3'd0} +: 8] <= hwdata;
+        else if (off < 8'h48)               lane_all[{off[3:0] - 4'h8, 3'd0} +: 8] <= hwdata;
+        else if (off == 8'h4A)              abort_pc[7:0] <= hwdata;
+        else if (off == 8'h4B)              abort_pc[8]   <= hwdata[0];
+      end
       if (ewr) begin
         case (off)
           8'h00: e0_role    <= hwdata[1:0];
@@ -200,6 +213,8 @@ module tt_um_prot_emu_SAP (
   engine #(.E(0)) u_eng0 (
       .clk(clk), .rst_n(rst_n_sync), .ph(ph), .run(run_eff[0]), .soft_reset(soft_reset0),
       .role(e0_role), .line_cfg(line_cfg), .pin_in(pin_in),
+      .lane_cfg({lane_all[119:96], lane_all[87:64], lane_all[55:32], lane_all[23:0]}),
+      .prof_tab(prof_all[383:48]), .abort_pc(abort_pc),
       .fetch(e0_fetch), .fetch_addr(e0_fetch_addr), .sram_dout(col1_dout),
       .drv_low(e0_low), .drv_high(e0_high),
       .reg_sel(e0_reg_sel), .reg_we(e0_reg_we), .reg_wdata({hwdata, e0_reg_lo}),
