@@ -76,7 +76,8 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
     if not instrs:
         return []
     img = low.image
-    od_lanes = {i for i, la in enumerate(img.lanes) if img.lines[la.data].kind == "od"}
+    od_lanes = {i for i, la in enumerate(img.lanes)
+                if any(x is not None and img.lines[x].kind == "od" for x in (la.data, la.data2))}
     abort_pc = img.abort_pc if any(_aborts(ins) for ins in instrs) else None
     all_tainted = (1 << NUM_REGS) - 1
     state: dict[int, int] = {0: all_tainted}  # registers keep their values across RUN (isa §1)
@@ -147,6 +148,7 @@ class _Step:
     abort: bool = False
     od: bool = False  # an XFER whose data line is open-drain: its owner reads the bits back
     d2_owner: Role | None = None  # duplex: the party that drives data2 (isa §4.3)
+    od_drivers: frozenset = frozenset()  # parties that may drive an OD data line of the lane
     ldelay: int = 0
 
     def does(self, r: Role) -> bool:
@@ -187,6 +189,12 @@ def _steps(low: Lowered) -> dict[int, _Step]:
                           ldelay=lane.ldelay)
                 if lane.data2 is not None and img.lines[lane.data2].owner in (Owner.P0, Owner.P1):
                     kw["d2_owner"] = Role(int(img.lines[lane.data2].owner))
+                od = set()
+                for x in (lane.data, lane.data2):
+                    if x is not None and img.lines[x].kind == "od":
+                        ow = img.lines[x].owner
+                        od |= {Role.P0, Role.P1} if ow == Owner.SHARED else {Role(int(ow))}
+                kw["od_drivers"] = frozenset(od)
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
     return out
 
@@ -337,11 +345,13 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T3-latency", pc, f"half period {H} too short for a clock follower")
             if s.ldelay and s.ldelay > H - E - 2:
                 diags.add("T4-profile", pc, f"ldelay {s.ldelay} > H - EDGE_LAT - 2 = {H - E - 2}")
-            for o in sorted(s.data_owners - {s.clk_owner}):
+            # a party that drives a data line, or may hold an OD let-go from an earlier step on
+            # the lane (it releases with a launch's latency), and follows the clock
+            for o in sorted((s.data_owners | s.od_drivers) - {s.clk_owner}):
                 if H < E + 1 + s.ldelay + drift(ppm, 2 * H):
                     diags.add("T3-latency", pc, f"half period {H} < EDGE_LAT + 1 + ldelay {s.ldelay} + drift: "
-                                                f"{o.name} owns a data line, follows the clock and cannot "
-                                                f"launch in time")
+                                                f"{o.name} drives a data line (or lets one go), follows the "
+                                                f"clock and cannot launch in time")
 
     # an abort restarts only the roles that fail: they must re-sync on the other party's next event
     aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}

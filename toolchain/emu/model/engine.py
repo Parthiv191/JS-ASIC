@@ -146,19 +146,22 @@ class Engine:
 
     def _track_letgo(self, pre: list[int | None]) -> None:
         """OD let-go (isa §4.3): after a clocked XFER in which it drove OD data line D, the engine
-        keeps the last bit until the lane's next leading clock edge as it sees it (the clock owner:
+        keeps the last bit until the lane's next launching edge as it sees it (the clock owner:
         the cycle it drives that edge; others: the cycle they detect it), then releases D at the
-        launch time, edge + ldelay or max(detect, e + ldelay). Any drive of D cancels it (drive()),
-        and it runs whatever instruction is running."""
+        launch time, edge + ldelay or max(detect, e + ldelay). The launching edge is the leading
+        one with cpha 1 and the trailing one with cpha 0 (whose next leading edge captures the
+        next step's bit 0). Any drive of D cancels it (drive()), and it runs whatever instruction
+        is running."""
         def level(v: int | None) -> int:
             return 1 if v is None else v
         for d, (lane, own, ld, at) in list(self._letgo.items()):
             if at is None:
-                clk, lead = lane.clk, 1 - lane.cpol
+                clk = lane.clk
+                launching = 1 - lane.cpol if lane.cpha == 1 else lane.cpol  # the level it goes to
                 if own:
-                    if level(pre[clk]) != lead and level(self.drv[clk]) == lead:
+                    if level(pre[clk]) != launching and level(self.drv[clk]) == launching:
                         at = self.now + ld
-                elif self.edge(clk) and self.inp[clk] == lead:
+                elif self.edge(clk) and self.inp[clk] == launching:
                     at = max(self.now, self.now - EDGE_LAT + ld)
                 if at is None:
                     continue
@@ -614,10 +617,13 @@ class Engine:
         start = self.now
         vals = [v if m and i not in readback else 0 for i, m in enumerate(mine)]  # PP: what it sends
 
+        drove = [False] * len(dl)
+
         def launch_bit(k: int) -> None:
             for i, m in enumerate(mine):
                 if m:
                     self.drive(dl[i], v >> pos(k) & 1)
+                    drove[i] = True
 
         def sample_bit(k: int) -> None:
             for i in reads:
@@ -687,7 +693,8 @@ class Engine:
                         return
                     # no dst, no push; the step ends here, and what it drove is let go as usual
                     for i in readback:
-                        self._letgo[dl[i]] = (lane, own_clk, ld, None)
+                        if drove[i]:
+                            self._letgo[dl[i]] = (lane, own_clk, ld, None)
                     self.to = True
                     self.tb = self.now
                     self._reanchor(self.now)
@@ -703,8 +710,12 @@ class Engine:
                 yield
             self.tb = self.now - EDGE_LAT
         v = vals[0] if len(dl) == 1 else vals[1] << n | vals[0]
-        for i in readback:  # it keeps its last bit until the lane's next leading edge
-            self._letgo[dl[i]] = (lane, own_clk, ld, None)
+        # it keeps its last bit until the lane's next launching edge; with cpha 0 that is the
+        # trailing edge that just ended the step: release at it + ldelay (as a launch would)
+        at = None if cpha == 1 else (self.tb + ld if own_clk else max(self.now, self.now - EDGE_LAT + ld))
+        for i in readback:
+            if drove[i]:
+                self._letgo[dl[i]] = (lane, own_clk, ld, at)
         if follows and dst == Dst.FIFO:  # it drives fewer than all of the step's data lines
             self._push_rx(v)
         if dst >= Dst.R0:

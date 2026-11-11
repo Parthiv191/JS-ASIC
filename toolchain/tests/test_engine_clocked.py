@@ -374,7 +374,7 @@ A, B = 0x4B, 0xC6  # P0's MOSI word, P1's MISO word
 
 
 def duplex_desc(cpha=0, src="r0", dst="r1", n=N, h=H, lo=H - 1, hi=INF, ppm=20000, ldelay=0,
-                miso_owner="b", swap=False, miso_kind="pp"):
+                miso_owner="b", swap=False, miso_kind="pp", tail=None):
     """P0 owns the clock and MOSI; MISO belongs to `miso_owner`. MOSI is the lane's `data` and
     MISO its `data2`, or the other way round with `swap` (the step is then owned by MISO's owner).
     Each party loads its own word into r0, and the one XFER sends r0 on the line it owns."""
@@ -390,6 +390,8 @@ def duplex_desc(cpha=0, src="r0", dst="r1", n=N, h=H, lo=H - 1, hi=INF, ppm=2000
     with d.only("b"):
         d.li("r0", B)
     d.xfer(n, lane, owner=owner, prof=half, src=src, dst=dst, msb_first=True)
+    if tail:
+        tail(d)
     d.halt()
     return d
 
@@ -599,9 +601,10 @@ def test_od_owner_reads_back_the_wire(sender):
     clean = run_sys(i2c([(sender, 8, value)]))
     (rec,) = xfers(clean, 0)
     assert all(xfers(clean, i)[0].value == value for i in range(3))
-    # pull SDA low across the third capture (trailing edge 2 of the first XFER)
+    # pull SDA low for the one tick the third capture reads: trailing edge 2 is driven at cap2,
+    # on the wire from cap2 + 1, and every role reads the wire as of cap2 + 1
     cap2 = rec.tb - (2 * 8 - 6) * HI2C   # tb + 6H, from the end tb = tb0 + 16H
-    t = run_sys(i2c([(sender, 8, value)]), glitches=[Glitch(1, cap2 - 2, 6, 0)])
+    t = run_sys(i2c([(sender, 8, value)]), glitches=[Glitch(1, cap2 + 1, 1, 0)])
     assert {xfers(t, i)[0].value for i in range(3)} == {0xDF}, [hex(xfers(t, i)[0].value) for i in range(3)]
 
 
@@ -678,7 +681,8 @@ def test_let_go_runs_during_untimed_instructions():
 def test_let_go_also_after_a_timeout():
     """A timed-out XFER drove its OD line too, so the let-go applies: the slave sends 0 with
     cpha 0 (bit 0 at its start), the clock stops (a glitch holds SCL high), the slave times out
-    and keeps SDA low through its RAW DELAY, and lets go on the first SCL fall after the glitch."""
+    and keeps SDA low through its RAW DELAY, and lets go at the next launching edge it sees: with
+    cpha 0 a trailing edge, the first SCL rise after the glitch."""
     d = Description("i2c", parties=("a", "b"))
     scl = d.line("scl", owner="a", idle=1)
     sda = d.line("sda", "od", owner="shared", idle=1)
@@ -693,7 +697,85 @@ def test_let_go_also_after_a_timeout():
     t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1),
                 glitches=[Glitch(0, 13, 60, 1)])
     assert "TIMEOUT" in kinds(t, 1)
-    fall = min(x for x in t.wire_edges[0] if x >= g_end)  # the master's next SCL fall
+    # after the glitch the master's SCL falls (leading) and then rises (trailing, launching)
+    scl_rise = sorted(x for x in t.wire_edges[0] if x >= g_end)[1]
     halt = dict(t.engines[1].starts)[5]  # ROLE_IF, LI, XFER, ROLE_IF, RAW DELAY, HALT
     rise = [x for x in t.wire_edges[1] if x > 13]
-    assert rise and rise[0] == fall + EDGE_LAT < halt, (fall, rise, halt)
+    assert rise and rise[0] == scl_rise + EDGE_LAT < halt, (scl_rise, rise, halt)
+
+
+def i2c_cpha_desc(steps, cpha, ldelay=LD, h=16):
+    d = Description("od", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=cpha, ldelay=ldelay)
+    half = d.profile("H", nom=h, min=h - 1, max=INF)
+    for i, (owner, n, src) in enumerate(steps):
+        d.xfer(n, lane, owner=owner, prof=half, src=src, dst=f"r{4 + i}", msb_first=True)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("first,second", [("a", "b"), ("b", "a")])
+@pytest.mark.parametrize("cpha", [0, 1])
+def test_let_go_before_the_next_owner_bit_0(first, second, cpha):
+    """With cpha 0 the next leading edge captures the next step's bit 0, so the let-go is at the
+    next launching edge: the step's own last trailing edge (cpha 0), or the next leading edge
+    (cpha 1). A 0 from one party must not leak into the other party's first bit."""
+    steps = [(first, 8, "ones"), (second, 1, "zero"), (first, 8, "ones")]
+    d = i2c_cpha_desc(steps, cpha)
+    compile_desc(d)  # accepted with the timing rules
+    t = run_sys(compile_desc(d, check_timing=False))
+    for i in range(3):
+        assert [r.value for r in xfers(t, i)] == [0xFF, 0, 0xFF], (i, [hex(r.value) for r in xfers(t, i)])
+
+
+def test_no_let_go_without_a_drive():
+    """A cpha 1 XFER that times out before its first edge drove nothing, so it lets nothing go:
+    the slave's earlier HOLD 0 stays on SDA when a leading edge comes later."""
+    d = Description("od", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=LD)
+    p = d.profile("H", nom=HI2C, min=HI2C - 1, max=HI2C + 2)
+    d.hold(sda, 0, owner="b", prof=p)
+    d.xfer(1, lane, owner="b", prof=p, src="ones")
+    with d.only("b"):
+        d.raw_delay(100)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P1,), glitches=[Glitch(0, 60, 4, 0)])
+    assert "TIMEOUT" in kinds(t, 0)
+    halt = dict(t.engines[0].starts)[4]  # HOLD, XFER, ROLE_IF, RAW DELAY, HALT
+    assert not [x for x in t.wire_edges[1] if 3 < x <= halt]
+
+
+@pytest.mark.parametrize("h,rejected", [(3, True), (8, False)])
+def test_t3_covers_a_let_go_on_a_shared_od_lane(h, rejected):
+    """A clock follower that holds a let-go releases with a launch's latency, also inside the
+    other party's step: on a lane with a shared OD data line T3's launch bound applies to both
+    parties, so the master's byte at H = 3 after the slave's ACK is rejected at 2%."""
+    d = Description("od", parties=("a", "b"), tolerance_ppm=20000)
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+    ack = d.profile("A", nom=8, min=7, max=INF)
+    byte = d.profile("B", nom=h, min=h - 1, max=INF)
+    d.xfer(1, lane, owner="b", prof=ack, src="zero")
+    d.xfer(8, lane, owner="a", prof=byte, src="ones")
+    d.halt()
+    if rejected:
+        with pytest.raises(CompileError, match="T3"):
+            compile_desc(d)
+    else:
+        compile_desc(d)
+
+
+def test_od_data2_taints_dst():
+    """R2: dst of an XFER with an OD data line is tainted (the wire can differ from what was
+    sent), data2 included."""
+    def tail(d):
+        d.br("end", cond="z", reg="r1")
+        d.label("end")
+    d = duplex_desc(miso_kind="od", tail=tail)
+    with pytest.raises(CompileError, match="R2-branch"):
+        compile_desc(d, check_timing=False)
