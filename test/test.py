@@ -1,5 +1,6 @@
 """Bring-up layers (architecture §5), through the pins only so the gate-level run uses
-the same tests: 1 TESTMODE and pads, 2 host SPI with ID/SCRATCH, 4 SRAM through the host."""
+the same tests: 1 TESTMODE and pads, 2 host SPI with ID/SCRATCH, 3 GPIO override and
+LOOPBACK, 4 SRAM through the host."""
 
 import random
 
@@ -11,8 +12,11 @@ SCK, MOSI, CS_N = 1 << 0, 1 << 1, 1 << 2
 TM_DIR, TM_STRAP = 1 << 6, 1 << 7
 
 ID, VERSION = 0x5E, 0x01
-STATUS_BOOT_DONE, STATUS_TESTMODE = 1 << 0, 1 << 4
+STATUS_BOOT_DONE, STATUS_TESTMODE, STATUS_LOOPBACK = 1 << 0, 1 << 4, 1 << 5
 UO_RESET = 0x50  # flash CS_N and REPORT high, the rest low (architecture §2)
+
+PIN_CTRL, PINS, PIN_OE, PIN_OUT, PIN_OE_SET = 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+OVERRIDE, LOOPBACK = 1 << 0, 1 << 1
 
 COL1, COL2 = 0x1000, 0x3000
 WORDS = 512
@@ -205,6 +209,75 @@ async def test_spi_speeds(dut):
             v = rng.randrange(256)
             await host.write(0x0002, [v])
             assert await host.read(0x0000, 3) == [ID, VERSION, v], f"half={half} v={v:#04x}"
+
+
+# ---------------------------------------------------------------- layer 3: GPIO override, LOOPBACK
+
+async def set_pins(host, ctrl, out, oe):
+    """PIN_CTRL, then PIN_OUT and PIN_OE_SET (PINS and PIN_OE are read-only and ignore the write)."""
+    await host.write(PIN_CTRL, [ctrl, 0xFF, 0xFF, out, oe])
+    await ClockCycles(host.dut.clk, 2)  # the drive flops follow one cycle after the registers
+
+
+def check_pads(dut, out, oe):
+    assert int(dut.uio_oe.value) == oe, f"uio_oe {int(dut.uio_oe.value):#04x}, want {oe:#04x}"
+    got = int(dut.uio_out.value) & oe
+    assert got == out & oe, f"uio_out {got:#04x} on driven pins, want {out & oe:#04x}"
+
+
+@cocotb.test()
+async def test_gpio_override_off(dut):
+    """Without gpio_override, PIN_OUT and PIN_OE_SET drive nothing."""
+    await reset(dut)
+    host = Host(dut)
+    await set_pins(host, 0, 0xA5, 0xFF)
+    check_pads(dut, 0, 0)
+    assert await host.read(PIN_CTRL, 3) == [0, 0, 0]  # PIN_CTRL, PINS (uio_in = 0), PIN_OE
+
+
+@cocotb.test()
+async def test_gpio_override_drives(dut):
+    """Each pin as push-pull high, push-pull low and input; PIN_OE and PINS read back."""
+    await reset(dut)
+    host = Host(dut)
+    rng = random.Random(3)
+    cases = [(0xFF, 0xFF), (0x00, 0xFF), (0xA5, 0xF0), (0x5A, 0x0F)] + [(1 << i, 1 << i) for i in range(8)]
+    cases += [(rng.randrange(256), rng.randrange(256)) for _ in range(6)]
+    for out, oe in cases:
+        ext = rng.randrange(256)
+        dut.uio_in.value = (out & oe) | (ext & ~oe)  # the pad reads back its own drive
+        await set_pins(host, OVERRIDE, out, oe)
+        check_pads(dut, out, oe)
+        pins = (out & oe) | (ext & ~oe)
+        assert await host.read(PIN_CTRL, 3) == [OVERRIDE, pins, oe], f"out={out:#04x} oe={oe:#04x}"
+    await set_pins(host, 0, 0xFF, 0xFF)  # clearing the override releases every pin
+    check_pads(dut, 0, 0)
+
+
+@cocotb.test()
+async def test_gpio_drive_wins_over_pad(dut):
+    """Inside the chip a driven pin reads its own drive, even if the pad disagrees."""
+    await reset(dut)
+    host = Host(dut)
+    dut.uio_in.value = 0x0F
+    await set_pins(host, OVERRIDE, 0xF0, 0xFF)
+    assert await host.read(PINS, 1) == [0xF0]
+
+
+@cocotb.test()
+async def test_loopback(dut):
+    """LOOPBACK: no pin is driven; driven lines read their drive, undriven lines read 1."""
+    await reset(dut)
+    host = Host(dut)
+    dut.uio_in.value = 0x00  # ignored in LOOPBACK
+    await set_pins(host, OVERRIDE | LOOPBACK, 0x30, 0x3C)
+    check_pads(dut, 0, 0)
+    pins = 0x30 | ~0x3C & 0xFF  # 0x30 driven high, 0x0C driven low, the rest released
+    assert await host.read(PIN_CTRL, 3) == [OVERRIDE | LOOPBACK, pins, 0x3C]
+    assert (await host.read(0x0003, 1))[0] & STATUS_LOOPBACK
+    await set_pins(host, OVERRIDE, 0x30, 0x3C)  # leaving LOOPBACK drives the pads again
+    check_pads(dut, 0x30, 0x3C)
+    assert not (await host.read(0x0003, 1))[0] & STATUS_LOOPBACK
 
 
 # ---------------------------------------------------------------- layer 4: SRAM through the host

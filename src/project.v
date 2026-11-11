@@ -1,8 +1,10 @@
 `default_nettype none
 
-// Top level, bring-up layers 1, 2 and 4 (architecture §5):
+// Top level, bring-up layers 1-4 (architecture §5):
 //   1. TESTMODE: clock, reset and every pad, no SPI or SRAM needed (§2).
 //   2. Host SPI with the global ID, VERSION, SCRATCH and STATUS registers (§4).
+//   3. GPIO override and LOOPBACK: the host drives the pins through PIN_CTRL,
+//      PIN_OUT and PIN_OE_SET, and reads them back through PINS and PIN_OE.
 //   4. Host access to both SRAM columns (0x1000, 0x3000), which keeps the
 //      2 x 512x32 layout (§3, §9) in the harden.
 // Pins as in architecture §8.
@@ -33,6 +35,19 @@ module tt_um_prot_emu_SAP (
     end
   end
 
+  // ---- Pin drivers (architecture §2) ----
+  // Each source has a "pull low" and a "drive high" flop per pin. The engines
+  // will be two more sources; the host (GPIO override) is the only one so far.
+  //   uio_oe  = OR of every source's flops (forced to 0 by LOOPBACK)
+  //   uio_out = NOR of the pull-low flops (wired-AND)
+  //   inside  = low ? 0 : high ? 1 : LOOPBACK ? 1 : uio_in, then 2 sync flops
+  reg  [7:0] h_low, h_high;      // the host's drive flops
+  reg        loopback;
+  wire [7:0] drv_low  = h_low;
+  wire [7:0] drv_high = h_high;
+  wire [7:0] drv_oe   = drv_low | drv_high;
+  wire [7:0] pin_in   = ~drv_low & (drv_high | {8{loopback}} | uio_in);
+
   // ---- Input synchronizers: 2 flops on every external input ----
   reg [7:0] ui_m, ui_s, uio_m, uio_s;
   always @(posedge clk or negedge rst_n_sync) begin
@@ -44,7 +59,7 @@ module tt_um_prot_emu_SAP (
     end else begin
       ui_m  <= ui_in;
       ui_s  <= ui_m;
-      uio_m <= uio_in;
+      uio_m <= pin_in;
       uio_s <= uio_m;
     end
   end
@@ -84,15 +99,41 @@ module tt_um_prot_emu_SAP (
   wire in_col2 = haddr[15:11] == 5'b00110;  // 0x3000-0x37FF
 
   // ---- Global registers ----
-  reg [7:0] scratch;
+  reg [7:0] scratch, pin_out, pin_oe_set;
+  reg       gpio_override;
+  wire      gwr = hwr & in_glob;
   always @(posedge clk or negedge rst_n_sync) begin
-    if (!rst_n_sync) scratch <= 8'h00;
-    else if (hwr && in_glob && haddr[7:0] == 8'h02) scratch <= hwdata;
+    if (!rst_n_sync) begin
+      scratch       <= 8'h00;
+      gpio_override <= 1'b0;
+      loopback      <= 1'b0;
+      pin_out       <= 8'h00;
+      pin_oe_set    <= 8'h00;
+    end else if (gwr) begin
+      case (haddr[7:0])
+        8'h02: scratch <= hwdata;
+        8'h0B: {loopback, gpio_override} <= hwdata[1:0];
+        8'h0E: pin_out    <= hwdata;
+        8'h0F: pin_oe_set <= hwdata;
+        default: ;
+      endcase
+    end
+  end
+
+  // The host's drive flops follow PIN_OUT / PIN_OE_SET while gpio_override is set.
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) begin
+      h_low  <= 8'h00;
+      h_high <= 8'h00;
+    end else begin
+      h_low  <= {8{gpio_override}} & pin_oe_set & ~pin_out;
+      h_high <= {8{gpio_override}} & pin_oe_set &  pin_out;
+    end
   end
 
   // No boot controller yet (Plus), so boot is always done and never fails.
   // host_err has no sources yet: the illegal accesses need RUN and MEM2_MODE.
-  wire [7:0] status = {2'b00, 1'b0 /* loopback */, testmode, 1'b0 /* mem2_busy */,
+  wire [7:0] status = {2'b00, loopback, testmode, 1'b0 /* mem2_busy */,
                        1'b0 /* host_err */, 1'b0 /* boot_err */, 1'b1 /* boot_done */};
 
   // ---- SRAM host port: bytes collect into a word, which commits on its 4th byte ----
@@ -141,6 +182,9 @@ module tt_um_prot_emu_SAP (
         8'h01:   hrdata <= VERSION;
         8'h02:   hrdata <= scratch;
         8'h03:   hrdata <= status;
+        8'h0B:   hrdata <= {6'b0, loopback, gpio_override};
+        8'h0C:   hrdata <= uio_s;    // PINS: what the engines see
+        8'h0D:   hrdata <= drv_oe;   // PIN_OE: what the chip drives, before LOOPBACK
         default: hrdata <= 8'h00;
       endcase
     else if (in_col1) hrdata <= col1_q[{lane, 3'b000} +: 8];
@@ -160,8 +204,8 @@ module tt_um_prot_emu_SAP (
   wire tm_show  = testmode & ~ui_s[6];  // uo_out shows the registered uio_in
 
   assign uo_out  = tm_show  ? uio_s : uo_q;
-  assign uio_out = tm_drive ? ui_s  : 8'h00;
-  assign uio_oe  = tm_drive ? 8'hFF : 8'h00;  // every uio is an input until RUN
+  assign uio_out = tm_drive ? ui_s  : ~drv_low;
+  assign uio_oe  = tm_drive ? 8'hFF : drv_oe & {8{~loopback}};
 
   wire _unused = &{ena, ui_s[5:3], 1'b0};
 
