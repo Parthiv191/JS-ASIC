@@ -9,8 +9,8 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 
 **Model status:** the encoding, the image, fetch and issue timing (§4.0), reserved codes (§3),
 `BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
-(§4.1) and an OD owner's readback (§4.3) are v1. Still to come: clocked XFER, COND START/STOP and
-MEAS, the FIFO depths (§4.9) and the stall re-base (§4.1). The model keeps fractional clocks only to stand in for external devices.
+(§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
+(§4.1) are v1. Still to come: clocked XFER (with UNDERRUN), COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -174,6 +174,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - **Stall re-base.** If an owned step starts late because its owner stalled (`POP`, or a
     `src = FIFO` wait), it sets `tb := max(tb, start)` and logs nothing. `T5-stall` (§6) keeps
     the followers safe.
+    - A POP stall lasts until the next timed step: an owned one re-bases to its start; a followed
+      one takes its timing from the other party, and the stall re-bases nothing later.
+    - A `src = FIFO` step's start is the cycle it takes the word.
 - **Window accumulation.** Each follower keeps an anchor and the accumulated `(min, nom, max)`
   of the HOLD/XFER bits since it. These are 24-bit, and `max` carries an INF flag.
   - An edge check compares `e − anchor` against `[min − QUANT, max + QUANT]`.
@@ -249,8 +252,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - Readback isn't a follower's sample: it adds no `tr_sample` (architecture §5).
 - `dst = FIFO` pushes only in follow mode. The owner takes `src` at step start.
 - **Empty `src = FIFO`:**
-  - An owner that owns the lane's clock, or an unclocked lane, waits for data (a clock owner
-    doesn't log OVERRUN; §4.1).
+  - An owner that owns the lane's clock, or an unclocked lane, waits for data, checking every
+    cycle (a step isn't tied to own cycles), and re-bases (§4.1; a clock owner doesn't log
+    OVERRUN).
   - An owner that doesn't own the clock **sends ONES**, logs UNDERRUN and consumes nothing.
 - Bit `k` is `value >> k` (LSB first) or `value >> (n−1−k)` (MSB).
 - **Unclocked lane** (`P = nom`):
@@ -420,7 +424,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
 | `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows **or does** |
-| `T5-stall` | After an owner's possible stall (`POP`, `src = FIFO`), its next owned step must be an unbounded COND, a clocked XFER it clocks, or inside a lead block, so followers wait for it |
+| `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block. MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
 
 - Completion offsets relative to the step's end `tb`:
   - COND: do 0, follow `E` (START/STOP: `E + bus_confirm + 1`).

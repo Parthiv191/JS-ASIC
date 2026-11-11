@@ -11,7 +11,7 @@ from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
     EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
-    RawOp, Role,
+    RawOp, Role, Src,
     reg_of, unpack_role_if, unpack_xfer,
 )
 
@@ -334,6 +334,8 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                                           f"step it reaches there must be an unbounded COND it follows, "
                                           f"so it waits for the other party's next event")
 
+    _check_stalls(low, steps, timed, diags)
+
     # pairwise checks: predecessor timed step (or reset) -> next timed step
     preds: list[tuple[_Step | None, int]] = [(None, 0)] + [(s, pc + 1) for pc, s in steps.items()]
     for prev, start in preds:
@@ -364,6 +366,55 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 (_advance(prev, t)[0] for t in states.get(prev.pc, set())), default=0)
             _pair_checks(s, st, a_edge, ppm, diags)
     return diags.list()
+
+
+def _reach(instrs: list[Instr], starts: list[int], role: Role) -> set[int]:
+    """Every pc `role` can execute from `starts`."""
+    seen: set[int] = set()
+    work = [s for s in starts if s < len(instrs)]
+    while work:
+        pc = work.pop()
+        if pc in seen:
+            continue
+        seen.add(pc)
+        work += successors(instrs, pc, role)
+    return seen
+
+
+def _makes_others_wait(s: _Step, r: Role) -> bool:
+    """An unbounded COND that r does, or an unbounded clocked XFER r clocks (whoever owns its
+    data): the others wait for r however long it stalled. A bounded one times them out."""
+    if s.prof.bounded:
+        return False
+    if s.op == Op.COND:
+        return s.owner_role == r
+    return s.op == Op.XFER and s.is_clk_owner(r)
+
+
+def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags: _Diags) -> None:
+    """T5-stall (isa §6): a POP can wait for the host for any time, so the next timed step on
+    every path must be the staller's own and make the others wait for it. An owner's src = FIFO
+    XFER waits inside the step (unless the clock is someone else's: then it sends ONES), so it
+    must itself make the others wait: only a clocked XFER its owner clocks does."""
+    instrs = low.instrs
+    starts = [0] + ([low.image.abort_pc] if low.image.abort_pc else [])
+    for r in ROLES:  # MON owns no step, so nothing after a MON POP makes the others wait
+        for pc in sorted(_reach(instrs, starts, r)):
+            ins = instrs[pc]
+            if ins.op == Op.POP:
+                for nxt in sorted(gaps(instrs, timed, pc + 1, r)):
+                    if not _makes_others_wait(steps[nxt], r):
+                        diags.add("T5-stall", nxt, f"{r.name} can stall at the POP at pc {pc}; its next "
+                                                   f"timed step must be one it owns that makes the others "
+                                                   f"wait (an unbounded COND it does, or an unbounded "
+                                                   f"clocked XFER it clocks)")
+            elif ins.op == Op.XFER and steps[pc].does(r) and unpack_xfer(ins.operand)[1] == Src.FIFO:
+                s = steps[pc]
+                if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r):
+                    diags.add("T5-stall", pc, f"{r.name} owns this src = FIFO XFER and waits here while "
+                                              f"TX is empty, so its followers lose the timeline; only an "
+                                              f"unbounded clocked XFER its owner clocks may take src = "
+                                              f"FIFO (or POP into a register before an unbounded COND)")
 
 
 def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int, diags: _Diags) -> None:

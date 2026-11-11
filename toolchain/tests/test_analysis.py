@@ -442,6 +442,51 @@ def test_r2_rejects_branch_on_raw_evt_reg():
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
+# ---------------------------------------------------------------- T5-stall
+def test_t5_stall_accepts_pop_then_an_unbounded_cond_it_does():
+    """isa §6: the library UART shape. b never pops, so its followed COND is fine."""
+    d, ln, p = two_party()
+    with d.only("a"):
+        d.pop("r0")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" not in diag_rules(d)
+
+
+def test_t5_stall_rejects_pop_then_an_owned_hold():
+    d, ln, p = two_party()
+    with d.only("a"):
+        d.pop("r0")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_rejects_pop_then_a_followed_step():
+    """The stricter reading (decisions 11-10): the very next timed step must be the staller's."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="b", idle=1)
+    with d.only("a"):
+        d.pop("r0")
+    d.cond("fall", ln, owner="b")
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_rejects_an_unclocked_src_fifo_owner():
+    """The XFER itself would start late; only a clock owner (or a lead block) makes followers wait."""
+    d, ln, p = two_party()
+    d.cond("fall", ln, owner="a")
+    d.xfer(8, ln, owner="a", prof=p, src="fifo")
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_accepts_src_fifo_on_a_lane_its_owner_clocks():
+    """A clock owner's src = FIFO waits before its first edge, so the followers wait with it."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    mosi = d.line("mosi", owner="a", idle=0)
+    half = d.profile("HALF", nom=8, min=7, max=INF)
+    d.xfer(8, d.lane("out", data=mosi, clk=sck), owner="a", prof=half, src="fifo")
+    assert "T5-stall" not in diag_rules(d)
 def _xfer_then_hold(kind):
     """XFER 8, 5 NOPs, then an owned HOLD: the gap only fits a PP owner, which finishes on its last
     bit. An OD owner reads its bits back and finishes P//2 + E later (isa §6 completion offsets)."""
@@ -465,3 +510,54 @@ def test_t5_overrun_uses_an_od_owners_readback_completion():
     # the model agrees: the OD owner's HOLD starts late
     t = run_sys(compile_desc(_xfer_then_hold("od"), check_timing=False), roles=(Role.P0,))
     assert [e.kind for e in t.engines[0].events] == ["OVERRUN"]
+
+
+def _clocked(bounded, data_owner="a", fifo=False):
+    """a clocks a lane whose data line `data_owner` owns. Without `fifo`, a POPs first."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    data = d.line("data", owner=data_owner, idle=0)
+    half = d.profile("HALF", nom=8, min=7, max=9 if bounded else INF)
+    if not fifo:
+        with d.only("a"):
+            d.pop("r0")
+    d.xfer(8, d.lane("ln", data=data, clk=sck), owner=data_owner, prof=half,
+           src="fifo" if fifo else "zero")
+    return d
+
+
+def test_t5_stall_needs_an_unbounded_clocked_xfer():
+    """A clock follower's wait for the first edge times out at max + QUANT from its own start
+    (isa §4.3), so only an unbounded clocked XFER makes it wait through a stall."""
+    assert "T5-stall" in diag_rules(_clocked(bounded=True))
+    assert "T5-stall" in diag_rules(_clocked(bounded=True, fifo=True))
+    assert "T5-stall" not in diag_rules(_clocked(bounded=False))
+
+
+def test_t5_stall_accepts_a_read_its_staller_clocks():
+    """A master read after a POP: a clocks the lane and b owns the data. The followers of the
+    clock wait for a, so the step counts as a's (isa §6: a clocked XFER it clocks)."""
+    assert "T5-stall" not in diag_rules(_clocked(bounded=False, data_owner="b"))
+
+
+def test_t5_stall_covers_mon():
+    """MON owns no step, so nothing after a MON POP can make the others wait for it."""
+    d, ln, p = two_party()
+    with d.only("mon"):
+        d.pop("r0")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_checks_code_reached_only_from_abort_pc():
+    d, ln, p = two_party()
+    d.abort_to("recover")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p, abort=True)
+    d.halt()
+    d.label("recover")
+    with d.only("a"):
+        d.pop("r0")
+    d.hold(ln, 1, owner="a", prof=p)
+    d.halt()
+    assert "T5-stall" in diag_rules(d)

@@ -12,13 +12,14 @@ from typing import Iterator
 
 from ..image import Image
 from ..isa import (
-    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, MEAS_MAX, NUM_REGS, QUANT, REG_MASK, SYNC_LAT,
+    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, MEAS_MAX, NUM_REGS, QUANT, REG_MASK, RX_DEPTH,
+    SYNC_LAT,
     TIME_CLAMP, U, AluOp,
     BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved, unpack_cond,
     unpack_role_if, unpack_xfer,
 )
 
-VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE"})
+VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE", "OVERFLOW", "UNDERRUN"})
 SATURATING = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "EDGE", "CLK_PHASE"})  # measured in cycles
 # the sticky event register's bits (isa §4.1); 0 START and 1 STOP come with the bus detector
 EVT_BIT = {"TIMEOUT": 1 << 2, "LEVEL": 1 << 3, "EDGE": 1 << 3, "CLK_PHASE": 1 << 3,
@@ -112,6 +113,7 @@ class Engine:
         self.branches: list[Branch] = []
         self.starts: list[tuple[int, int]] = []  # (pc, now) per instruction start: the tr_issue trace
         self._abort_at: int | None = None        # decision cycle of an abort, until abort_pc starts
+        self._stalled = False                    # POP waited since the last timed step (isa §4.1)
         self.halted = False
         self.halt_cycle: int | None = None
         self.idle = False
@@ -146,6 +148,22 @@ class Engine:
 
     def does(self, ins: Instr) -> bool:
         return self.role != Role.MON and (ins.owner == Owner.SHARED or int(ins.owner) == int(self.role))
+
+    def _step_start(self, ins: Instr) -> None:
+        """A timed step starts: clear `to`, and end any stall. If the owner stalled since its last
+        timed step, an owned step starts on its own time: tb := max(tb, start) (the stall
+        re-base, isa §4.1). A followed step takes its timing from the other party instead."""
+        self.to = False
+        stalled, self._stalled = self._stalled, False
+        if stalled and self.does(ins):
+            self.tb = max(self.tb, self.now)
+
+    def _push_rx(self, v: int) -> None:
+        """Into the RX FIFO; when it is full the word is dropped with OVERFLOW (isa §4.9)."""
+        if len(self.rx) >= RX_DEPTH:
+            self.log("OVERFLOW")
+        else:
+            self.rx.append(v & REG_MASK)
 
     def log(self, kind: str, measured=None, lo=None, hi=None) -> None:
         if kind in SATURATING and measured is not None:
@@ -227,6 +245,10 @@ class Engine:
                 yield from self.wait_until(self._next_start(start, self.now - 1))
 
     def _halt(self) -> Gen:
+        # isa §4.1: PP lines keep their level, OD lines are released
+        for i, ln in enumerate(self.lines):
+            if ln.kind == "od":
+                self.drv[i] = None
         self.halted = True
         self.halt_cycle = self.now
         self.idle = True
@@ -282,12 +304,13 @@ class Engine:
         yield
 
     def _op_push(self, ins: Instr) -> Gen:
-        self.rx.append(self.regs[ins.ra])
+        self._push_rx(self.regs[ins.ra])
         self.pc += 1
         yield
 
     def _op_pop(self, ins: Instr) -> Gen:
         while not self.tx:  # retried only on own cycles; idle (waiting on the host) throughout
+            self._stalled = True
             self.idle = True
             yield
             self.idle = True
@@ -336,7 +359,7 @@ class Engine:
         if kind not in (CondKind.FALL, CondKind.RISE):
             raise NotImplementedError(f"COND {kind.name} lands in Phase 4 (pc {self.pc})")
         level = 1 if kind == CondKind.RISE else 0
-        self.to = False
+        self._step_start(ins)
         if self.does(ins):
             planned = self.tb + p.nom
             yield from self.wait_until(planned)
@@ -377,7 +400,7 @@ class Engine:
     def _op_hold(self, ins: Instr) -> Gen:
         p = self.image.profiles[ins.prof]
         level = ins.operand & 1
-        self.to = False
+        self._step_start(ins)
         planned = self.tb
         if self.does(ins):
             yield from self.wait_until(planned)
@@ -417,7 +440,7 @@ class Engine:
         msb = bool(ins.flags & F_MSB)
         if src == Src.FZ:
             raise NotImplementedError(f"XFER src=FZ lands in Task 20 (pc {self.pc})")
-        self.to = False
+        self._step_start(ins)
         line, P, mask = lane.data, p.nom, (1 << n) - 1
 
         def pos(k: int) -> int:  # value bit carried by wire slot k
@@ -425,9 +448,11 @@ class Engine:
 
         if self.does(ins):
             if src == Src.FIFO:
-                while not self.tx:
-                    self.idle = True
-                    yield
+                if not self.tx:
+                    while not self.tx:  # checked every cycle: a step isn't tied to own cycles
+                        self.idle = True
+                        yield
+                    self.tb = max(self.tb, self.now)  # the stall re-base: the step starts now
                 v = self.tx.popleft()
             elif src == Src.ZERO:
                 v = 0
@@ -499,7 +524,7 @@ class Engine:
             self.tb = a + (n - ak) * P
             mode = "follow"
             if dst == Dst.FIFO:
-                self.rx.append(v)
+                self._push_rx(v)
         if dst >= Dst.R0:
             self.regs[reg_of(dst)] = v & REG_MASK
         self._accumulate(p, n)
