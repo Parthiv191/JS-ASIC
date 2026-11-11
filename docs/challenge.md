@@ -62,8 +62,8 @@ Brief: https://blog.janestreet.com/protocol-emulator-asic-competition/ (posted S
 
 | # | For | Question | Why |
 |---|---|---|---|
-| Q1 | Jane Street | The brief now says the demo board's **RP2350** makes the clock and that 60 MHz is OK. We wrote RP2040 (architecture §8, chip-spec §3). Which MCU is on the board we'll get? | host software and the pin check in architecture §8 |
-| Q2 | Jane Street | Is a design that ships the host-driven fuzzer instead of the on-chip one (our Dec 15 cut rule) still judged on the same architecture? | the Novel tier's fallback |
+| Q1 | Jane Street | Which MCU is on the demo board: RP2350 (the brief, Nov 9) or RP2040 (architecture §8, chip-spec §3)? **Not asked (team decision 11-10). Working answer: RP2350**, as the brief says. Host SPI uses PIO, which both chips have, so nothing in the design depends on it | host software; the pin check in architecture §8 |
+| Q2 | Jane Street | Is a design that ships the host-driven fuzzer (our Dec 15 cut rule) judged the same way? **Not asked (team decision 11-10). Working answer: yes.** The brief has no fixed weighting and says fewer features with a strong architecture and verification can compete. If the cut happens, the writeup says so plainly, with the gate evidence | the Novel tier's fallback |
 | Q3 | Tiny Tapeout | Pad pull-ups, and the pad round-trip delay on CMOS5L. **Partly answered 11-10** (TT Discord): max pad frequency ~60 MHz out, ~75 MHz in, a bit more if duty-cycle distortion is tolerable. Pull-ups and the round-trip delay are still open | host SPI at clk/8, flash sampling (architecture §6) |
 
 Draft messages for the human to send live in the supervisor's handoff, not here.
