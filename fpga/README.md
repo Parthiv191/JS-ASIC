@@ -51,7 +51,8 @@ All switches down.
 | 4 program SRAM | `... sram` | 2048 random bytes read back |
 | 5 one engine | `... engine` | engine 0 halts with r0–r2 = 0x1234, 0x0FF0, 0x1DC4 |
 | 6 LOOPBACK | waits for engine 1 in the RTL | |
-| 7 a device | the microcontroller sends 4 bytes at 115200 8N1 (3.3 V) to JB pin 1, ground shared; `... uart-rx` | the bytes arrive in RX, no violations |
+| 7a UART to a device (M1) | the microcontroller's UART RX on JB pin 1 at 115200 8N1 (3.3 V), ground shared; `... uart-tx` | it prints "Hello from the JS-ASIC engine"; TX drains, no violations, the engine waits on POP |
+| 7b UART from a device | the microcontroller's UART TX on JB pin 1 instead; `... uart-rx`, then send 4 bytes | the bytes arrive in RX, no violations |
 
 Every layer's register sequence also runs in `fpga/sim` against the RTL, so a failure on the
 board points at the board, the pins or the build, not the sequence.

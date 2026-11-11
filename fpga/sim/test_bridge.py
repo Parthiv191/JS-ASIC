@@ -65,8 +65,8 @@ async def read(dut, addr, n):
     return got[4:]           # CMD, ADDR_H, ADDR_L, then the dummy byte
 
 
-async def write(dut, addr, data):
-    await spi(dut, [0x00, addr >> 8, addr & 0xFF] + list(data))
+async def write(dut, addr, data, pair=False):
+    await spi(dut, [0x40 if pair else 0x00, addr >> 8, addr & 0xFF] + list(data))
 
 
 @cocotb.test()
@@ -160,3 +160,50 @@ async def test_one_engine_runs_a_tiny_program(dut):
         lo, hi = await read(dut, 0x2014, 2)
         regs.append(lo | hi << 8)
     assert regs == [0x1234, 0x0FF0, 0x1234 ^ 0x0FF0]
+
+
+async def uart_line(dut, pin, bit, n):
+    """n 8N1 frames decoded from Pmod JB pin `pin` at `bit` clk per bit."""
+    got = []
+    for _ in range(n):
+        for _ in range(40 * bit):
+            if not int(dut.JB.value) >> pin & 1:
+                break
+            await ClockCycles(dut.clk, 1)
+        else:
+            raise AssertionError(f"no start bit on JB pin {pin} (got {got})")
+        await ClockCycles(dut.clk, bit // 2)
+        assert int(dut.JB.value) >> pin & 1 == 0, "start bit too short"
+        v = 0
+        for i in range(8):
+            await ClockCycles(dut.clk, bit)
+            v |= (int(dut.JB.value) >> pin & 1) << i
+        await ClockCycles(dut.clk, bit)
+        assert int(dut.JB.value) >> pin & 1 == 1, "no stop bit"
+        got.append(v)
+    return got
+
+
+@cocotb.test()
+async def test_uart_tx_sends_the_host_bytes_on_io0(dut):
+    """Demo step 5 (M1's program): the library UART as tx at 115200 baud (347 clk per bit at
+    40 MHz) sends the bytes the PC pushed into TXDATA, on IO0 (JB pin 1), as host/bringup.py's
+    uart-tx layer runs it for the microcontroller to receive."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "toolchain"))
+    from emu.compiler import compile_desc
+    from emu.protocols import get
+    await start(dut)
+    for addr, blob in compile_desc(get("uart").build(bit_cycles=347)).host_writes():
+        await write(dut, addr, list(blob))
+    await write(dut, 0x2000, [0])                        # ROLE := P0, the transmitter
+    data = [0x4A, 0x53]
+    await write(dut, 0x2030, [b for w in data for b in (w, 0)], pair=True)   # TXDATA
+    rx = cocotb.start_soon(uart_line(dut, 0, 347, len(data)))
+    await write(dut, RUN, [0b01])
+    assert await rx == data
+    (counts,) = await read(dut, 0x2003, 1)
+    (st,) = await read(dut, 0x2002, 1)
+    assert counts & 0x7 == 0, "TX drained"
+    assert st & 0b11 == 0b01, "still running: POP stalls on the empty TX FIFO"

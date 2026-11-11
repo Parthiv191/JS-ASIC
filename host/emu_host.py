@@ -11,11 +11,14 @@ one dummy byte first. Multi-byte registers are little-endian.
 """
 from __future__ import annotations
 
+import time
+
 ENG0 = 0x2000
 E_ROLE, E_STATUS, E_FIFO_COUNTS, E_PC, E_VIOL = 0x00, 0x02, 0x03, 0x04, 0x06
 E_REG_SEL, E_REG_DATA, E_TXDATA, E_RXDATA = 0x12, 0x14, 0x30, 0x32
 ID, VERSION, SCRATCH, STATUS, RUN, SOFT_RESET = 0x00, 0x01, 0x02, 0x03, 0x04, 0x05
 CHUNK = 4096   # bytes per write frame; the address advances between frames
+TX_DEPTH = 4   # TXDATA words per engine (architecture §4)
 
 
 class Bridge:
@@ -95,6 +98,23 @@ class Chip:
     def tx_push(self, engine: int, words: list[int]) -> None:
         data = b"".join(w.to_bytes(2, "little") for w in words)
         self.write(ENG0 + 0x100 * engine + E_TXDATA, data, pair=True)
+
+    def tx_stream(self, engine: int, words: list[int], depth: int = TX_DEPTH,
+                  timeout: float = 10.0) -> None:
+        """Push `words` into TXDATA as the engine pops them, never past `depth` words in the FIFO
+        (a push into a full FIFO is lost). TimeoutError if the engine stops popping."""
+        words = list(words)
+        t0 = time.monotonic()
+        while words:
+            room = depth - self.fifo_counts(engine)[0]
+            if room > 0:
+                self.tx_push(engine, words[:room])
+                words = words[room:]
+                t0 = time.monotonic()
+            elif time.monotonic() - t0 > timeout:
+                raise TimeoutError(f"engine {engine} stopped popping TX with {len(words)} words left")
+            else:
+                time.sleep(0.001)
 
     def rx_pop(self, engine: int, n: int) -> list[int]:
         b = self.read(ENG0 + 0x100 * engine + E_RXDATA, 2 * n, pair=True)

@@ -4,7 +4,7 @@ the host SPI protocol (architecture §4) over a byte-addressed register file. Ru
 """
 import pytest
 
-from emu_host import ENG0, E_REG_DATA, E_REG_SEL, E_RXDATA, E_TXDATA, ID, Bridge, Chip
+from emu_host import ENG0, E_FIFO_COUNTS, E_REG_DATA, E_REG_SEL, E_RXDATA, E_TXDATA, ID, Bridge, Chip
 
 
 class FakeBridgePort:
@@ -19,6 +19,8 @@ class FakeBridgePort:
         self.tx = []                 # words pushed into TXDATA (engine 0)
         self.rx = []                 # words waiting in RXDATA (engine 0)
         self.reg = [0] * 8
+        self.pending = 0             # TX words the engine hasn't popped yet
+        self.max_pending = 0
 
     def write(self, b):
         assert b[0] == 0xA5, "every bridge frame starts with 0xA5"
@@ -51,6 +53,9 @@ class FakeBridgePort:
                         w = self.rx.pop(0) if self.rx else 0
                         word = [w & 0xFF, w >> 8]
                     out.append(word.pop(0))
+                elif a == ENG0 + E_FIFO_COUNTS:
+                    out.append(min(self.pending, 7) | min(len(self.rx), 15) << 4)
+                    self.pending = max(0, self.pending - 1)    # the engine pops one per poll
                 elif base == ENG0 + E_REG_DATA:
                     out.append((self.reg[self.mem.get(ENG0 + E_REG_SEL, 0)] >> (8 * (a & 1))) & 0xFF)
                 else:
@@ -60,6 +65,8 @@ class FakeBridgePort:
                     word.append(b)
                     if len(word) == 2:
                         self.tx.append(word[0] | word[1] << 8)
+                        self.pending += 1
+                        self.max_pending = max(self.max_pending, self.pending)
                         word = []
                 else:
                     self.mem[a] = b
@@ -107,6 +114,22 @@ def test_tx_push_and_rx_pop_use_pair_mode_words(chip):
     assert chip.rx_pop(0, 2) == [0x00A4, 0x0055]
 
 
+def test_tx_stream_sends_every_word_in_order_never_past_tx_depth(chip):
+    """TXDATA has 4 words (TX_DEPTH); a push into a full FIFO is lost (architecture §4)."""
+    words = list(range(0x41, 0x41 + 21))
+    chip.tx_stream(0, words)
+    assert chip.bridge.port.tx == words
+    assert chip.bridge.port.max_pending <= 4
+
+
+def test_tx_stream_times_out_if_the_engine_never_pops(chip, monkeypatch):
+    port = chip.bridge.port
+    monkeypatch.setattr(port, "_spi", lambda data, f=port._spi: f(data) if data[2] != E_FIFO_COUNTS
+                        else [0, 0, 0, 0, 4])           # TX stays full
+    with pytest.raises(TimeoutError):
+        chip.tx_stream(0, list(range(8)), timeout=0.2)
+
+
 def test_reg_reads_through_the_register_window(chip):
     chip.bridge.port.reg = [i * 0x101 for i in range(8)]
     assert chip.regs(0) == [i * 0x101 for i in range(8)]
@@ -124,3 +147,13 @@ def test_load_stops_the_engines_then_writes_the_image():
     assert port.frames[0] == bytes([0x00, 0x00, 0x04, 0x00])   # RUN := 0 first
     for addr, data in img.host_writes():
         assert bytes(port.mem.get(addr + i, 0) for i in range(len(data))) == data
+
+
+def test_uart_tx_layer_runs_engine_0_as_the_transmitter_and_streams_the_text():
+    import bringup
+    port = FakeBridgePort()
+    port.mem[ENG0 + 0x02] = 0b01                     # STATUS: running
+    bringup.layer_uart_tx(Chip(Bridge(port)), b"JS-ASIC\r\n")
+    assert port.tx == list(b"JS-ASIC\r\n")
+    assert port.mem[ENG0] == 0                      # ROLE := P0, the UART's tx party
+    assert port.mem[0x04] == 0b01                   # RUN engine 0

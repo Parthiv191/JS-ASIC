@@ -4,6 +4,7 @@
     python bringup.py --port COM5 gpio     # layer 3: GPIO override drives Pmod JB
     python bringup.py --port COM5 sram     # layer 4: program SRAM write and read back
     python bringup.py --port COM5 engine   # layer 5: one engine runs a tiny program
+    python bringup.py --port COM5 uart-tx  # layer 7: the library UART sends to a device (M1)
     python bringup.py --port COM5 uart-rx  # layer 7: the library UART receives from a device
 
 Layer 1 (TESTMODE) needs no PC: see README.md. Each check prints what it saw and exits 1 on the
@@ -84,6 +85,30 @@ def layer_engine(chip: Chip) -> None:
     check("r0-r2", chip.regs(0)[:3], [0x1234, 0x0FF0, 0x1234 ^ 0x0FF0])
 
 
+def layer_uart_tx(chip: Chip, text: bytes = b"Hello from the JS-ASIC engine\r\n") -> None:
+    """The library UART (115200 baud at 40 MHz) as tx on engine 0, on IO0 (JB pin 1): the PC
+    streams `text` into TXDATA. The microcontroller receives on IO0 (3.3 V, 8N1, ground shared)
+    and should print `text`. fpga/sim's test_uart_tx_sends_the_host_bytes_on_io0 runs this path."""
+    from emu.compiler import compile_desc
+    from emu.isa import Role
+    from emu.protocols import get
+    chip.load(compile_desc(get("uart").build(bit_cycles=347)))
+    chip.set_role(0, Role.P0)
+    chip.run(0b01)
+    print(f"     sending {text!r} on IO0 (JB pin 1) at 115200 8N1")
+    chip.tx_stream(0, list(text))
+    for _ in range(100):                  # the last word leaves the FIFO, then its 87 us frame
+        if chip.fifo_counts(0)[0] == 0:
+            break
+        time.sleep(0.01)
+    time.sleep(0.001)
+    check("TX drained", chip.fifo_counts(0)[0], 0)
+    st = chip.status(0)
+    check("violations", st["viol"], 0)
+    check("running, stalled on POP for the next byte", (st["running"], st["halted"]), (1, 0))
+    print("     the microcontroller should have printed the text above")
+
+
 def layer_uart_rx(chip: Chip, n: int = 4, wait: float = 5.0) -> None:
     """The library UART (115200 baud at 40 MHz) as rx on engine 0: line 0 is JB pin 0 (IO0).
     Have the microcontroller send `n` bytes to IO0 (3.3 V, 8N1); they arrive in RX."""
@@ -107,7 +132,7 @@ def layer_uart_rx(chip: Chip, n: int = 4, wait: float = 5.0) -> None:
 
 
 LAYERS = {"id": layer_id, "gpio": layer_gpio, "sram": layer_sram, "engine": layer_engine,
-          "uart-rx": layer_uart_rx}
+          "uart-tx": layer_uart_tx, "uart-rx": layer_uart_rx}
 
 
 def main() -> None:
