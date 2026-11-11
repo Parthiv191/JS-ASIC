@@ -3,7 +3,7 @@ project:
   title:        "Protocol Emulator"      # Project title
   author:       "Parthiv"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "Programmable protocol emulator: UART, SPI and I2C in firmware, in any role, with a learning bus fuzzer (bring-up design for now)"      # One line description of what your project does
+  description:  "Programmable protocol emulator: UART, SPI and I2C in firmware, in any role, with a learning bus fuzzer"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     50000000       # Clock frequency in Hz (or 0 if not applicable)
 
@@ -18,6 +18,7 @@ project:
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
+    - "host_spi.v"
     - "uart_tx.v"
     - "prog_mem.v"
 
@@ -25,34 +26,34 @@ project:
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: "DATA0"
-  ui[1]: "DATA1"
-  ui[2]: "DATA2"
-  ui[3]: "DATA3"
-  ui[4]: "DATA4"
-  ui[5]: "DATA5"
-  ui[6]: "DATA6"
-  ui[7]: "DATA7"
+  ui[0]: "HOST_SCK"
+  ui[1]: "HOST_MOSI"
+  ui[2]: "HOST_CS_N"
+  ui[3]: "FLASH_MISO"
+  ui[4]: "BOOT strap"
+  ui[5]: ""
+  ui[6]: "TESTMODE direction"
+  ui[7]: "TESTMODE strap"
 
   # Outputs
-  uo[0]: "TX (VIEW: MEM_BIT0)"
-  uo[1]: "BUSY (VIEW: MEM_BIT1)"
-  uo[2]: "VIEW: MEM_BIT2"
-  uo[3]: "VIEW: MEM_BIT3"
-  uo[4]: "VIEW: MEM_BIT4"
-  uo[5]: "VIEW: MEM_BIT5"
-  uo[6]: "VIEW: MEM_BIT6"
-  uo[7]: "VIEW: MEM_BIT7"
+  uo[0]: "HOST_MISO"
+  uo[1]: "IRQ"
+  uo[2]: "ERR"
+  uo[3]: "FLASH_SCK"
+  uo[4]: "FLASH_CS_N"
+  uo[5]: "FLASH_MOSI"
+  uo[6]: "REPORT (UART TX)"
+  uo[7]: "ACT"
 
   # Bidirectional pins
-  uio[0]: "SEND"
-  uio[1]: "MEM_ADDR"
-  uio[2]: "MEM_DATA"
-  uio[3]: "MEM_WRITE"
-  uio[4]: "MEM_READ"
-  uio[5]: "MEM_CHASE"
-  uio[6]: "MEM_VIEW"
-  uio[7]: ""
+  uio[0]: "IO0"
+  uio[1]: "IO1"
+  uio[2]: "IO2"
+  uio[3]: "IO3"
+  uio[4]: "IO4"
+  uio[5]: "IO5"
+  uio[6]: "IO6"
+  uio[7]: "IO7"
 
 # Do not change!
 yaml_version: 6

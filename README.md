@@ -10,14 +10,14 @@ the ones that make a device respond in new ways.
 
 Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
 
-## Status (2026-11-10)
+## Status (2026-11-11)
 
 - **Design:** ISA v1, the architecture and the scope are decided, apart from the items marked Open ([docs/design/](docs/design/README.md)).
   Milestones: a first end-to-end chip by Nov 29, Core complete by Dec 13, then improvement rounds
   until the Jan 17 submission ([chip-spec §4](docs/design/chip-spec.md), [plan](docs/plan.md)).
-- **On the chip today:** a bring-up design, a fixed UART transmitter and a trial harness for the
-  program memory. The first engine (host SPI, GPIO override, fetch/issue and the timed steps) is
-  in review and replaces it.
+- **On the chip today:** TESTMODE, the host SPI port (ID, SCRATCH, STATUS), GPIO override and
+  LOOPBACK, and both 512x32 SRAM columns through the host. CI hardens it at 8x4 and passes
+  precheck and the gate-level tests. Engine 0 (fetch/issue and the timed steps) is in review.
 - **Toolchain:** the encoding, image format and the reference model's fetch and issue timing are
   at ISA v1; a UART runs in every role from one description. Co-sim against the RTL is in review.
 - **Challenge compliance:** [docs/challenge.md](docs/challenge.md).
@@ -26,7 +26,7 @@ Top module: `tt_um_prot_emu_SAP`. Datasheet: [docs/info.md](docs/info.md).
 
 | Path | Contents |
 |---|---|
-| `src/` | Verilog (`project.v`, `uart_tx.v`, `prog_mem.v`), LibreLane config, custom PDN script |
+| `src/` | Verilog (`project.v` top level, `host_spi.v`, `prog_mem.v` SRAM wrapper), LibreLane config, custom PDN script |
 | `test/` | cocotb tests, RTL and gate-level ([test/README.md](test/README.md)) |
 | `flow/` | blackbox of the SRAM macro for the lint step |
 | `toolchain/` | Python ISA, compiler and reference model ([toolchain/README.md](toolchain/README.md)) |

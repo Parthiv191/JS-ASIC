@@ -35,9 +35,9 @@ submit if a later round fails.
 | V7 | fuzzer instructions (FZ): behaviour and cycle costs in isa.md | verification | — | Dec 1* | Open |
 | V8 | host software (`host/`): load an image, run, read back | verification | D2 | Nov 27* | Not started (needed for R8) |
 | D1 | CI path filter | devOps | — | Nov 10 | Done (#9) |
-| D2 | 2 × 512x32 SRAM on `main` at 8x4 | devOps | — | Nov 12* | Open #10 |
-| D3 | RTL bring-up layers 1–4: TESTMODE, host SPI, GPIO override, LOOPBACK | devOps | D2 | Nov 12* | Open #11, #12 |
-| D4 | engine 0: fetch/issue, untimed ops, timed steps | devOps | D3 | Nov 14* | Open #13, #14 |
+| D2 | 2 × 512x32 SRAM on `main` at 8x4 | devOps | — | Nov 12* | Done (#10) |
+| D3 | RTL bring-up layers 1–4: TESTMODE, host SPI, GPIO override, LOOPBACK | devOps | D2 | Nov 12* | Done (#11, #12) |
+| D4 | engine 0: fetch/issue, untimed ops, timed steps | devOps | D3 | Nov 14* | Open #13, #14 (both now based on `main`) |
 | D5 | FIFOs, PUSH/POP, `src`/`dst` = FIFO, TXDATA/RXDATA (a host-fed UART needs them) | devOps | D4 | Nov 21* | Not started |
 | D6 | first full place-and-route with engine 0: area and slow-corner timing | devOps | D4 | Nov 21* | Partial: #13 gds passed; #14 253.5K µm², slow corner −2.90 ns; area branch 219.9K, −2.76 ns |
 | D7 | clocked lanes, bus detector (START/STOP, SELECT), engine 1 (layer 6) | devOps | D5 | Dec 5* | Not started |
@@ -45,8 +45,8 @@ submit if a later round fails.
 | D9 | area and timing verdict at engine 1's harden; sign-off clock 50 or 40 MHz | devOps | D7 | Dec 6* | Not started |
 | D10 | fuzzer model (`toolchain/emu/fuzz/`) and the baseline comparison | devOps | V7 | Dec 12* | **Not started** |
 | S1 | `challenge.md`, `plan.md` | supervisor | — | Nov 10 | Done (#20) |
-| S2 | `info.md` and `info.yaml` pinout to architecture §8 | supervisor | D3 | Nov 13* | Not started |
-| S3 | `writeup.md` skeleton; `demo.md` for the FPGA demo | supervisor | — | Nov 20* | Skeletons in review |
+| S2 | `info.md` and `info.yaml` pinout to architecture §8 | supervisor | D3 | Nov 13* | Done (#26) |
+| S3 | `writeup.md` skeleton; `demo.md` for the FPGA demo | supervisor | — | Nov 20* | Skeletons done (#21); filled in as work lands |
 | S4 | M1 evidence and the `m1-first-chip` tag | supervisor | V4b, D6 | Nov 29 | — |
 | S5 | Dec 15 gate report: met or not, with evidence and the cut order | supervisor | V6, D10 | Dec 14 | — |
 
