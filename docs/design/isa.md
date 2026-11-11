@@ -11,7 +11,7 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 `BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
 (§4.1) and clocked XFER, duplex and OD data with the let-go included (§4.3, with CLK_PHASE,
-TIMEOUT and UNDERRUN), are v1. Still to come: clock stretching, COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
+TIMEOUT and UNDERRUN) and clock stretching, are v1. Still to come: COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -317,11 +317,14 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     release can happen during later HOLD, COND or untimed instructions.
   - With I2C (cpol 1, cpha 1) a release never happens while SCL is high.
 - **Clock stretching (lanes with `stretch`).**
-  - After each release of `clk` planned at `t`, the clock owner waits until it reads `clk = 1` at
-    cycle `c`, and takes `e = c − EDGE_LAT`.
+  - After each release of `clk` (an edge it drives to 1) planned at `t`, the clock owner waits
+    until it reads `clk = 1` at cycle `c ≥ t + EDGE_LAT`, and takes `e = c − EDGE_LAT`.
   - If `e > t`, the rest of the step and `tb` shift by `e − t`.
-  - The wait is bounded by `max`: TIMEOUT, then ABORT, or `to` set, `tb := now` and the step
-    ends.
+  - While it waits it makes no later edge and takes no sample; a sample on that release (a
+    capture edge) is taken when it sees it. Launches go on at their planned time plus the shift
+    so far: the owner can't know about a stretch sooner.
+  - The wait is bounded by `max`: TIMEOUT when `now − EDGE_LAT − t > max + QUANT`, then ABORT,
+    or `to` set, `tb := now` and the step ends.
   - RTL note: when `e > t`, add the shift to the step's offset counter; don't re-add it to
     every planned time.
   - `HOLD clk 1` and `COND RISE clk` on a stretch lane's clock wait the same way.
@@ -450,7 +453,8 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
     `−nom + nom//2 + E`.
   - Unclocked XFER: do `−P` (`n = 1`: `−P + max(0, L)`, as HOLD), follow `−P + P//2 + E`.
   - Clocked XFER: clock follower `E`; clock owner with the data 0; clock owner following the
-    data `max(0, E − H)` (cpha 0) or `E` (cpha 1). Add `E` on a stretch lane.
+    data `max(0, E − H)` (cpha 0) or `E` (cpha 1). On a stretch lane whose last edge is a release
+    (`cpol = 1`), the clock owner completes when it sees it: at least `E`.
   - **OD owners** read their data back, so they complete at the follow offsets: unclocked
     `−P + P//2 + E`, clocked at the last capture `+ E`. PP owners don't sample.
   - Stretched HOLD/COND on a stretch clock: `+E`. A timed-out followed COND:

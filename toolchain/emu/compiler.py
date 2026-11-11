@@ -79,7 +79,8 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle) for ln in desc.lines]
     profiles = [IDLE] + list(desc.profiles)
     lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha,
-                     data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay)
+                     data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay,
+                     stretch=int(la.stretch))
              for la in desc.lanes]
 
     # ---- pass 1: layout (pcs, labels, spans) ----
@@ -272,6 +273,8 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
             # engines tell a leading edge by the level the clock goes to (isa §4.3)
             err("S-lane", s, f"clock line {lines[clk].name!r} idles at {lines[clk].idle}, "
                              f"not at the lane's cpol {la.cpol}")
+        if s.kind == "xfer" and isinstance(ref, LaneRef) and la.stretch and (clk is None or lines[clk].kind != "od"):
+            err("S-bus", s, f"lane {la.name!r} stretches, so its clock must be an OD line")
         if s.kind == "xfer" and isinstance(ref, LaneRef):
             used = [x.index for x in (la.data, la.clk, la.data2) if x is not None]
             if len(set(used)) != len(used):

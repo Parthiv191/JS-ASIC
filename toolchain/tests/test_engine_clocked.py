@@ -362,13 +362,6 @@ def test_t3_rejects_a_short_half_period(h):
             assert got(t, 0) == VALUE
 
 
-def test_stretch_fails_loudly():
-    img = spi()
-    img = replace(img, lanes=[replace(img.lanes[0], stretch=1)])
-    with pytest.raises(NotImplementedError, match="part 2c"):
-        run_sys(img)
-
-
 # ---------------------------------------------------------------- duplex (isa §4.3)
 A, B = 0x4B, 0xC6  # P0's MOSI word, P1's MISO word
 
@@ -779,3 +772,174 @@ def test_od_data2_taints_dst():
     d = duplex_desc(miso_kind="od", tail=tail)
     with pytest.raises(CompileError, match="R2-branch"):
         compile_desc(d, check_timing=False)
+
+
+# ---------------------------------------------------------------- clock stretching (part 2c)
+HS = 8
+
+
+def stretch_desc(stretch=True, hi=INF, abort=False, h=HS, body=None):
+    """I2C-like: OD SCL owned by a (cpol 1, so every trailing edge is a release), shared OD SDA,
+    cpha 1. By default the master sends ONES; `body(d, scl, sda, lane, prof)` replaces that."""
+    d = Description("st", parties=("a", "b"))
+    scl = d.line("scl", "od", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, stretch=stretch)
+    prof = d.profile("H", nom=h, min=h - 1, max=hi)
+    d.abort_to("end")
+    if body:
+        body(d, scl, sda, lane, prof)
+    else:
+        d.xfer(8, lane, owner="a", prof=prof, src="ones", dst="r4", abort=abort)
+    d.label("end")
+    d.halt()
+    return d
+
+
+def stretch_img(**kw):
+    return compile_desc(stretch_desc(**kw), check_timing=False)
+
+
+START_S = 2                               # the XFER is instruction 0
+TB_S = max(0, START_S - HS)               # cpha 1: tb := max(tb, start - H)
+
+
+def trailing(k, tb=TB_S):
+    return tb + (2 * k + 2) * HS
+
+
+def test_stretch_lane_without_a_stretch_keeps_the_timing():
+    """With nobody stretching, the clock owner sees each release EDGE_LAT after it and nothing
+    shifts: the same SCL edges and values as on a lane without stretch."""
+    a, b = run_sys(stretch_img()), run_sys(stretch_img(stretch=False))
+    assert a.wire_edges[0] == b.wire_edges[0]
+    assert all(got(a, i) == got(b, i) == 0xFF for i in range(3))
+
+
+def test_a_stretch_shifts_the_rest_of_the_step():
+    """A target holds SCL low for K ticks after the master's third release: the master reads
+    SCL = 1 K ticks late, so its later edges and tb shift by K, and everyone still reads ONES."""
+    K = 10
+    rel = trailing(2)                      # driven at rel, on the wire from rel + 1
+    t = run_sys(stretch_img(), glitches=[Glitch(0, rel + 1, K, 0)])
+    base = run_sys(stretch_img())
+    later = [x for x in base.wire_edges[0] if x > rel + 1]
+    assert [x for x in t.wire_edges[0] if x > rel + 1] == [rel + 1 + K] + [x + K for x in later]
+    for i in range(3):
+        assert got(t, i) == 0xFF and not t.engines[i].violations, (i, t.engines[i].events)
+    assert xfers(t, 0)[0].tb == trailing(7) + K
+
+
+def test_stretch_completion_matches_the_compiler():
+    """isa §6: the clock owner on a stretch lane completes when it sees its last release (cpol 1:
+    the last trailing edge) + EDGE_LAT; analysis.completion() agrees in every role."""
+    d = stretch_desc()
+    step = next(s for s in _steps(lower(d)).values() if s.clocked)
+    t = run_sys(compile_desc(d, check_timing=False))
+    for i, r in enumerate((Role.P0, Role.P1, Role.MON)):
+        (rec,) = xfers(t, i)
+        assert rec.cycle - rec.tb == completion(step, r)[0], r
+    assert xfers(t, 0)[0].cycle - xfers(t, 0)[0].tb == EDGE_LAT
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_a_stretch_past_max_times_out(abort):
+    """The wait is bounded by max: TIMEOUT when the release is still not seen max + QUANT after
+    it was planned (now - EDGE_LAT - t > max + QUANT). Without ABORT: to := 1, tb := now, no
+    dst. The followers here are unbounded."""
+    rel = trailing(2)
+    img = stretch_img(hi=HS + 4, abort=abort)
+    free = stretch_img(abort=abort)
+    t = run_sys(img, images={1: free, 2: free}, glitches=[Glitch(0, rel + 1, 40, 0)])
+    ev = next(e for e in t.engines[0].events if e.kind == "TIMEOUT")
+    assert ev.cycle == rel + EDGE_LAT + (HS + 4) + QUANT + 1
+    if abort:
+        assert kinds(t, 0)[:2] == ["TIMEOUT", "ABORT"] and not xfers(t, 0)
+    else:
+        assert xfers(t, 0)[0].value is None and xfers(t, 0)[0].tb == ev.cycle
+
+
+def test_hold_and_cond_on_a_stretch_clock_wait_too():
+    """HOLD clk 1 and COND RISE clk done on a stretch lane's clock wait for the clock to read 1
+    and shift tb by the stretch, as the XFER does."""
+    K = 9
+
+    def body(d, scl, sda, lane, prof):
+        d.hold(scl, 0, owner="a", prof=prof)       # planned at 0, drives at 2; tb -> 8
+        d.hold(scl, 1, owner="a", prof=prof)       # releases at 8; a stretch delays the rest
+        d.hold(scl, 0, owner="a", prof=prof)
+        d.cond("rise", scl, owner="a", prof=prof)  # releases at tb + nom; likewise
+        d.cond("fall", scl, owner="a", prof=prof)  # planned a full nom after it, so never late
+    img = stretch_img(body=body)
+    plain = run_sys(img, roles=(Role.P0,))
+    p_edges = plain.wire_edges[0]                  # fall, rise (HOLD 1), fall, rise (COND), fall
+    # a target holds SCL low for K ticks from the HOLD 1 release reaching the wire
+    t = run_sys(img, roles=(Role.P0,), glitches=[Glitch(0, p_edges[1], K, 0)])
+    s_edges = t.wire_edges[0]
+    assert s_edges[1] == p_edges[1] + K and s_edges[2] == p_edges[2] + K
+    t2 = run_sys(img, roles=(Role.P0,), glitches=[Glitch(0, p_edges[3], K, 0)])
+    assert t2.wire_edges[0][4] == p_edges[4] + K
+    assert not t.engines[0].events and not t2.engines[0].events
+
+
+def test_stretch_needs_an_od_clock():
+    d = Description("st", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    lane = d.lane("L", d.line("sda", "od", owner="shared"), clk=scl, cpol=1, cpha=1, stretch=True)
+    d.xfer(8, lane, owner="a", prof=d.profile("H", nom=HS))
+    d.halt()
+    with pytest.raises(CompileError, match="S-bus"):
+        compile_desc(d, check_timing=False)
+
+
+def test_t4_stretch_lanes_need_h_of_edge_lat_plus_2():
+    compile_desc(stretch_desc(h=EDGE_LAT + 2))
+    with pytest.raises(CompileError, match="T4"):
+        compile_desc(stretch_desc(h=EDGE_LAT + 1))
+
+
+def test_the_owner_samples_when_it_sees_a_stretched_release():
+    """The slave sends; the master captures on each release (cpha 1: the trailing edge) at
+    capture + EDGE_LAT. A stretch on the third release delays that sample to the cycle the master
+    sees SCL rise, and every later one by the stretch."""
+    K = 10
+
+    def body(d, scl, sda, lane, prof):
+        with d.only("b"):
+            d.li("r0", 0x5A)
+        d.xfer(8, lane, owner="b", prof=prof, src="r0", dst="r4", msb_first=True)
+    img = stretch_img(body=body)
+    plain = run_sys(img)
+    s0 = [x.cycle for x in plain.engines[0].samples]
+    rel = s0[2] - EDGE_LAT                     # the third capture edge's drive cycle
+    t = run_sys(img, glitches=[Glitch(0, rel + 1, K, 0)])
+    assert [x.cycle for x in t.engines[0].samples] == s0[:2] + [x + K for x in s0[2:]]
+    assert all(got(t, i) == 0x5A for i in range(3))
+
+
+def test_stretch_completion_with_push_pull_data():
+    """With push-pull data the clock owner reads nothing back, so without a stretch lane it would
+    complete at its last edge; on a cpol 1 stretch lane it completes when it sees that release."""
+    for stretch, want in ((False, 0), (True, EDGE_LAT)):
+        d = Description("st", parties=("a", "b"))
+        scl = d.line("scl", "od", owner="a", idle=1)
+        lane = d.lane("L", d.line("mosi", owner="a"), clk=scl, cpol=1, cpha=1, stretch=stretch)
+        d.xfer(8, lane, owner="a", prof=d.profile("H", nom=HS, min=HS - 1, max=INF), src="ones")
+        d.halt()
+        step = next(s for s in _steps(lower(d)).values() if s.clocked)
+        t = run_sys(compile_desc(d, check_timing=False))
+        (rec,) = xfers(t, 0)
+        assert rec.cycle - rec.tb == completion(step, Role.P0)[0] == want, stretch
+
+
+def test_hold_stretch_wait_times_out():
+    """The HOLD's wait is bounded by its max too: TIMEOUT at t + EDGE_LAT + max + QUANT + 1."""
+    def body(d, scl, sda, lane, prof):
+        d.hold(scl, 0, owner="a", prof=prof)
+        d.hold(scl, 1, owner="a", prof=prof)
+    img = stretch_img(body=body, hi=HS + 2)
+    plain = run_sys(img, roles=(Role.P0,))
+    rel = plain.wire_edges[0][1] - 1              # the HOLD 1's drive cycle
+    t = run_sys(img, roles=(Role.P0,), glitches=[Glitch(0, rel + 1, 60, 0)])
+    (ev,) = [e for e in t.engines[0].events if e.kind == "TIMEOUT"]
+    assert ev.cycle == rel + EDGE_LAT + (HS + 2) + QUANT + 1
