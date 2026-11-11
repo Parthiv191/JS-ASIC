@@ -362,14 +362,16 @@ def test_t3_rejects_a_short_half_period(h):
             assert got(t, 0) == VALUE
 
 
-@pytest.mark.parametrize("what", ["stretch", "od"])
+@pytest.mark.parametrize("what", ["stretch", "od", "od2"])
 def test_part_2_features_fail_loudly(what):
     img = spi()
     lane = img.lanes[0]
     if what == "stretch":
         img = replace(img, lanes=[replace(lane, stretch=1)])
-    else:
+    elif what == "od":
         img = replace(img, lines=[img.lines[0], replace(img.lines[1], kind="od")])
+    else:
+        img = duplex(miso_kind="od")
     with pytest.raises(NotImplementedError, match="part 2"):
         run_sys(img)
 
@@ -379,22 +381,29 @@ A, B = 0x4B, 0xC6  # P0's MOSI word, P1's MISO word
 
 
 def duplex_desc(cpha=0, src="r0", dst="r1", n=N, h=H, lo=H - 1, hi=INF, ppm=20000, ldelay=0,
-                miso_owner="b"):
-    """P0 owns the clock and MOSI (`data`); MISO (`data2`) belongs to `miso_owner`. Each party
-    loads its own word into r0, and the one XFER sends r0 on the line it owns."""
+                miso_owner="b", swap=False, miso_kind="pp"):
+    """P0 owns the clock and MOSI; MISO belongs to `miso_owner`. MOSI is the lane's `data` and
+    MISO its `data2`, or the other way round with `swap` (the step is then owned by MISO's owner).
+    Each party loads its own word into r0, and the one XFER sends r0 on the line it owns."""
     d = Description("spi2", parties=("a", "b"), tolerance_ppm=ppm)
     sck = d.line("sck", owner="a", idle=0)
     mosi = d.line("mosi", owner="a", idle=1)
-    miso = d.line("miso", owner=miso_owner, idle=1)
-    lane = d.lane("L", mosi, clk=sck, cpha=cpha, data2=miso, ldelay=ldelay)
+    miso = d.line("miso", miso_kind, owner=miso_owner, idle=1)
+    first, second, owner = (miso, mosi, miso_owner) if swap else (mosi, miso, "a")
+    lane = d.lane("L", first, clk=sck, cpha=cpha, data2=second, ldelay=ldelay)
     half = d.profile("H", nom=h, min=lo, max=hi)
     with d.only("a"):
         d.li("r0", A)
     with d.only("b"):
         d.li("r0", B)
-    d.xfer(n, lane, owner="a", prof=half, src=src, dst=dst, msb_first=True)
+    d.xfer(n, lane, owner=owner, prof=half, src=src, dst=dst, msb_first=True)
     d.halt()
     return d
+
+
+def packed(swap=False):
+    """dst := (v2 << n) | v1: data2's word on top."""
+    return A << N | B if swap else B << N | A
 
 
 def duplex(timing=False, **kw):
@@ -402,12 +411,14 @@ def duplex(timing=False, **kw):
 
 
 @pytest.mark.parametrize("cpha", [0, 1])
-def test_duplex_exchanges_both_words(cpha):
+@pytest.mark.parametrize("swap", [False, True])
+def test_duplex_exchanges_both_words(cpha, swap):
     """Each data line follows the clocked rules with its own owner, and dst := (v2 << n) | v1
-    in every role: P0 sends A on MOSI and samples MISO, P1 sends B on MISO and samples MOSI."""
-    t = run_sys(duplex(cpha=cpha))
+    in every role: P0 sends A on MOSI and samples MISO, P1 sends B on MISO and samples MOSI,
+    whichever of the two is the lane's data2."""
+    t = run_sys(duplex(cpha=cpha, swap=swap))
     for i in range(3):
-        assert not t.engines[i].events and got(t, i) == B << N | A, (i, hex(got(t, i) or 0))
+        assert not t.engines[i].events and got(t, i) == packed(swap), (i, hex(got(t, i) or 0))
     # P0 samples MISO only; P1 samples MOSI only; MON samples both
     assert {s.line for s in t.engines[0].samples} == {2} and {s.line for s in t.engines[1].samples} == {1}
     assert len(t.engines[2].samples) == 2 * N
@@ -421,10 +432,13 @@ def test_duplex_pushes_in_every_engine():
 
 
 @pytest.mark.parametrize("cpha", [0, 1])
-def test_duplex_completion_matches_the_compiler(cpha):
+@pytest.mark.parametrize("h", [2, 4])
+@pytest.mark.parametrize("swap", [False, True])
+def test_duplex_completion_matches_the_compiler(cpha, h, swap):
     """With duplex the clock owner also follows a data line (MISO), so it completes at the
-    follow offset, as analysis.completion() says."""
-    d = duplex_desc(cpha=cpha)
+    follow offset, as analysis.completion() says. At H = 2 that is 1 cycle after its last edge
+    with cpha 0 too."""
+    d = duplex_desc(cpha=cpha, h=h, lo=h - 1, swap=swap)
     step = next(s for s in _steps(lower(d)).values() if s.clocked)
     t = run_sys(compile_desc(d, check_timing=False))
     for i, r in enumerate((Role.P0, Role.P1, Role.MON)):
@@ -432,11 +446,15 @@ def test_duplex_completion_matches_the_compiler(cpha):
         assert rec.cycle - rec.tb == completion(step, r)[0], r
 
 
-def test_duplex_underrun_on_miso():
-    """src = FIFO: P0 owns the clock and waits for its word; P1 doesn't, finds its FIFO empty,
-    sends ONES on MISO and logs UNDERRUN."""
-    t = run_sys(duplex(src="fifo"), tx={0: [A]})
-    assert kinds(t, 1) == ["UNDERRUN"] and got(t, 0) == 0xFF << N | A
+@pytest.mark.parametrize("swap", [False, True])
+def test_duplex_underrun_on_miso(swap):
+    """src = FIFO: P0 owns the clock and waits for its word, which comes at tick 30, then starts
+    (cpha 0: tb := 30); P1 doesn't own the clock, finds its FIFO empty at its start, sends ONES
+    on MISO and logs UNDERRUN."""
+    t = run_sys(duplex(src="fifo", swap=swap), tx={0: [A]}, push_at=30)
+    assert kinds(t, 1) == ["UNDERRUN"] and not t.engines[0].events
+    assert drive_cycles(t.wire_edges[0]) == clock_drives(30)
+    assert got(t, 0) == (A << N | 0xFF if swap else 0xFF << N | A)
 
 
 def test_duplex_t3_covers_the_miso_owner():
@@ -449,7 +467,8 @@ def test_duplex_t3_covers_the_miso_owner():
 @pytest.mark.parametrize("slow,phase", [(None, 0), (0, 1), (1, 0), (1, 3)])
 def test_accepted_duplex_runs_clean_at_2pct(cpha, slow, phase):
     """The rule cross-check for duplex. P1 reaches the XFER 8 cycles after tb (two ROLE_IF blocks
-    load the words), so with cpha 0 its bit 0 needs H = 12 (T3); cpha 1 takes H = 8."""
+    load the words), so with cpha 0 T3 wants H >= 10 for its bit 0 (the test uses 12); cpha 1
+    takes H = 8."""
     h = 12 if cpha == 0 else 8
     img = duplex(cpha=cpha, h=h, lo=h - 1, timing=True)
     on = {None: (), 0: (0,), 1: (1, 2)}[slow]
@@ -477,6 +496,41 @@ def test_data2_needs_a_clocked_lane():
 def test_data2_owner_differs_from_data_owner():
     with pytest.raises(CompileError, match="R1-owner"):
         duplex(miso_owner="a")
+
+
+def test_duplex_needs_a_party_owner():
+    """A SHARED step on an OD data line would let one party drive both lines, and analysis
+    skips SHARED steps, so a duplex step has a party owner and data2 belongs to the other."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    sda = d.line("sda", "od", owner="shared")
+    lane = d.lane("L", sda, clk=sck, data2=d.line("d2", owner="a"))
+    d.xfer(8, lane, owner="shared", prof=d.profile("H", nom=8))
+    d.halt()
+    with pytest.raises(CompileError, match="R1-owner"):
+        compile_desc(d, check_timing=False)
+
+
+@pytest.mark.parametrize("which", ["data2", "data"])
+def test_lane_lines_are_distinct(which):
+    """A data line that is also the clock: the followers never see the edges they count."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    other = d.line("d", owner="b")
+    lane = (d.lane("L", other, clk=sck, data2=sck) if which == "data2" else d.lane("L", sck, clk=sck))
+    d.xfer(8, lane, owner="b" if which == "data2" else "a", prof=d.profile("H", nom=8))
+    d.halt()
+    with pytest.raises(CompileError, match="S-lane"):
+        compile_desc(d, check_timing=False)
+
+
+def test_t5_stall_covers_a_clock_owner_on_data2():
+    """T5-stall: a src = FIFO XFER waits in the clock owner whichever data line it owns, so a
+    bounded one is rejected also when the clock owner owns data2."""
+    with pytest.raises(CompileError, match="T5-stall"):
+        duplex(swap=True, src="fifo", h=12, lo=11, hi=60, timing=True)
+    with pytest.raises(CompileError, match="T5-stall"):
+        duplex(src="fifo", h=12, lo=11, hi=60, timing=True)
 
 
 def test_duplex_n_at_most_8():

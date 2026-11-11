@@ -427,7 +427,8 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
                                                    f"timed step must be one it owns that makes the others "
                                                    f"wait (an unbounded COND it does, or an unbounded "
                                                    f"clocked XFER it clocks)")
-            elif ins.op == Op.XFER and steps[pc].does(r) and unpack_xfer(ins.operand)[1] == Src.FIFO:
+            elif (ins.op == Op.XFER and (steps[pc].does(r) or r == steps[pc].d2_owner)
+                  and unpack_xfer(ins.operand)[1] == Src.FIFO):  # it drives a data line from TX
                 s = steps[pc]
                 if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r):
                     diags.add("T5-stall", pc, f"{r.name} owns this src = FIFO XFER and waits here while "
