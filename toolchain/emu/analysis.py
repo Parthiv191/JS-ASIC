@@ -380,10 +380,10 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     for r in sorted(aborting):
         for pc in gaps(instrs, timed, apc, r):
             s = steps[pc]
-            if not (s.op == Op.COND and not s.prof.bounded and not s.does(r)):
+            if not (s.op == Op.COND and not s.prof.bounded):
                 diags.add("T5-abort", pc, f"{r.name} can abort and restart at pc {apc}; the first timed "
-                                          f"step it reaches there must be an unbounded COND it follows, "
-                                          f"so it waits for the other party's next event")
+                                          f"step it reaches there must be an unbounded COND it follows or "
+                                          f"does, so the two parties meet again at one event")
             elif bus_on and s.abort and not s.bus_wait:
                 # a bus exit leaves its flag set, so this step's ABORT would exit again at once
                 diags.add("T5-abort", pc, f"on a bus the first step at abort_pc may have ABORT only if "
@@ -394,8 +394,12 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
 
     # pairwise checks: predecessor timed step (or reset) -> next timed step
     preds: list[tuple[_Step | None, int]] = [(None, 0)] + [(s, pc + 1) for pc, s in steps.items()]
+    starts = [0] + ([apc] if apc else [])
+    runs = {r: _reach(instrs, starts, r) for r in ROLES}
     for prev, start in preds:
-        per_role = {r: gaps(instrs, timed, start, r) for r in ROLES}
+        # only the roles that can run prev (a step in a lead block is the leader's alone)
+        per_role = {r: gaps(instrs, timed, start, r) if prev is None or prev.pc in runs[r] else {}
+                    for r in ROLES}
         for nxt_pc in set().union(*per_role.values()):
             s = steps[nxt_pc]
             if (prev is not None and prev.op == Op.COND and prev.prof.bounded and not prev.abort
@@ -437,9 +441,12 @@ def _reach(instrs: list[Instr], starts: list[int], role: Role) -> set[int]:
     return seen
 
 
-def _makes_others_wait(s: _Step, r: Role) -> bool:
+def _makes_others_wait(s: _Step, r: Role, low: Lowered | None = None) -> bool:
     """An unbounded COND that r does, or an unbounded clocked XFER r clocks (whoever owns its
-    data): the others wait for r however long it stalled. A bounded one times them out."""
+    data): the others wait for r however long it stalled. A bounded one times them out. Any step
+    in a lead block r leads: the others wait in its successor, which has max INF (R3-lead)."""
+    if low is not None and any(sp.lead and r in sp.roles and sp.start <= s.pc < sp.end for sp in low.spans):
+        return True
     if s.prof.bounded:
         return False
     if s.op == Op.COND:
@@ -459,7 +466,7 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
             ins = instrs[pc]
             if ins.op == Op.POP:
                 for nxt in sorted(gaps(instrs, timed, pc + 1, r)):
-                    if not _makes_others_wait(steps[nxt], r):
+                    if not _makes_others_wait(steps[nxt], r, low):
                         diags.add("T5-stall", nxt, f"{r.name} can stall at the POP at pc {pc}; its next "
                                                    f"timed step must be one it owns that makes the others "
                                                    f"wait (an unbounded COND it does, or an unbounded "
@@ -467,7 +474,7 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
             elif (ins.op == Op.XFER and (steps[pc].does(r) or r == steps[pc].d2_owner)
                   and unpack_xfer(ins.operand)[1] == Src.FIFO):  # it drives a data line from TX
                 s = steps[pc]
-                if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r):
+                if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r, low):
                     diags.add("T5-stall", pc, f"{r.name} owns this src = FIFO XFER and waits here while "
                                               f"TX is empty, so its followers lose the timeline; only an "
                                               f"unbounded clocked XFER its owner clocks may take src = "
