@@ -11,7 +11,9 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 `BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
 (§4.1) and clocked XFER, duplex and OD data with the let-go included (§4.3, with CLK_PHASE,
-TIMEOUT and UNDERRUN) and clock stretching, are v1. Still to come: COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
+TIMEOUT and UNDERRUN) and clock stretching, the I2C and SELECT bus detector with COND START/STOP and
+bus exits (§4.7), and COND MEAS are v1. Still to come: `gated` lines and their release on a SELECT
+STOP, and lead blocks (`R3-lead`). The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
