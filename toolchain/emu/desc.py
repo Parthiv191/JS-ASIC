@@ -18,7 +18,8 @@ from .isa import INF, NUM_REGS
 REGS = tuple(f"r{i}" for i in range(NUM_REGS))
 SRCS = ("zero", "ones", "fifo") + REGS
 DSTS = ("discard", "fifo") + REGS
-COND_KINDS = ("fall", "rise")
+COND_KINDS = ("fall", "rise", "start", "stop")
+BUS_KINDS = ("i2c", "select")
 ALU_OPS = ("add", "sub", "and", "or", "xor", "shl", "shr", "eq", "ne", "lt")
 BR_CONDS = ("always", "z", "nz", "to")
 MON = "mon"
@@ -58,6 +59,9 @@ class LaneDecl:
     clk: LineRef | None
     cpol: int
     cpha: int
+    data2: LineRef | None = None  # duplex: the second data line, with its own owner (isa §4.3)
+    ldelay: int = 0               # launch delay after the launching clock edge, cycles
+    stretch: bool = False         # the clock owner waits for each release to be seen (isa §4.3)
 
 
 @dataclass
@@ -91,6 +95,7 @@ class Description:
         self.lines: list[LineDecl] = []
         self.profiles: list[Profile] = []
         self.lanes: list[LaneDecl] = []
+        self.bus_cfg: tuple[str, LineRef, LineRef | None, int | None] | None = None  # (kind, a, b, confirm)
         self.steps: list[Step] = []
         self.abort_label: str | None = None
         self._pending_labels: list[str] = []
@@ -117,11 +122,15 @@ class Description:
         self.profiles.append(Profile(name, nom if min is None else min, nom, nom if max is None else max))
         return ProfRef(name, len(self.profiles))
 
-    def lane(self, name: str, data: LineRef, clk: LineRef | None = None, cpol: int = 0, cpha: int = 0) -> LaneRef:
+    def lane(self, name: str, data: LineRef, clk: LineRef | None = None, cpol: int = 0, cpha: int = 0,
+             data2: LineRef | None = None, ldelay: int = 0, stretch: bool = False) -> LaneRef:
         self._unique(name, [la.name for la in self.lanes], "lane")
         if cpol not in (0, 1) or cpha not in (0, 1):
             raise ValueError("cpol/cpha must be 0 or 1")
-        self.lanes.append(LaneDecl(name, self._line(data), None if clk is None else self._line(clk), cpol, cpha))
+        if not 0 <= ldelay <= 15:
+            raise ValueError(f"ldelay must be 0..15 (4 bits), got {ldelay}")
+        self.lanes.append(LaneDecl(name, self._line(data), None if clk is None else self._line(clk), cpol, cpha,
+                                   None if data2 is None else self._line(data2), ldelay, bool(stretch)))
         return LaneRef(name, len(self.lanes) - 1)
 
     def label(self, name: str) -> None:
@@ -149,9 +158,27 @@ class Description:
             self._block = None
 
     # ---- timed steps ----------------------------------------------------------------
-    def cond(self, kind: str, line: LineRef, owner: str, prof: ProfRef | None = None, abort: bool = False) -> None:
+    def cond(self, kind: str, line: LineRef | None = None, owner: str | None = None,
+             prof: ProfRef | None = None, abort: bool = False, meas: str | None = None) -> None:
+        """FALL/RISE on `line`, or START/STOP on the bus (no line). `meas` names the register
+        that receives the measured time (isa §4.2)."""
         self._choice(kind, COND_KINDS, "cond kind")
-        self._add("cond", owner, kind=kind, line=self._line(line), prof=self._prof(prof), abort=abort)
+        if owner is None:
+            raise ValueError("cond needs an owner")
+        if (kind in ("start", "stop")) != (line is None):
+            raise ValueError(f"cond {kind} takes {'no line (it uses the bus)' if line is not None else 'a line'}")
+        if meas is not None:
+            self._reg(meas)
+        self._add("cond", owner, kind=kind, line=None if line is None else self._line(line), prof=self._prof(prof),
+                  abort=abort, meas=meas)
+
+    def bus(self, kind: str, a: LineRef, b: LineRef | None = None, confirm: int | None = None) -> None:
+        """The bus the detector watches (isa §2, §4.7): I2C (a = SDA, b = SCL) or SELECT
+        (a = CS). `confirm` in cycles; None = the kind's default."""
+        self._choice(kind, BUS_KINDS, "bus kind")
+        if (kind == "i2c") != (b is not None):
+            raise ValueError("an I2C bus needs both lines (a = SDA, b = SCL); SELECT only a (CS)")
+        self.bus_cfg = (kind, self._line(a), None if b is None else self._line(b), confirm)
 
     def hold(self, line: LineRef, level: int, owner: str, prof: ProfRef, abort: bool = False) -> None:
         if level not in (0, 1):
