@@ -7,8 +7,9 @@
 // (do, follow, CHK, RESYNC, MSB; OD owners read their bits back) and on
 // clocked lanes (clock owner and follower, CPOL/CPHA, ldelay, CLK_PHASE,
 // TIMEOUT, duplex, the OD let-go, clock stretching), with ABORT into abort_pc;
-// PUSH/POP and src/dst FIFO. Not built yet, and halting as ILLEGAL until they
-// are: COND START/STOP (bus detector), CRC, FZ and PROF.
+// PUSH/POP and src/dst FIFO; the bus detector (I2C, SELECT), COND START/STOP,
+// bus exits and gated lines. Not built yet, and halting as ILLEGAL until they
+// are: CRC, FZ and PROF; the SE0 bus [P] runs no detector.
 //
 // Fetch and issue (isa §4.0): own cycles are those with ph == E. An
 // instruction starts only on an own cycle, presents its successor's address in
@@ -39,6 +40,7 @@ module engine #(
     input  wire [95:0]  lane_cfg,     // LANE[0..3], bytes b0-b2 (architecture §4)
     input  wire [335:0] prof_tab,     // PROF[1..7]: {max, nom, min} per profile
     input  wire [8:0]   abort_pc,
+    input  wire [15:0]  bus_cfg,      // {BUS_CONFIRM, b[2:0], a[2:0], BUS_KIND} (architecture §4)
     input  wire [7:0]   pin_in,       // every pin as it is now (drives merged, before sync)
 
     // program SRAM (column 1)
@@ -90,7 +92,7 @@ module engine #(
   localparam [1:0] K_COND = 2'd1, K_HOLD = 2'd2, K_XFER = 2'd3;  // tr_op codes
   // event kinds
   localparam OVERRUN = 0, EARLY = 1, TIMEOUT = 2, LEVEL = 3, EDGE = 4, CLK_PHASE = 5, ABORT = 6,
-             OVERFLOW = 7, UNDERRUN = 8, ILLEGAL = 10;
+             OVERFLOW = 7, UNDERRUN = 8, BUS = 9, ILLEGAL = 10;
   localparam [3:0] SRC_FIFO = 4'd2, DST_FIFO = 4'd2;
   localparam signed [23:0] AGE_MAX = 24'sh400000;  // 2^22: the 24-bit time clamp (isa §4.1)
   localparam signed [23:0] EDGE_LAT = 24'sd3;
@@ -173,9 +175,9 @@ module engine #(
   wire timed   = (op == OP_COND) | (op == OP_HOLD) | (op == OP_XFER);
   // Reserved codes halt as ILLEGAL in the start cycle (isa §3): step owner 3, profile >= 8,
   // line >= 8, lane >= 4, src 4-7, dst 1 and 3-7, ALU sub 10-15, BR 5-15, RAW 6-15.
-  // COND START/STOP and src FZ are defined but not built yet.
+  // src FZ is defined but not built yet; the SE0 bus [P] runs no detector.
   wire t_ok    = (t_prof[3] == 1'b0) && (t_owner != 2'd3) &&
-                 (op == OP_COND ? (t_line[3] == 1'b0 && operand[1] == 1'b0) :
+                 (op == OP_COND ? (t_line[3] == 1'b0) :
                   op == OP_HOLD ? (t_line[3] == 1'b0) :
                   (t_line[3:2] == 2'b00 &&
                    (x_src == 4'd0 || x_src == 4'd1 || x_src == SRC_FIFO || x_src[3]) &&
@@ -314,6 +316,7 @@ module engine #(
   reg         s_ck, s_own, s_cod, s_cpol, s_cpha, s_lp, s_nodst;
   reg         s_dx, s_mine2, s_od2, s_str, s_strc, s_wt, s_dv;   // duplex; stretch; waiting; drove
   reg  [2:0]  s_pin2, s_line2;
+  reg         s_bus;                   // COND START/STOP
   reg  [2:0]  s_cpin, s_sr;            // clock pin; the clock owner's capture -> sample delay
   reg  [3:0]  s_ld, s_lcnt;            // ldelay; a pending launch's countdown
   reg  [5:0]  s_e;                     // clock edges made or seen, from the first leading edge
@@ -331,7 +334,13 @@ module engine #(
   end
 
   wire        st     = start & timed & t_ok;  // a timed step starts this cycle
-  wire [2:0]  st_line = (op == OP_XFER) ? lane[2:0] : t_line[2:0];
+  // ---- the bus (isa §4.7): kind, lines, confirm ----
+  wire [1:0]  bus_kind = bus_cfg[1:0];
+  wire [2:0]  bus_a    = bus_cfg[4:2], bus_b = bus_cfg[7:5];
+  wire [7:0]  bus_cf   = bus_cfg[15:8];
+  wire        bus_i2c  = (bus_kind == 2'd1), bus_sel = (bus_kind == 2'd2);
+  wire        cond_bus = (op == OP_COND) && operand[1];       // COND START (2) / STOP (3): on bus_a
+  wire [2:0]  st_line = (op == OP_XFER) ? lane[2:0] : cond_bus ? bus_a : t_line[2:0];
   wire [15:0] st_v   = (x_src == 4'd0) ? 16'h0 : (x_src == 4'd1) ? 16'hFFFF :
                        (x_src == SRC_FIFO) ? (tx_ne ? tx_head : 16'hFFFF) : rb;   // empty: UNDERRUN sends ONES
 
@@ -377,6 +386,7 @@ module engine #(
   wire        c_str   = sel ? lane[13] : s_str;
   wire        c_strc  = sel ? cond_sc : s_strc;
   wire        c_wt    = sel ? 1'b0 : s_wt;
+  wire        c_bus   = sel ? cond_bus : s_bus;
   wire        c_dv    = sel ? 1'b0 : s_dv;
   // an engine drives the data lines it owns: line 1 by the step owner, data2 by its line owner
   wire        c_drv   = c_do | (c_dx & c_mine2);
@@ -441,6 +451,41 @@ module engine #(
   wire               thr_hi_mid = thr_hi_e[23] & ~|thr_hi_e[22:2] & ~&thr_hi_e[1:0];
   wire               acc_inf_e = (~acc_clrq & acc_inf) | (acc_pend & (s_max == 16'hFFFF));
 
+  // ---- the bus detector (isa §4.7): every engine cycle, except in the master line's owner ----
+  // A candidate is an edge of bus_a (I2C: while bus_b read 1 now and in the previous cycle); it is
+  // confirmed when, for the next bus_confirm cycles, bus_b stays 1 (I2C) or bus_a keeps its level
+  // (SELECT). Confirmation (at the end of cycle c + confirm) sets the flag, visible from the next
+  // cycle, and its anchor := c - E. A failed confirm drops the candidate; a new one replaces it,
+  // after the old one's confirm cycle is checked.
+  wire [2:0]  bus_ap  = line_cfg[{bus_a, 3'd0} +: 3];
+  wire [2:0]  bus_bp  = line_cfg[{bus_b, 3'd0} +: 3];
+  wire [1:0]  bus_mo  = bus_i2c ? line_cfg[{bus_b, 3'd4} +: 2] : line_cfg[{bus_a, 3'd4} +: 2];
+  wire        detects = running & (bus_i2c | bus_sel) & ((role == 2'd2) | (bus_mo != role));
+  reg         cand_v, cand_stop, cand_lvl;
+  reg  [7:0]  cand_n;                  // cycles since the candidate (saturates)
+  reg  signed [23:0] start_age, stop_age;   // now - start_e, now - stop_e
+  wire        b_a = sync_s[bus_ap], b_ap = sync_p[bus_ap], b_b = sync_s[bus_bp], b_bp = sync_p[bus_bp];
+  wire        cand_new = detects & (b_a ^ b_ap) & (~bus_i2c | (b_b & b_bp));
+  wire        cand_ok  = bus_i2c ? b_b : (b_a == cand_lvl);
+  wire        conf_old = detects & cand_v & cand_ok & (cand_n >= bus_cf);
+  wire        conf_new = cand_new & (bus_cf == 8'd0);
+  wire        conf     = conf_old | conf_new;
+  wire        conf_stp = conf_old ? cand_stop : b_a;              // rise = STOP
+  wire signed [23:0] conf_age = conf_old ? $signed({16'h0, cand_n}) + EDGE_LAT : EDGE_LAT;   // now - (c - E)
+  wire        sel_stop = conf & conf_stp & bus_sel;               // a SELECT STOP shuts the gate
+
+  // ---- gated lines (isa §2): one gate per engine, shut at RUN; a timed step's start opens it; a
+  // SELECT STOP (its own detector), an abort, a bus exit or HALT shuts it and releases the gated
+  // lines. A shut in a step's start cycle wins. While shut, drives to gated lines do nothing.
+  reg  [7:0]  gated_pins;
+  integer     gi;
+  always @* begin
+    gated_pins = 8'h00;
+    for (gi = 0; gi < 8; gi = gi + 1)
+      if (line_cfg[8*gi + 7]) gated_pins[line_cfg[8*gi +: 3]] = 1'b1;
+  end
+  reg         gate_on;
+
   // ---- one cycle of the step: what it does this cycle (combinational) ----
   reg                done, abort_now, to_set, fpush;
   reg  [10:0]        ev;            // event kinds logged this cycle
@@ -460,6 +505,8 @@ module engine #(
   reg                lg_reg, lg_now; // register an OD let-go at completion; release it this cycle
   reg  [3:0]         lg_c0;          // its countdown (cpha 0)
   reg  [3:0]         n4, p2k, p2j;   // n, and data2's value bit positions (pos + n)
+  reg                bus_clr;        // a followed START/STOP completes: clear both bus flags
+  reg                bus_ev;         // a followed STOP saw START, with ABORT: a bus exit
   reg                nodst;         // a clocked timeout: no dst, no push
   reg                ck_ev, lead, launch, lp_nx;
   reg  [3:0]         lcnt_nx, ldly;
@@ -487,7 +534,7 @@ module engine #(
     ck_en = 1'b0; ck_v = 1'b0; nodst = 1'b0; ck_ev = 1'b0; lead = 1'b0; launch = 1'b0;
     lp_nx = c_lp; lcnt_nx = c_lcnt; e_nx = c_e; sr_nx = {c_sr[1:0], 1'b0}; ldly = 4'd0; et = 24'sd0;
     drv2_en = 1'b0; sample_tr2 = 1'b0; wt_nx = c_wt; wt_end = 1'b0; dv_nx = c_dv;
-    lg_reg = 1'b0; lg_now = 1'b0; lg_c0 = 4'd0;
+    lg_reg = 1'b0; lg_now = 1'b0; lg_c0 = 4'd0; bus_clr = 1'b0; bus_ev = 1'b0;
     n4 = c_n1 + 4'd1; p2k = pos_k + n4; p2j = pos_j + n4;
 
     if (c_on) begin
@@ -506,7 +553,7 @@ module engine #(
                 tb_upd = 1'b1; tb_nx = EDGE_LAT + 24'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 24'sd1;
                 acc_clr = 1'b1;
                 wt_nx = 1'b0; done = 1'b1;
-              end else if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT)) begin
+              end else if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT) + (c_bus ? $signed({16'h0, bus_cf}) : 24'sd0)) begin
                 ev[TIMEOUT] = 1'b1;
                 if (c_abort) abort_now = 1'b1;
                 else begin
@@ -522,7 +569,7 @@ module engine #(
               drv_en = 1'b1; drv_v = c_level;
               if (c_strc && c_level) begin   // released a stretch clock: wait until it reads 1
                 wt_nx = 1'b1; samp_nx = 24'sd1;
-                if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT)) begin   // already past the bound
+                if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT) + (c_bus ? $signed({16'h0, bus_cf}) : 24'sd0)) begin   // already past the bound
                   ev[TIMEOUT] = 1'b1;
                   if (c_abort) abort_now = 1'b1;
                   else begin
@@ -541,16 +588,22 @@ module engine #(
               end
             end
           end else begin
-            if (edg && inp == c_level) begin   // the edge wins over a timeout
-              m = tbx - EDGE_LAT;
-              // EARLY: m < min - QUANT, i.e. tbx < min + E - QUANT (no subtract on the age)
-              if (c_min != 16'h0 && tbx < u16(c_min) + (EDGE_LAT - QUANT)) ev[EARLY] = 1'b1;
+            // FALL/RISE: the edge, anchored at e = detect - E. START/STOP (isa §4.2): its bus flag,
+            // set now or before the step, anchored at start_e / stop_e; it clears both flags. A
+            // followed STOP that sees START is a bus event: a bus exit with ABORT (below), else it
+            // keeps waiting. The timeout adds bus_confirm.
+            if (c_bus ? (c_level ? evt[1] : evt[0]) : (edg && inp == c_level)) begin   // wins over a timeout
+              et = c_bus ? (c_level ? stop_age : start_age) : EDGE_LAT;   // now - anchor
+              m = tbx - et;
+              if (c_min != 16'h0 && m + QUANT < u16(c_min)) ev[EARLY] = 1'b1;   // m < min - QUANT
               value = c_meas ? clamp16(m) : 16'h0;
               if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(m); end
-              tb_upd = 1'b1; tb_nx = EDGE_LAT + 24'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 24'sd1;
-              acc_clr = 1'b1;
+              tb_upd = 1'b1; tb_nx = et + 24'sd1; anc_upd = 1'b1; anc_nx = et + 24'sd1;
+              acc_clr = 1'b1; bus_clr = c_bus;
               done = 1'b1;
-            end else if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT)) begin   // now - E > tb + max + QUANT
+            end else if (c_bus && c_level && evt[0] && c_abort) begin
+              bus_ev = 1'b1;
+            end else if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT) + (c_bus ? $signed({16'h0, bus_cf}) : 24'sd0)) begin
               ev[TIMEOUT] = 1'b1;
               if (c_abort) abort_now = 1'b1;
               else begin
@@ -801,6 +854,18 @@ module engine #(
         tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
         wr_en = 1'b0;
       end
+
+      // Bus exit (isa §4.7): a timed step with ABORT, except a followed COND START/STOP, sees a
+      // bus flag (set now or earlier) at its start or in any later cycle, before it acts; or a
+      // followed STOP sees START. It is normal: a BUS record only (no ABORT, no VIOL bit), the
+      // step does nothing this cycle; then as an abort (release, tb := now, abort_pc).
+      if ((c_abort && (evt[0] || evt[1]) && !(c_kind == K_COND && c_bus && !c_do)) || bus_ev) begin
+        ev = 11'h0; ev[BUS] = 1'b1;
+        abort_now = 1'b1; done = 1'b1;
+        drv_en = 1'b0; drv2_en = 1'b0; ck_en = 1'b0; wr_en = 1'b0; fpush = 1'b0; to_set = 1'b0;
+        lg_reg = 1'b0; bus_clr = 1'b0; k_inc = 1'b0; j_inc = 1'b0;
+        tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1; acc_add = 1'b0;
+      end
     end
   end
 
@@ -828,8 +893,15 @@ module engine #(
   wire [5:0]  evt_set = {evs[UNDERRUN], evs[OVERFLOW],
                          (busy && (ev[LEVEL] || ev[EDGE] || ev[CLK_PHASE])) ||
                          (evq_st && (ev_q[LEVEL] || ev_q[EDGE])),
-                         (busy && ev[TIMEOUT]) || (evq_st && ev_q[TIMEOUT]), 2'b00};
-  wire [5:0]  evt_clr = (start && op == OP_RAW && sub == RAW_EVT) ? operand[5:0] : 6'h0;
+                         (busy && ev[TIMEOUT]) || (evq_st && ev_q[TIMEOUT]), conf & conf_stp, conf & ~conf_stp};
+  wire        gate_cl  = abort_now | (start & stop_op) | sel_stop;   // abort_now includes a bus exit
+  wire        gate_eff = (gate_on | st) & ~gate_cl;
+  wire        gok_c  = ~gated_pins[c_pin]  | gate_eff;
+  wire        gok_c2 = ~gated_pins[c_pin2] | gate_eff;
+  wire        gok_ck = ~gated_pins[c_cpin] | gate_eff;
+  wire        gok_l  = ~gated_pins[l_pin]  | gate_eff;
+  wire [5:0]  evt_clr = ((start && op == OP_RAW && sub == RAW_EVT) ? operand[5:0] : 6'h0) |
+                        {4'h0, {2{c_on & bus_clr}}};
 
   // ---- OD let-go tracker (isa §4.3): one per engine, for the lane of its last clocked XFER ----
   // It holds up to two OD data lines (data, data2) and, whatever instruction runs, watches that
@@ -936,6 +1008,8 @@ module engine #(
       s_dv <= 1'b0; s_pin2 <= 3'd0; s_line2 <= 3'd0;
       lg_v1 <= 1'b0; lg_v2 <= 1'b0; lg_L <= 1'b0; lg_own <= 1'b0; lg_wait <= 1'b0;
       lg_p1 <= 3'd0; lg_p2 <= 3'd0; lg_cp <= 3'd0; lg_ld <= 4'd0; lg_cnt <= 4'd0;
+      s_bus <= 1'b0; gate_on <= 1'b0; cand_v <= 1'b0; cand_stop <= 1'b0; cand_lvl <= 1'b0;
+      cand_n <= 8'd0; start_age <= 24'sd0; stop_age <= 24'sd0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else if (soft_reset) begin
       started  <= 1'b0;
@@ -969,7 +1043,8 @@ module engine #(
       fv_valid <= 1'b0;
       acc_pend <= 1'b0; acc_clrq <= 1'b0; wq_v <= 1'b0; ev_q <= 11'h0; evq_st <= 1'b0;
       pop_wait <= 1'b0; stalled <= 1'b0; s_fwait <= 1'b0; s_wt <= 1'b0;
-      lg_v1 <= 1'b0; lg_v2 <= 1'b0;
+      lg_v1 <= 1'b0; lg_v2 <= 1'b0; gate_on <= 1'b0; cand_v <= 1'b0;
+      start_age <= 24'sd0; stop_age <= 24'sd0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else begin
       sync_m <= pin_in;
@@ -998,11 +1073,17 @@ module engine #(
         s_fwait  <= 1'b0;
         lg_v1    <= 1'b0;
         lg_v2    <= 1'b0;
+        gate_on  <= 1'b0;
+        cand_v   <= 1'b0;
         drv_low  <= 8'h00;
         drv_high <= 8'h00;
       end else if (s0) begin
         lg_v1    <= 1'b0;
         lg_v2    <= 1'b0;
+        gate_on  <= 1'b0;
+        cand_v   <= 1'b0;
+        start_age <= 24'sd1;    // start_e = stop_e = 0
+        stop_age  <= 24'sd1;
         pop_wait <= 1'b0;
         stalled  <= 1'b0;
         s_fwait  <= 1'b0;
@@ -1061,7 +1142,7 @@ module engine #(
           s_ck <= c_ck; s_own <= c_own; s_cpin <= c_cpin; s_cod <= c_cod; s_cpol <= c_cpol;
           s_cpha <= c_cpha; s_ld <= c_ld;
           s_dx <= c_dx; s_mine2 <= c_mine2; s_od2 <= c_od2; s_pin2 <= c_pin2; s_str <= c_str;
-          s_strc <= c_strc; s_line2 <= c_line2;
+          s_strc <= c_strc; s_line2 <= c_line2; s_bus <= c_bus;
           to_flag <= 1'b0;
         end
         if (c_on) begin
@@ -1091,15 +1172,15 @@ module engine #(
             lg_wait <= c_cpha | nodst; lg_cnt <= lg_c0 - 4'd1;
           end
         end
-        if (drv2_en) begin
+        if (drv2_en && gok_c2) begin
           drv_low[c_pin2]  <= ~drv_v;
           drv_high[c_pin2] <= drv_v & ~c_od2;
         end
-        if (drv_en) begin
+        if (drv_en && gok_c) begin
           drv_low[c_pin]  <= ~drv_v;
           drv_high[c_pin] <= drv_v & ~c_od;
         end
-        if (ck_en) begin
+        if (ck_en && gok_ck) begin
           drv_low[c_cpin]  <= ~ck_v;
           drv_high[c_cpin] <= ck_v & ~c_cod;
         end
@@ -1129,7 +1210,7 @@ module engine #(
           case (op)
             OP_RAW:
               case (sub)
-                RAW_SET: begin
+                RAW_SET: if (gok_l) begin
                   drv_low[l_pin]  <= ~operand[0];
                   drv_high[l_pin] <= operand[0] & ~l_od;
                 end
@@ -1156,6 +1237,23 @@ module engine #(
             lg_v2    <= 1'b0;
           end
         end
+
+        // the gate: a shut releases the gated lines (per pin, so other drives this cycle stay)
+        gate_on <= gate_eff;
+        for (ri = 0; ri < 8; ri = ri + 1)
+          if (gate_cl && gated_pins[ri]) begin drv_low[ri] <= 1'b0; drv_high[ri] <= 1'b0; end
+
+        // the bus detector: the pending candidate first, then a new edge replaces it
+        if (!detects || (cand_v && !cand_ok) || conf_old) cand_v <= 1'b0;
+        if (cand_v && cand_n != 8'hFF) cand_n <= cand_n + 8'd1;
+        if (cand_new && !conf_new) begin
+          cand_v <= 1'b1; cand_stop <= b_a; cand_lvl <= b_a; cand_n <= 8'd1;
+        end
+        // anchors: ages that saturate at 2^22 (the clamp), set on confirmation
+        start_age <= (conf && !conf_stp) ? conf_age + 24'sd1 : !tick ? start_age :
+                     (start_age >= AGE_MAX) ? AGE_MAX : start_age + 24'sd1;
+        stop_age  <= (conf && conf_stp) ? conf_age + 24'sd1 : !tick ? stop_age :
+                     (stop_age >= AGE_MAX) ? AGE_MAX : stop_age + 24'sd1;
       end
 
       // host: registers while not running, W1C of VIOL and IRQ
@@ -1164,7 +1262,7 @@ module engine #(
       ev_q   <= evs;
       evq_st <= ~busy;
       evpc_q <= start ? fpc : xpc;
-      viol <= (viol & ~viol_clr) | {5'h0, ev_q};
+      viol <= (viol & ~viol_clr) | {5'h0, ev_q & ~(11'd1 << BUS)};   // a bus exit is normal
       if (fv_any && !fv_valid) begin
         fv_pc    <= evpc_q;
         fv_kind  <= fv_new;
