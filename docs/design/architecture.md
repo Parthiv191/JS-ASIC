@@ -111,6 +111,9 @@ DBG_HALT):
 | ERR_CLR | clears `STATUS.host_err` |
 | ERR pin | the OR of the VIOL bits under ERR_MASK (all bits until ERR_MASK is built) |
 | FIRST_VIOL_PC/KIND | re-arm when the host clears VIOL to 0 |
+| engine STATUS | bit 0 running, 1 halted, 2 TX full, 3 TX empty, 4 RX full, 5 RX empty |
+| FIFO counts | TX count in [2:0] (0–4), RX count in [7:4] (0–8); bit 3 reads 0 |
+| RXDATA | reading an empty RX FIFO returns 0 and pops nothing |
 | REG_DATA | a write commits on the high byte |
 | PIN_CTRL | bit 0 gpio_override, bit 1 loopback; readable |
 | GPIO override | the host's drive flops replace the engines' drives (no merge), before RUN too. They take PIN_OUT and PIN_OE_SET one cycle after the write. |
