@@ -510,3 +510,54 @@ def test_t5_overrun_uses_an_od_owners_readback_completion():
     # the model agrees: the OD owner's HOLD starts late
     t = run_sys(compile_desc(_xfer_then_hold("od"), check_timing=False), roles=(Role.P0,))
     assert [e.kind for e in t.engines[0].events] == ["OVERRUN"]
+
+
+def _clocked(bounded, data_owner="a", fifo=False):
+    """a clocks a lane whose data line `data_owner` owns. Without `fifo`, a POPs first."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    data = d.line("data", owner=data_owner, idle=0)
+    half = d.profile("HALF", nom=8, min=7, max=9 if bounded else INF)
+    if not fifo:
+        with d.only("a"):
+            d.pop("r0")
+    d.xfer(8, d.lane("ln", data=data, clk=sck), owner=data_owner, prof=half,
+           src="fifo" if fifo else "zero")
+    return d
+
+
+def test_t5_stall_needs_an_unbounded_clocked_xfer():
+    """A clock follower's wait for the first edge times out at max + QUANT from its own start
+    (isa §4.3), so only an unbounded clocked XFER makes it wait through a stall."""
+    assert "T5-stall" in diag_rules(_clocked(bounded=True))
+    assert "T5-stall" in diag_rules(_clocked(bounded=True, fifo=True))
+    assert "T5-stall" not in diag_rules(_clocked(bounded=False))
+
+
+def test_t5_stall_accepts_a_read_its_staller_clocks():
+    """A master read after a POP: a clocks the lane and b owns the data. The followers of the
+    clock wait for a, so the step counts as a's (isa §6: a clocked XFER it clocks)."""
+    assert "T5-stall" not in diag_rules(_clocked(bounded=False, data_owner="b"))
+
+
+def test_t5_stall_covers_mon():
+    """MON owns no step, so nothing after a MON POP can make the others wait for it."""
+    d, ln, p = two_party()
+    with d.only("mon"):
+        d.pop("r0")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_checks_code_reached_only_from_abort_pc():
+    d, ln, p = two_party()
+    d.abort_to("recover")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p, abort=True)
+    d.halt()
+    d.label("recover")
+    with d.only("a"):
+        d.pop("r0")
+    d.hold(ln, 1, owner="a", prof=p)
+    d.halt()
+    assert "T5-stall" in diag_rules(d)

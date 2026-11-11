@@ -152,7 +152,9 @@ class System:
             lines=list(self.lines),
             engines=[
                 EngineTrace(e.name, e.role, e.records, e.events, self._got[i] + e.rx, e.samples, e.branches,
-                            e.halted, e.idle, len(e.tx) + len(self._backlog[i]), self._cycle_tick[i], e.starts)
+                            e.halted, e.idle,
+                            len(e.tx) + len(self._backlog[i]) + sum(len(p[2]) for p in self._pushes if p[1] == i),
+                            self._cycle_tick[i], e.starts)
                 for i, e in enumerate(self.engines)
             ],
             wire_edges=edges,

@@ -217,3 +217,10 @@ def test_without_host_reads_the_rx_fifo_overflows_after_8():
     s.host_push(0, list(range(9)))
     tr = s.run(1000)
     assert tr.engines[0].rx == list(range(9)) and not tr.engines[0].events
+
+
+def test_tx_left_counts_words_the_host_never_wrote():
+    """tx_left: words the engine never popped, also those the host still had to write."""
+    s = System([EngineSpec(_pop_loop(0), Role.P0)])
+    s.host_push(0, [1, 2], at_tick=5000)
+    assert s.run(1000).engines[0].tx_left == 2

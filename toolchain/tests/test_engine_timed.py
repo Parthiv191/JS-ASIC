@@ -123,8 +123,9 @@ def test_xfer_resync_recovers_drift():
 
 
 def test_late_host_data_stalls_pop_and_the_frame_stays_clean():
-    """isa §4.1 stall re-base: the host's word arrives at tick 200. POP waits, the unbounded COND
-    it does next re-bases, and the follower waits for that start edge: nobody logs anything."""
+    """The library UART shape under a slow host: the word arrives at tick 200, POP waits, and the
+    follower waits for the start edge of the unbounded COND, so nobody logs anything. (An IDLE
+    COND never overruns; test_pop_stall_rebases_the_next_owned_step pins the re-base itself.)"""
     t = run_sys(compile_desc(frame()), roles=(Role.P0, Role.P1), tx={0: [0x3C]}, push_at=200)
     assert t.engines[1].rx == [0x3C] and not any(et.events for et in t.engines)
     assert t.engines[0].records[0].cycle > 200
@@ -570,3 +571,31 @@ def test_src_fifo_wait_retries_every_cycle_and_rebases_the_xfer():
     (x,) = et.records
     assert (x.value, x.tb) == (0x5A, 101 + 8 * 10) and not et.events
     assert t.wire_edges[0][0] == 102  # bit 0 (a 0) driven at 101, on the wire from 102
+
+
+def test_a_stall_never_rebases_a_followed_step():
+    """isa §4.1: only an owned step re-bases. A followed HOLD after a POP stall stays on the
+    other party's timeline, so the stalled follower samples late: OVERRUN."""
+    d = Description("s", parties=("a", "b"))
+    ln = d.line("l", owner="b", idle=1)
+    bit = d.profile("BIT", nom=10, min=8, max=12)
+    d.pop("r0")
+    d.hold(ln, 1, owner="b", prof=bit)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,), tx={0: [1]}, push_at=100)
+    assert kinds(t, 0) == ["OVERRUN"]
+
+
+def test_halt_releases_od_lines_and_keeps_pp_levels():
+    """isa §4.1 HALT: PP lines keep their level, OD lines are released."""
+    d = Description("h", parties=("a", "b"))
+    pp = d.line("pp", owner="a", idle=1)
+    od = d.line("od", kind="od", owner="a", idle=1)
+    with d.only("a"):
+        d.raw_set(pp, 0)
+        d.raw_set(od, 0)
+    d.halt()
+    e = Engine(compile_desc(d), Role.P0)
+    while not e.halted:
+        e.cycle([1, 1])
+    assert e.drv == [0, None]

@@ -382,10 +382,13 @@ def _reach(instrs: list[Instr], starts: list[int], role: Role) -> set[int]:
 
 
 def _makes_others_wait(s: _Step, r: Role) -> bool:
-    """An unbounded COND that r does, or a clocked XFER r clocks: the others wait for r."""
-    if s.owner_role != r:
+    """An unbounded COND that r does, or an unbounded clocked XFER r clocks (whoever owns its
+    data): the others wait for r however long it stalled. A bounded one times them out."""
+    if s.prof.bounded:
         return False
-    return (s.op == Op.COND and not s.prof.bounded) or (s.op == Op.XFER and s.is_clk_owner(r))
+    if s.op == Op.COND:
+        return s.owner_role == r
+    return s.op == Op.XFER and s.is_clk_owner(r)
 
 
 def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags: _Diags) -> None:
@@ -395,7 +398,7 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
     must itself make the others wait: only a clocked XFER its owner clocks does."""
     instrs = low.instrs
     starts = [0] + ([low.image.abort_pc] if low.image.abort_pc else [])
-    for r in (Role.P0, Role.P1):
+    for r in ROLES:  # MON owns no step, so nothing after a MON POP makes the others wait
         for pc in sorted(_reach(instrs, starts, r)):
             ins = instrs[pc]
             if ins.op == Op.POP:
@@ -403,15 +406,15 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
                     if not _makes_others_wait(steps[nxt], r):
                         diags.add("T5-stall", nxt, f"{r.name} can stall at the POP at pc {pc}; its next "
                                                    f"timed step must be one it owns that makes the others "
-                                                   f"wait (an unbounded COND it does, or a clocked XFER it "
-                                                   f"clocks)")
+                                                   f"wait (an unbounded COND it does, or an unbounded "
+                                                   f"clocked XFER it clocks)")
             elif ins.op == Op.XFER and steps[pc].does(r) and unpack_xfer(ins.operand)[1] == Src.FIFO:
                 s = steps[pc]
                 if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r):
                     diags.add("T5-stall", pc, f"{r.name} owns this src = FIFO XFER and waits here while "
-                                              f"TX is empty, so its followers lose the timeline; only a "
-                                              f"clocked XFER its owner clocks may take src = FIFO (or "
-                                              f"POP into a register before an unbounded COND)")
+                                              f"TX is empty, so its followers lose the timeline; only an "
+                                              f"unbounded clocked XFER its owner clocks may take src = "
+                                              f"FIFO (or POP into a register before an unbounded COND)")
 
 
 def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int, diags: _Diags) -> None:

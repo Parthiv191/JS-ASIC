@@ -245,6 +245,10 @@ class Engine:
                 yield from self.wait_until(self._next_start(start, self.now - 1))
 
     def _halt(self) -> Gen:
+        # isa §4.1: PP lines keep their level, OD lines are released
+        for i, ln in enumerate(self.lines):
+            if ln.kind == "od":
+                self.drv[i] = None
         self.halted = True
         self.halt_cycle = self.now
         self.idle = True
