@@ -19,7 +19,7 @@
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
-  "CLOCK_PERIOD": 20,
+  "CLOCK_PERIOD": 25,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
   "//": "Hold margins 0.05 / 0.02 ns (template 0.1 / 0.05): hold padding was ~31K um2 of delay cells",
