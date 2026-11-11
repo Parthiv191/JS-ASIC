@@ -1,22 +1,11 @@
 `default_nettype none
 
-// Bring-up harness for the memory layout (docs/design/architecture.md §3): the two
-// RM_IHPSG13_1P_512x32 macros, column 1 (u_mem, the program memory) and column 2
-// (u_fmem, fuzzer corpus / capture), plus the week-1 UART so the harness has a known
-// output. The protocol engine replaces the strobes below.
-//
-//   ui_in[7:0]  byte to send / byte for the strobes below
-//   uio_in[0]   SEND  rising edge: send ui_in on the UART
-//   uio_in[1]   ADDR  rising edge: addr <= {addr, ui_in} (send the high byte first)
-//   uio_in[2]   DATA  rising edge: wdata <= {wdata[23:0], ui_in}
-//   uio_in[3]   WRITE rising edge: mem[addr] <= wdata
-//   uio_in[4]   READ  rising edge: rdata <= mem[addr]
-//   uio_in[5]   CHASE level: read mem[rdata[AW-1:0]] every cycle (the engine's
-//               fetch-ahead path: memory output drives its own address)
-//   uio_in[6]   VIEW  level: uo_out = byte ui_in[1:0] of rdata
-//   uio_in[7]   SEL   level: 0 = u_mem, 1 = u_fmem
-//   uo_out[0]   UART TX
-//   uo_out[1]   busy
+// Top level, bring-up layers 1, 2 and 4 (architecture §5):
+//   1. TESTMODE: clock, reset and every pad, no SPI or SRAM needed (§2).
+//   2. Host SPI with the global ID, VERSION, SCRATCH and STATUS registers (§4).
+//   4. Host access to both SRAM columns (0x1000, 0x3000), which keeps the
+//      2 x 512x32 layout (§3, §9) in the harden.
+// Pins as in architecture §8.
 module tt_um_prot_emu_SAP (
     input  wire [7:0] ui_in,    // Dedicated inputs
     output wire [7:0] uo_out,   // Dedicated outputs
@@ -28,10 +17,11 @@ module tt_um_prot_emu_SAP (
     input  wire       rst_n     // reset_n - low to reset
 );
 
-  localparam AW = 9;
+  localparam [7:0] ID      = 8'h5E;
+  localparam [7:0] VERSION = 8'h01;
 
-  // Reset asserts asynchronously and releases on a clock edge. Every flop
-  // then resets through its own RESET_B pin, not through logic in front of D.
+  // ---- Reset: async assert, sync release (2 flops) ----
+  // Every other flop resets through its own RESET_B pin.
   reg rst_n_meta, rst_n_sync;
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -43,129 +33,183 @@ module tt_um_prot_emu_SAP (
     end
   end
 
-  // Synchronize the strobes and levels, then look for 0 -> 1 edges.
-  reg [7:0] s1, s2, s3;
+  // ---- Input synchronizers: 2 flops on every external input ----
+  reg [7:0] ui_m, ui_s, uio_m, uio_s;
   always @(posedge clk or negedge rst_n_sync) begin
     if (!rst_n_sync) begin
-      s1 <= 8'b0;
-      s2 <= 8'b0;
-      s3 <= 8'b0;
+      ui_m  <= 8'h00;
+      ui_s  <= 8'h00;
+      uio_m <= 8'h00;
+      uio_s <= 8'h00;
     end else begin
-      s1 <= uio_in;
-      s2 <= s1;
-      s3 <= s2;
+      ui_m  <= ui_in;
+      ui_s  <= ui_m;
+      uio_m <= uio_in;
+      uio_s <= uio_m;
     end
   end
-  wire [7:0] rise = s2 & ~s3;
-  wire chase = s2[5];
-  wire view  = s2[6];
-  wire sel   = s2[7];
 
-  wire tx, busy;
+  // ---- Straps: sampled once, when the synchronizers hold post-reset values ----
+  reg [1:0] strap_wait;
+  reg       straps_done, testmode;
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) begin
+      strap_wait  <= 2'd0;
+      straps_done <= 1'b0;
+      testmode    <= 1'b0;
+    end else if (!straps_done) begin
+      strap_wait <= strap_wait + 2'd1;
+      if (strap_wait == 2'd2) begin
+        straps_done <= 1'b1;
+        testmode    <= ui_s[7];
+      end
+    end
+  end
 
-  uart_tx #(
-      .CLKS_PER_BIT(434)
-  ) u_uart_tx (
-      .clk  (clk),
-      .rst_n(rst_n_sync),
-      .start(rise[0]),
-      .data (ui_in),
-      .tx   (tx),
-      .busy (busy)
+  // ---- Host SPI ----
+  wire [15:0] haddr;
+  wire [7:0]  hwdata;
+  reg  [7:0]  hrdata;
+  wire        hwr, hrd, hframe_end, miso;
+
+  host_spi u_spi (
+      .clk(clk), .rst_n(rst_n_sync),
+      .sck(ui_s[0]), .mosi(ui_s[1]), .cs(~ui_s[2]),
+      .rdata(hrdata), .miso(miso),
+      .addr(haddr), .wr(hwr), .wdata(hwdata), .rd(hrd), .frame_end(hframe_end)
   );
 
-  // ---- SRAM trial harness ----
-  // Each macro gets its own port (mem_port below): its own address, data and
-  // control flops, and a local register on its output. The real chip works the
-  // same way (one client per macro), and it keeps every macro pin's net short:
-  // run 41975807753 failed max slew/cap when one set of flops fed both macros
-  // ~450 um apart and A_DOUT ran to the output pins.
-  wire mem_we = rise[3];
-  wire mem_re = rise[4];
-  wire [31:0] rdata_a, rdata_b;
-  wire [AW-1:0] addr;   // u_fmem's address and data
-  wire [31:0]   wdata;
+  wire in_glob = haddr[15:8] == 8'h00;
+  wire in_col1 = haddr[15:11] == 5'b00010;  // 0x1000-0x17FF
+  wire in_col2 = haddr[15:11] == 5'b00110;  // 0x3000-0x37FF
 
-  mem_port #(.AW(AW)) u_mem (
-      .clk(clk), .rst_n(rst_n_sync), .sel_me(~sel), .ld_addr(rise[1]), .ld_data(rise[2]),
-      .wr(mem_we), .rd(mem_re), .chase(chase), .byte_in(ui_in), .rdata_q(rdata_a),
-      .addr_o(), .wdata_o()
+  // ---- Global registers ----
+  reg [7:0] scratch;
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) scratch <= 8'h00;
+    else if (hwr && in_glob && haddr[7:0] == 8'h02) scratch <= hwdata;
+  end
+
+  // No boot controller yet (Plus), so boot is always done and never fails.
+  // host_err has no sources yet: the illegal accesses need RUN and MEM2_MODE.
+  wire [7:0] status = {2'b00, 1'b0 /* loopback */, testmode, 1'b0 /* mem2_busy */,
+                       1'b0 /* host_err */, 1'b0 /* boot_err */, 1'b1 /* boot_done */};
+
+  // ---- SRAM host port: bytes collect into a word, which commits on its 4th byte ----
+  reg  [23:0] wbuf;
+  reg  [2:0]  wmask;   // lanes 0-2 held in wbuf
+  wire [1:0]  lane = haddr[1:0];
+  wire        mem_wr = hwr & (in_col1 | in_col2);
+  wire        commit = mem_wr & (lane == 2'd3) & (&wmask);
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) begin
+      wbuf  <= 24'h0;
+      wmask <= 3'b000;
+    end else if (hframe_end || commit) begin
+      wmask <= 3'b000;
+    end else if (mem_wr) begin
+      case (lane)
+        2'd0: begin wbuf[7:0]   <= hwdata; wmask <= 3'b001; end  // a new word
+        2'd1: begin wbuf[15:8]  <= hwdata; wmask[1] <= 1'b1; end
+        2'd2: begin wbuf[23:16] <= hwdata; wmask[2] <= 1'b1; end
+        default: ;
+      endcase
+    end
+  end
+
+  wire [31:0] mem_wdata = {hwdata, wbuf};
+  wire [31:0] col1_q, col2_q;
+
+  mem_port u_col1 (
+      .clk(clk), .rst_n(rst_n_sync),
+      .en((commit | hrd) & in_col1), .we(commit), .addr(haddr[10:2]),
+      .wdata(mem_wdata), .rdata_q(col1_q)
   );
 
-  mem_port #(.AW(AW)) u_fmem (
-      .clk(clk), .rst_n(rst_n_sync), .sel_me(sel), .ld_addr(rise[1]), .ld_data(rise[2]),
-      .wr(mem_we), .rd(mem_re), .chase(chase), .byte_in(ui_in), .rdata_q(rdata_b),
-      .addr_o(addr), .wdata_o(wdata)
+  mem_port u_col2 (
+      .clk(clk), .rst_n(rst_n_sync),
+      .en((commit | hrd) & in_col2), .we(commit), .addr(haddr[10:2]),
+      .wdata(mem_wdata), .rdata_q(col2_q)
   );
 
-  wire [31:0] rdata = sel ? rdata_b : rdata_a;
-  wire [7:0] view_byte = rdata[{ui_in[1:0], 3'b000} +: 8];
+  // ---- Read mux, registered (architecture §4: a multicycle path) ----
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) hrdata <= 8'h00;
+    else if (in_glob)
+      case (haddr[7:0])
+        8'h00:   hrdata <= ID;
+        8'h01:   hrdata <= VERSION;
+        8'h02:   hrdata <= scratch;
+        8'h03:   hrdata <= status;
+        default: hrdata <= 8'h00;
+      endcase
+    else if (in_col1) hrdata <= col1_q[{lane, 3'b000} +: 8];
+    else if (in_col2) hrdata <= col2_q[{lane, 3'b000} +: 8];
+    else hrdata <= 8'h00;
+  end
 
-  assign uo_out  = view ? view_byte : {6'b0, busy, tx};
-  assign uio_out = 0;
-  assign uio_oe  = 0;  // all bidirectional pins are inputs for now
+  // ---- Outputs: every pin from a flop; the TESTMODE mux is the only gate ----
+  // uo_out: 0 MISO, 1 IRQ, 2 ERR, 3 flash SCK, 4 flash CS_N, 5 flash MOSI, 6 REPORT, 7 ACT
+  reg [7:0] uo_q;
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) uo_q <= 8'b0101_0000;
+    else             uo_q <= {1'b0, 1'b1, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0, miso};
+  end
 
-  // List all unused inputs to prevent warnings
-  wire _unused = &{ena, ui_in[7:2], rise[7:5], 1'b0};  // CHASE, VIEW and SEL are levels
+  wire tm_drive = testmode & ui_s[6];   // uio outputs the registered ui_in
+  wire tm_show  = testmode & ~ui_s[6];  // uo_out shows the registered uio_in
+
+  assign uo_out  = tm_show  ? uio_s : uo_q;
+  assign uio_out = tm_drive ? ui_s  : 8'h00;
+  assign uio_oe  = tm_drive ? 8'hFF : 8'h00;  // every uio is an input until RUN
+
+  wire _unused = &{ena, ui_s[5:3], 1'b0};
 
 endmodule
 
 // One SRAM macro plus the flops that drive it. Address, data and control are
-// registered here, so the placer puts them next to the macro; the output is
-// captured by a local register (rdata_q). CHASE drives the macro's address from
-// its own output, combinationally: the engine's fetch-ahead path.
+// registered here, so the placer puts them next to the macro, and A_DOUT drives
+// only the local register rdata_q (architecture §3). Run 41975807753 failed max
+// slew/cap when one set of flops fed both macros ~450 um apart.
 module mem_port #(
     parameter AW = 9
 ) (
     input  wire          clk,
     input  wire          rst_n,
-    input  wire          sel_me,   // this macro is selected
-    input  wire          ld_addr,  // shift byte_in into the address
-    input  wire          ld_data,  // shift byte_in into the write data
-    input  wire          wr,       // write strobe
-    input  wire          rd,       // read strobe
-    input  wire          chase,    // level: read mem[dout] every cycle
-    input  wire [7:0]    byte_in,
-    output reg  [31:0]   rdata_q,
-    output wire [AW-1:0] addr_o,
-    output wire [31:0]   wdata_o
+    input  wire          en,     // access this cycle
+    input  wire          we,     // with en: write; otherwise read
+    input  wire [AW-1:0] addr,
+    input  wire [31:0]   wdata,
+    output reg  [31:0]   rdata_q // the last word read, 2 cycles after en
 );
 
-  reg [AW-1:0] addr;
-  reg [31:0]   wdata;
-  reg          en_q, we_q, chase_q, rd_d;
+  reg [AW-1:0] addr_q;
+  reg [31:0]   wdata_q;
+  reg          en_q, we_q, rd_d;
   wire [31:0]  dout;
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      addr    <= {AW{1'b0}};
-      wdata   <= 32'h0;
+      addr_q  <= {AW{1'b0}};
+      wdata_q <= 32'h0;
       en_q    <= 1'b0;
       we_q    <= 1'b0;
-      chase_q <= 1'b0;
       rd_d    <= 1'b0;
       rdata_q <= 32'h0;
     end else begin
-      if (sel_me & ld_addr) addr  <= {addr[AW-9:0], byte_in};
-      if (sel_me & ld_data) wdata <= {wdata[23:0], byte_in};
-      en_q    <= sel_me & (wr | rd | chase);
-      we_q    <= sel_me & wr;
-      chase_q <= sel_me & chase;
-      rd_d    <= en_q & ~we_q;
+      en_q <= en;
+      we_q <= en & we;
+      if (en) begin
+        addr_q  <= addr;
+        wdata_q <= wdata;
+      end
+      rd_d <= en_q & ~we_q;
       if (rd_d) rdata_q <= dout;
     end
   end
 
-  assign addr_o  = addr;
-  assign wdata_o = wdata;
-
   prog_mem #(.AW(AW)) u_pm (
-      .clk  (clk),
-      .en   (en_q),
-      .we   (we_q),
-      .addr (chase_q ? dout[AW-1:0] : addr),
-      .wdata(wdata),
-      .rdata(dout)
+      .clk(clk), .en(en_q), .we(we_q), .addr(addr_q), .wdata(wdata_q), .rdata(dout)
   );
 
 endmodule
