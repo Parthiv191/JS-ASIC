@@ -39,7 +39,7 @@ submit if a later round fails.
 | D3 | RTL bring-up layers 1–4: TESTMODE, host SPI, GPIO override, LOOPBACK | devOps | D2 | Nov 12* | Open #11, #12 |
 | D4 | engine 0: fetch/issue, untimed ops, timed steps | devOps | D3 | Nov 14* | Open #13, #14 |
 | D5 | FIFOs, PUSH/POP, `src`/`dst` = FIFO, TXDATA/RXDATA (a host-fed UART needs them) | devOps | D4 | Nov 21* | Not started |
-| D6 | first full place-and-route with engine 0: area and slow-corner timing | devOps | D4 | Nov 21* | Partial: #13 gds passed; slow corner −2.9 ns on #14 (decision 11-10) |
+| D6 | first full place-and-route with engine 0: area and slow-corner timing | devOps | D4 | Nov 21* | Partial: #13 gds passed; #14 253.5K µm², slow corner −2.90 ns; area branch 219.9K, −2.76 ns |
 | D7 | clocked lanes, bus detector (START/STOP, SELECT), engine 1 (layer 6) | devOps | D5 | Dec 5* | Not started |
 | D8 | capture log, DBG_HALT and readback | devOps | D7 | Dec 9* | Not started |
 | D9 | area and timing verdict at engine 1's harden; sign-off clock 50 or 40 MHz | devOps | D7 | Dec 6* | Not started |
@@ -54,8 +54,8 @@ submit if a later round fails.
 
 | Risk | Effect | Mitigation |
 |---|---|---|
-| Area: post-PnR cells came in 1.6–1.7× Yosys (#11: 35.3K vs 20.8K; #13: 136.5K vs 83.6K). #14's 38–46% projection uses Yosys numbers | two engines plus the rest may land near or over 60% | devOps reports PnR area per PR; the verdict comes at D9; cut order in chip-spec §4 |
-| Timing: slow corner misses 50 MHz by 2.9 ns (#14) | 40 MHz fallback | decided at D9 (decision 11-10); no ISA change |
+| Area: post-PnR cells run 1.6–1.7× Yosys (#11, #13). #14 is 253.5K µm² after PnR (Yosys 167K); devOps's area branch cuts it to 219.9K. With the macros that's ~31% of the 1.208M µm² core for one engine without FIFOs, clocked lanes, the detector or engine 1 | two engines plus the rest may land near the 60% target | devOps reports PnR area per PR; the area branch first; the verdict at D9; cut order in chip-spec §4 |
+| Timing: slow corner −2.90 ns at 20 ns on #14, −2.76 ns on the area branch; +2.24 ns at 25 ns | 40 MHz fallback | decided at D9 (decision 11-10); no ISA change |
 | No fuzzer model, 5 weeks to the gate | the fuzz-unit RTL is cut by rule | start D10 after V7; the host-driven fuzzer ships either way |
 | FPGA bring-up starts late | M2 and the gate slip together | V5 starts as soon as #11–#14 merge |
 | The engine stack #10–#14 lands in one go | co-sim and the FIFOs wait on it | merge in order as each goes green |
