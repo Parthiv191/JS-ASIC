@@ -23,6 +23,7 @@ def i2c_desc(body, confirm=CONFIRM, abort_label=None):
     sda = d.line("sda", "od", owner="shared", idle=1)
     scl = d.line("scl", "od", owner="a", idle=1)
     d.bus("i2c", sda, scl, confirm=confirm)
+    d.lane("L", sda, clk=scl, cpol=1, cpha=1)  # S-bus: I2C is used with this lane
     if abort_label:
         d.abort_to(abort_label)
     body(d, sda, scl, d.profile("P", nom=NOM, min=0, max=INF))
@@ -266,3 +267,166 @@ def test_an_sda_edge_as_scl_rises_is_no_start():
     t = run_sys(i2c(body), roles=(Role.P0, Role.P1), glitches=[Glitch(1, 3, NOM + 1 - 3, 0)])
     assert t.wire_edges[1] == [3, NOM + 1]   # SCL low from 3, back high with SDA's fall at 9
     assert not t.engines[1].bus_events and "TIMEOUT" in kinds(t, 1)
+
+
+# ---------------------------------------------------------------- review of #33
+def test_a_followed_stop_that_sees_start_exits_with_abort():
+    """isa §4.2: a followed STOP that sees START is a bus event: with ABORT a bus exit (the I2C
+    target waiting for STOP gets a repeated START). A glitch lifts SDA for one tick after the
+    START, so P1 sees a STOP candidate then a new START while it waits for STOP."""
+    def body(d, sda, scl, p):
+        d.cond("start", owner="a", prof=p)
+        d.cond("stop", owner="a", prof=d.profile("W", nom=200, min=0, max=INF), abort=True)
+        d.halt()
+        d.label("top")
+        d.cond("start", owner="a", prof=p)
+    t = run_sys(i2c(body, abort_label="top"), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 1, 1)])
+    assert "BUS" in kinds(t, 1) and not t.engines[1].violations
+    assert 3 in [pc for pc, _ in t.engines[1].starts]  # abort_pc: the label at pc 3
+
+
+def test_a_bus_exit_at_the_step_start_does_not_act_and_times_the_fetch():
+    """A timed step with ABORT that starts with a flag set exits in its start cycle before it
+    acts (P1's HOLD of OD line x never pulls it), and abort_pc starts as an abort's does: the
+    first own cycle >= t + 1, then 2 later (isa §4.0). P1 runs alone; glitches make the bus: SDA
+    falls at 9 (a START), rises for one tick at 30 and falls again (a second START) while P1 is
+    in its RAW DELAY."""
+    def body(d, sda, scl, p):
+        x = d.line("x", "od", owner="b", idle=1)
+        d.cond("start", owner="a", prof=p)
+        with d.only("b"):
+            d.raw_delay(60)
+        d.hold(x, 0, owner="b", prof=d.profile("H", nom=8, min=0, max=INF), abort=True)
+        d.halt()
+        d.label("top")
+        d.cond("start", owner="a", prof=p)
+    t = run_sys(i2c(body, abort_label="top"), roles=(Role.P1,),
+                glitches=[Glitch(0, 9, 21, 0), Glitch(0, 31, 300, 0)])
+    assert [k for _, k in t.engines[0].bus_events][-1] == "START"
+    starts = dict(t.engines[0].starts)
+    hold_start = starts[3]                          # START, ROLE_IF, RAW DELAY, HOLD
+    (bus,) = [e for e in t.engines[0].events if e.kind == "BUS"]
+    assert bus.cycle == hold_start
+    assert not t.wire_edges[2]                      # x was never pulled low
+    assert starts[5] == hold_start + 1 + ((hold_start + 1) & 1) + 2  # abort_pc ("top")
+
+
+@pytest.mark.parametrize("g", [40, 41])
+def test_a_bus_exit_mid_step_is_at_the_flag_and_releases_od_lines(g):
+    """The decision is the cycle the flag becomes visible (bus_e + E + bus_confirm + 1, isa §6),
+    and a bus exit releases the OD lines the engine holds."""
+    def body(d, sda, scl, p):
+        x = d.line("x", "od", owner="b", idle=1)
+        d.hold(x, 0, owner="b", prof=d.profile("H", nom=4, min=0, max=INF))   # P1 pulls x low
+        d.cond("start", owner="a", prof=p)                                    # at 12, P1 done at 31
+        d.hold(sda, 0, owner="a", prof=d.profile("L", nom=120, min=0, max=INF), abort=True)
+        with d.only("a"):
+            d.raw_delay(200)  # the master keeps the bus: its HALT would release SDA (a STOP)
+        d.halt()
+        d.label("top")
+        d.cond("start", owner="a", prof=p)
+    # SDA lifted for one tick at g while P1 follows the long HOLD (its sample would be at 75);
+    # two glitch ticks give an odd and an even decision cycle
+    t = run_sys(i2c(body, abort_label="top"), roles=(Role.P0, Role.P1), glitches=[Glitch(0, g, 1, 1)])
+    (bus,) = [e for e in t.engines[1].events if e.kind == "BUS"]
+    assert bus.cycle == g + 1 + 2 + CONFIRM + 1     # SDA back low on the wire at g + 1, seen 2 later
+    assert t.wire_edges[2][-1] == bus.cycle + 1     # x released by the exit
+
+
+def test_a_followed_start_ignores_stop():
+    """A followed START waits through a STOP: a glitch lifts SDA for 30 ticks after the first
+    START, so P1 sees a STOP, then a new START when SDA falls back; its second followed START
+    anchors on that one."""
+    def body(d, sda, scl, p):
+        d.cond("start", owner="a", prof=p)
+        d.cond("start", owner="a", prof=p)  # SDA is already low: no edge of its own
+    t = run_sys(i2c(body), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 30, 1)])
+    assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP", "START"]
+    assert conds(t, 1)[1].tb == 40 + 30 - 1         # the fall on the wire at 70: e = 69
+
+
+def test_followed_start_meas_and_done_meas_use_the_real_times():
+    """MEAS on a followed START is start_e - tb; a done COND's is action - tb, here a late action
+    (the master starts 20 cycles late), so it differs from nom."""
+    def body(d, sda, scl, p):
+        with d.only("a"):
+            d.raw_delay(20)
+        d.cond("start", owner="a", prof=p, meas="r2")
+        d.push("r2")
+    t = run_sys(i2c(body), roles=(Role.P0, Role.P1))
+    act = conds(t, 0)[0].cycle
+    assert act > NOM and t.engines[0].rx == [act] and t.engines[1].rx == [act]
+
+
+def test_select_confirm_can_fail():
+    """SELECT with confirm 5: CS dips low for 2 ticks and comes back; no START from it."""
+    d = Description("sel", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    d.bus("select", cs, confirm=5)
+    d.cond("start", owner="a", prof=d.profile("P", nom=60, min=0, max=INF))
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 10, 2, 0)])
+    # the dip's fall fails its confirm; its rise is a real STOP (CS rising and staying high)
+    starts = [c for c, k in t.engines[1].bus_events if k == "START"]
+    assert len(starts) == 1 and starts[0] > 60
+
+
+def test_a_new_edge_at_the_confirm_cycle_confirms_first():
+    """If SCL stayed high for the whole window, the pending START is confirmed even when a new
+    SDA edge is seen in the confirm cycle itself; that edge starts a new candidate."""
+    def body(d, sda, scl, p):
+        d.cond("start", owner="a", prof=p)
+        d.cond("stop", owner="a", prof=d.profile("W", nom=200, min=0, max=INF))  # P1 waits
+    rise = CONFIRMED - 2                            # SDA lifted on the wire then: seen at CONFIRMED
+    t = run_sys(i2c(body), roles=(Role.P0, Role.P1), glitches=[Glitch(0, rise, 40, 1)])
+    assert [k for _, k in t.engines[1].bus_events][:2] == ["START", "STOP"]
+
+
+def test_an_se0_bus_fails_loudly():
+    from dataclasses import replace
+    from emu.image import BusCfg
+    from emu.isa import BusKind
+    img = replace(i2c(start_body), bus=BusCfg(BusKind.SE0, 0, 1))
+    with pytest.raises(NotImplementedError, match="SE0"):
+        run_sys(img)
+
+
+def test_i2c_needs_its_lane_and_a_party_owned_scl():
+    """S-bus (isa §5): I2C START/STOP are used with a cpol 1, cpha 1 lane on (bus_a, bus_b), so
+    SCL has a party owner; a shared SCL would make both parties detect their own START."""
+    def desc(scl_owner, lane):
+        d = Description("t", parties=("a", "b"))
+        sda = d.line("sda", "od", owner="shared", idle=1)
+        scl = d.line("scl", "od", owner=scl_owner, idle=1)
+        d.bus("i2c", sda, scl)
+        if lane:
+            d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+        d.cond("start", owner="a" if scl_owner == "a" else "shared", prof=d.profile("P", nom=NOM))
+        d.halt()
+        return d
+    compile_desc(desc("a", lane=True), check_timing=False)
+    for scl_owner, lane in (("a", False), ("shared", True)):
+        with pytest.raises(CompileError, match="S-bus|R1"):
+            compile_desc(desc(scl_owner, lane), check_timing=False)
+
+
+def test_unclocked_abort_without_check_is_allowed_on_a_bus():
+    """S-flags: an unclocked XFER may have ABORT without CHK when a bus is active."""
+    def body(d, sda, scl, p):
+        d.xfer(8, d.line("u", owner="a"), owner="a", prof=d.profile("U", nom=16), abort=True)
+        d.label("end")
+    i2c(body, abort_label="end")
+
+
+def test_t5_abort_on_a_bus_needs_a_bus_cond_or_no_abort():
+    """After a bus exit the flag stays set, so a step at abort_pc with ABORT that is not a
+    followed COND START/STOP would exit again at once, forever: T5-abort rejects it."""
+    def body(d, sda, scl, p):
+        x = d.line("x", owner="a", idle=1)
+        d.cond("start", owner="a", prof=p)
+        d.hold(sda, 0, owner="a", prof=d.profile("L", nom=80, min=0, max=INF), abort=True)
+        d.halt()
+        d.label("top")
+        d.cond("fall", x, owner="a", prof=p, abort=True)
+    with pytest.raises(CompileError, match="T5-abort"):
+        compile_desc(i2c_desc(body, abort_label="top"))

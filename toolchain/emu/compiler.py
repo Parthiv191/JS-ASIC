@@ -221,6 +221,15 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
         anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
         if kind == "i2c" and (lines[a.index].kind != "od" or lines[b.index].kind != "od"):
             err("S-bus", anchor, "an I2C bus needs OD lines for SDA (a) and SCL (b)")
+        if kind == "i2c" and a.index == b.index:
+            err("S-bus", anchor, "an I2C bus needs two lines: SDA (a) and SCL (b)")
+        if kind == "i2c" and not any(la.data.index == a.index and la.clk is not None and la.clk.index == b.index
+                                     and la.cpol == 1 and la.cpha == 1 for la in desc.lanes):
+            err("S-bus", anchor, "an I2C bus is used with a cpol 1, cpha 1 lane on (SDA, SCL)")
+        master = lines[(b if kind == "i2c" else a).index]
+        if master.owner not in (Owner.P0, Owner.P1):
+            err("S-bus", anchor, f"the bus's master line {master.name!r} needs a party owner (it alone "
+                                 f"runs no detector)")
         if kind == "select" and lines[a.index].kind != "pp":
             err("S-bus", anchor, "a SELECT bus needs a push-pull CS line (a)")
     image = Image(desc.name, desc.parties, words, profiles, lines, lanes, abort_pc, desc.tolerance_ppm, debug,
@@ -315,7 +324,7 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
                                    f"the other party")
             if a["n"] > 8:
                 err("S-range", s, f"duplex XFER of {a['n']} bits: dst packs both lines, so n <= 8")
-        if s.kind == "xfer" and clk is None and a["abort"] and not a["check"]:
+        if s.kind == "xfer" and clk is None and a["abort"] and not a["check"] and desc.bus_cfg is None:
             err("S-flags", s, "abort on an unclocked xfer needs check: an out-of-window edge is its "
                               "only fatal failure")
     if s.kind == "hold" and a["level"] == 1 and any(

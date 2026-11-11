@@ -376,6 +376,7 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     # an abort restarts only the roles that fail: they must re-sync on the other party's next event
     aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}
     apc = low.image.abort_pc
+    bus_on = int(low.image.bus.kind) != 0
     for r in sorted(aborting):
         for pc in gaps(instrs, timed, apc, r):
             s = steps[pc]
@@ -383,6 +384,11 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T5-abort", pc, f"{r.name} can abort and restart at pc {apc}; the first timed "
                                           f"step it reaches there must be an unbounded COND it follows, "
                                           f"so it waits for the other party's next event")
+            elif bus_on and s.abort and not s.bus_wait:
+                # a bus exit leaves its flag set, so this step's ABORT would exit again at once
+                diags.add("T5-abort", pc, f"on a bus the first step at abort_pc may have ABORT only if "
+                                          f"it is a followed COND START/STOP: after a bus exit the flag "
+                                          f"stays set, so it would exit again, forever")
 
     _check_stalls(low, steps, timed, diags)
 

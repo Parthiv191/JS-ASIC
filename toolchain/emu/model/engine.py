@@ -97,6 +97,8 @@ class Engine:
         bus = image.bus
         self._bus_kind = BusKind(bus.kind)
         self._bus_a, self._bus_b, self._confirm = bus.a, bus.b, bus.confirm_cycles
+        if self._bus_kind == BusKind.SE0:
+            raise NotImplementedError("the SE0 bus (USB-LS, isa §4.10) is not in the model")
         if self._bus_kind != BusKind.NONE:
             master = self.lines[bus.b if self._bus_kind == BusKind.I2C else bus.a].owner
             self._detects = self.role == Role.MON or int(master) != int(self.role)
@@ -176,28 +178,32 @@ class Engine:
         """The START/STOP detector (isa §4.7), at the end of the cycle, so a flag set now is
         visible from the next cycle. A new candidate replaces the old; a failed confirm drops it.
         True when it confirmed one this cycle."""
-        a, b = self._bus_a, self._bus_b
-        if self._bus_kind == BusKind.I2C:
-            new = self.edge(a) and self.inp[b] == 1 and self.prev_inp[b] == 1
-        else:  # SELECT
-            new = self.edge(a)
-        if new:
-            self._cand = (self.now, START_BIT if self.inp[a] == 0 else STOP_BIT, self.inp[a])
-        elif self._cand is not None:
-            holds = self.inp[b] == 1 if self._bus_kind == BusKind.I2C else self.inp[a] == self._cand[2]
+        a, b, i2c = self._bus_a, self._bus_b, self._bus_kind == BusKind.I2C
+        confirmed = False
+        # the pending candidate first: a new edge in its confirm cycle doesn't undo a full window
+        if self._cand is not None and self.now > self._cand[0]:
+            holds = self.inp[b] == 1 if i2c else self.inp[a] == self._cand[2]
             if not holds:
                 self._cand = None
-        if self._cand is not None and self.now >= self._cand[0] + self._confirm:
-            c, bit, _ = self._cand
-            self._cand = None
-            self.evt |= bit
-            if bit == START_BIT:
-                self.start_e = c - EDGE_LAT
-            else:
-                self.stop_e = c - EDGE_LAT
-            self.bus_events.append((self.now, "START" if bit == START_BIT else "STOP"))
-            return True
-        return False
+            elif self.now >= self._cand[0] + self._confirm:
+                confirmed = self._confirm_candidate()
+        new = (self.edge(a) and self.inp[b] == 1 and self.prev_inp[b] == 1) if i2c else self.edge(a)
+        if new:
+            self._cand = (self.now, START_BIT if self.inp[a] == 0 else STOP_BIT, self.inp[a])
+            if self._confirm == 0:
+                confirmed = self._confirm_candidate() or confirmed
+        return confirmed
+
+    def _confirm_candidate(self) -> bool:
+        c, bit, _ = self._cand
+        self._cand = None
+        self.evt |= bit
+        if bit == START_BIT:
+            self.start_e = c - EDGE_LAT
+        else:
+            self.stop_e = c - EDGE_LAT
+        self.bus_events.append((self.now, "START" if bit == START_BIT else "STOP"))
+        return True
 
     def _bus_step(self, ins: Instr) -> bool:
         """A followed COND START/STOP handles the flags itself (isa §4.2)."""
@@ -534,6 +540,8 @@ class Engine:
                 # timed from tb, as its followers time the edge (isa §4.2)
                 e = yield from self._await_release(line, act, p, ref=self.tb)
                 if e is None:
+                    if not ins.flags & F_ABORT:
+                        measure(0xFFFF)  # a TIMEOUT writes 0xFFFF (isa §4.2)
                     yield from self._stretch_timeout(ins)
                     return
                 act = max(act, e)  # the edge is when the clock really rose
@@ -590,9 +598,7 @@ class Engine:
                 self._reanchor(anchor)
                 break
             if kind == CondKind.STOP and self.evt & START_BIT and ins.flags & F_ABORT:
-                self._bus_exit()
-                yield
-                return
+                raise _BusExit  # a bus event (isa §4.2); cycle() makes the exit
             if p.bounded and self.now - EDGE_LAT - self._confirm > self.tb + p.max + QUANT:
                 self.log("TIMEOUT", measured=self.now - EDGE_LAT - self._confirm - self.tb, lo=p.min, hi=p.max)
                 if ins.flags & F_ABORT:
