@@ -52,6 +52,7 @@ Brief: https://blog.janestreet.com/protocol-emulator-asic-competition/ (posted S
 | `info.yaml` fields: title, author, description, language, `clock_hz`, `top_module` (`tt_um_` prefix), `source_files`, pinout | `info.yaml` | Partial: the description and pinout are the bring-up design's, and `source_files` changes with #11 |
 | Datasheet `docs/info.md`: how it works, how to test, external hardware; images < 512 KB each, < 1 MB in all | `docs/info.md` | Not yet: describes the bring-up design |
 | Pins: 8 in, 8 out, 8 bidirectional, plus clock and reset; no analog pads | architecture §8 | Met in the spec; the `info.yaml` pinout follows once #11 merges |
+| Pad speed (TT Discord, 11-10): ~60 MHz out, ~75 MHz in | the fastest pin toggles at clk/2 = 25 MHz at 50 MHz; host SPI and flash SCK at ≤ clk/8 | Met |
 | Demo board I/O is 3.3 V; external parts go on a Pmod | architecture §8 | Open (to check: architecture §8 "Verify against the TT demo-board docs") |
 | IHP SRAM macros allowed, several, if they fit and pass precheck | 2 × `RM_IHPSG13_1P_512x32` (architecture §3) | Met on the harness (#10 re-checks at 8x4) |
 | Precheck clean | CI `gds.yaml` | Met on every passing gds run |
@@ -63,6 +64,6 @@ Brief: https://blog.janestreet.com/protocol-emulator-asic-competition/ (posted S
 |---|---|---|---|
 | Q1 | Jane Street | The brief now says the demo board's **RP2350** makes the clock and that 60 MHz is OK. We wrote RP2040 (architecture §8, chip-spec §3). Which MCU is on the board we'll get? | host software and the pin check in architecture §8 |
 | Q2 | Jane Street | Is a design that ships the host-driven fuzzer instead of the on-chip one (our Dec 15 cut rule) still judged on the same architecture? | the Novel tier's fallback |
-| Q3 | Tiny Tapeout | Pad pull-ups and the round-trip delay on CMOS5L pads (the brief quotes ~10 ns and ~66 MHz as estimates) | host SPI at clk/8, flash sampling (architecture §6) |
+| Q3 | Tiny Tapeout | Pad pull-ups, and the pad round-trip delay on CMOS5L. **Partly answered 11-10** (TT Discord): max pad frequency ~60 MHz out, ~75 MHz in, a bit more if duty-cycle distortion is tolerable. Pull-ups and the round-trip delay are still open | host SPI at clk/8, flash sampling (architecture §6) |
 
 Draft messages for the human to send live in the supervisor's handoff, not here.
