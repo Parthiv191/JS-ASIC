@@ -50,7 +50,7 @@ class LineDecl:
     kind: str
     owner: str
     idle: int
-    gated: bool = False  # PP only: driven from the owner's first owned step on it until a SELECT STOP or an abort
+    gated: bool = False  # PP, idle 1: driven from a timed step until a SELECT STOP, an abort, a bus exit or HALT
 
 
 @dataclass(frozen=True)

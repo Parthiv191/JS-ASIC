@@ -488,7 +488,8 @@ def test_a_stop_mid_step_keeps_the_gated_line_released_until_the_next_owned_step
     first = next(now for pc, now in t.engines[1].starts if pc == 1)
     xfer, hold = [r for r in t.engines[1].records if r.op in ('XFER', 'HOLD')]
     assert first < c < xfer.cycle - 20                 # the STOP lands mid-XFER
-    assert t.wire_edges[1] == [first + 1, c + 1, hold.tb - 10 + 1]  # the HOLD drives at its planned tb
+    halt = t.engines[1].starts[-1][1]
+    assert t.wire_edges[1] == [first + 1, c + 1, hold.tb - 10 + 1, halt + 1]  # the HOLD drives at its planned tb
 
 
 def test_an_abort_releases_gated_lines():
@@ -535,4 +536,95 @@ def test_an_i2c_stop_leaves_gated_lines_driven():
         d.cond("stop", owner="a", prof=d.profile("W", nom=30, min=0, max=INF))
     t = run_sys(i2c(body), roles=(Role.P0, Role.P1))
     assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP"]
-    assert len(t.wire_edges[2]) == 1                   # g fell once and stayed low
+    (c,) = stops(t, 1)
+    halt = t.engines[1].starts[-1][1]
+    assert c < halt and t.wire_edges[2][1:] == [halt + 1]   # g stayed low through the STOP, until HALT
+
+
+# ---------------------------------------------------------------- review of #39
+def test_halt_releases_gated_lines():
+    """A halted engine runs no detector, so HALT releases its gated lines itself (isa §4.1):
+    otherwise a target that halts mid-frame would hold MISO forever."""
+    def body(d, cs, miso, x, p):
+        d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
+    t = run_sys(select_desc(body), roles=(Role.P0, Role.P1))
+    halt = t.engines[1].starts[-1][1]
+    assert t.wire_edges[1] == [3, halt + 1]
+
+
+def test_a_gated_line_idles_at_1_and_is_not_the_select_masters():
+    """S-line: a released gated line reads 1 (the pull-up), so its idle is 1; and the SELECT
+    master runs no detector, so a gated line it owns would never see the STOP."""
+    def desc(owner, idle):
+        d = Description("g", parties=("a", "b"))
+        cs = d.line("cs", owner="a", idle=1)
+        d.line("g", owner=owner, idle=idle, gated=True)
+        d.bus("select", cs)
+        d.halt()
+        return d
+    compile_desc(desc("b", 1), check_timing=False)
+    for owner, idle in (("b", 0), ("a", 1)):
+        with pytest.raises(CompileError, match="S-line"):
+            compile_desc(desc(owner, idle), check_timing=False)
+
+
+def test_the_gate_starts_shut_at_run():
+    """A gated line is driven only from the first timed step: a RAW SET before it does nothing."""
+    def body(d, cs, miso, x, p):
+        with d.only("b"):
+            d.raw_set(miso, 0)
+            d.raw_delay(20)
+        d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
+    t = run_sys(select_desc(body), roles=(Role.P0, Role.P1))
+    (hold,) = [r for r in t.engines[1].records if r.op == "HOLD"]
+    start = dict(t.engines[1].starts)[hold.pc]
+    halt = t.engines[1].starts[-1][1]
+    assert t.wire_edges[1] == [max(start, hold.tb - 10) + 1, halt + 1]   # first driven by the HOLD (late here)
+
+
+def test_a_stop_confirmed_as_a_step_starts_cuts_that_step():
+    """A release in the cycle a timed step starts wins over that step's opening of the gate (the
+    detector runs at the end of the cycle): that HOLD drives nothing, the next one drives again."""
+    def body(d, cs, miso, x, p):
+        d.cond("start", owner="a", prof=p)
+        h = d.profile("H", nom=10)
+        for _ in range(4):
+            d.hold(miso, 0, owner="b", prof=h)
+    img = select_desc(body)
+    plain = run_sys(img, roles=(Role.P0, Role.P1))
+    s2 = dict(plain.engines[1].starts)[3]           # the third HOLD's start
+    t = run_sys(img, roles=(Role.P0, Role.P1), glitches=[Glitch(0, s2 - 3, 2000, 1)])
+    assert stops(t, 1) == [s2]                      # seen at s2 - 1, confirmed after 1 cycle
+    holds = [r for r in t.engines[1].records if r.op == "HOLD"]
+    halt = t.engines[1].starts[-1][1]
+    assert t.wire_edges[1] == [plain.wire_edges[1][0], s2 + 1, holds[3].tb - 10 + 1, halt + 1]
+
+
+def test_a_gated_data2_is_cut_by_a_stop_and_drives_the_next_frame():
+    """Duplex SPI: MISO is a gated data2, driven by the target in a step it follows. CS lifted
+    for 30 ticks mid-frame 1: the rest of frame 1 drives nothing; frame 2 drives MISO again."""
+    from emu.model.system import EngineSpec, System
+    d = Description("spi", parties=("m", "s"))
+    cs = d.line("cs", owner="m", idle=1)
+    sck = d.line("sck", owner="m", idle=0)
+    mosi = d.line("mosi", owner="m", idle=0)
+    miso = d.line("miso", owner="s", idle=1, gated=True)
+    d.bus("select", cs)
+    L = d.lane("L", mosi, clk=sck, cpol=0, cpha=0, data2=miso)
+    d.cond("start", owner="m", prof=d.profile("S", nom=40, min=0, max=INF))
+    h = d.profile("H", nom=20, min=10, max=60)
+    d.xfer(8, L, owner="m", prof=h, src="r1", dst="r2")
+    d.xfer(8, L, owner="m", prof=h, src="r1", dst="r2")
+    d.cond("stop", owner="m", prof=d.profile("W", nom=200, min=0, max=INF))
+    with d.only("m"):
+        d.raw_delay(400)
+    d.halt()
+    s = System([EngineSpec(compile_desc(d), r) for r in (Role.P0, Role.P1)], glitches=[Glitch(0, 150, 30, 1)])
+    s.engines[1].regs[1] = 0x55                     # MISO toggles every bit
+    t = s.run(50_000)
+    c = stops(t, 1)[0]
+    frame1_end = [r for r in t.engines[1].records if r.op == "XFER"][0].cycle
+    edges = t.wire_edges[3]
+    assert c < frame1_end and not [e for e in edges if c + 1 < e <= frame1_end]   # frame 1 cut
+    assert len([e for e in edges if e <= c + 1]) % 2 == 0           # released: MISO reads 1
+    assert len([e for e in edges if e > frame1_end]) >= 4            # frame 2 drives it

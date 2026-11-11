@@ -108,9 +108,9 @@ class Engine:
         self.start_e = self.stop_e = 0
         self.bus_events: list[tuple[int, str]] = []     # (cycle confirmed, START/STOP)
         self._step: Instr | None = None                   # the timed step a bus flag may exit
-        # gated lines (isa §2): after a SELECT STOP or an abort released them, drives to them do
-        # nothing until the next timed step starts
-        self._gate_shut = False
+        # gated lines (isa §2): shut at RUN and after a SELECT STOP, an abort, a bus exit or HALT
+        # released them; drives to them do nothing until the next timed step starts
+        self._gate_shut = True
         # clocks the owner stretch-waits on (isa §4.3): those of lanes with `stretch`
         self._stretch_clocks = {la.clk for la in image.lanes if la.stretch and la.clk is not None}
         self.pc = 0
@@ -424,11 +424,13 @@ class Engine:
                 yield from self.wait_until(self._next_start(start, self.now - 1))
 
     def _halt(self) -> Gen:
-        # isa §4.1: PP lines keep their level, OD lines are released
+        # isa §4.1: PP lines keep their level, OD and gated lines are released (a halted engine
+        # runs no detector, so it would never see the STOP that releases a gated line)
         self._letgo.clear()
         for i, ln in enumerate(self.lines):
             if ln.kind == "od":
                 self.drv[i] = None
+        self._close_gates()
         self.halted = True
         self.halt_cycle = self.now
         self.idle = True
