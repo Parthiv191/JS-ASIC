@@ -219,6 +219,10 @@ class Description:
     def raw_jpin(self, line: LineRef, level: int, target: str) -> None:
         self._add("raw_jpin", None, line=self._line(line), level=level, target=target)
 
+    def raw_evt(self, rd: str, clear_mask: int) -> None:
+        """rd := evt, then clear the bits in `clear_mask` (isa §4.1)."""
+        self._add("raw_evt", None, rd=self._reg(rd), mask=clear_mask)
+
     # ---- helpers --------------------------------------------------------------------
     def _add(self, _step_kind: str, owner: str | None, **args: Any) -> None:
         if owner is not None and owner not in self.parties + (SHARED,):

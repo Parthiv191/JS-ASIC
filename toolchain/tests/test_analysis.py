@@ -32,6 +32,15 @@ def test_r2_rejects_branch_on_popped_reg():
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
+def test_r2_rejects_branch_on_reg_never_written():
+    """Registers keep their values across RUN (isa §1), so the two engines may start with
+    different values: a register is tainted until the program writes it."""
+    d, ln, p = two_party()
+    d.label("x")
+    d.br("x", cond="z", reg="r0")
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
+
+
 def test_r2_rejects_branch_on_reg_written_in_role_block():
     d, ln, p = two_party()
     d.label("x")
@@ -53,7 +62,7 @@ def test_r2_accepts_branch_on_xfer_dst():
 
 
 def test_r2_taint_joins_over_loop():
-    """r0 is clean on entry but tainted along the back edge, so the loop head is tainted."""
+    """r0 is clean after LI but tainted along the back edge, so the loop head is tainted."""
     d, ln, p = two_party()
     d.li("r0", 0)
     d.label("head")
@@ -82,17 +91,19 @@ def test_r2_rejects_jpin_outside_block():
 
 # ---------------------------------------------------------------- T rules
 def test_t1_uart_period_boundary():
-    """Stop-bit sample: A = 9P from the anchor, slot end 10P.
+    """Two boundaries at d = 2% (isa §6, U = ISSUE = 2).
 
-    T1 needs ceil(d*10P) + QUANT + 1 < P//2. At d = 2%: P=10 -> 2+2 < 5 holds;
-    P=9 -> 2+2 < 4 fails; P=8 -> 2+2 < 4 fails.
-    At P=8 the follower is also late for the next start edge (T5): it finishes the
-    stop bit at -P + P//2 + E = -1, then runs BR and ROLE_IF and starts at 2. With
-    drift ceil(d*80) = 2 that is 4 > event 0 + E = 3. At P=9 it starts at 1: 3 <= 3.
+    T1, the stop-bit sample (A = 9P from the anchor, slot end 10P): ceil(d*10P) + QUANT + ISSUE
+    < P//2. P=14 -> 3+3 < 7 holds; P=13 -> 3+3 < 6 fails.
+    T5-watch, the next start edge: the follower finishes the stop bit at -P + P//2 + E, then runs
+    BR and ROLE_IF (U each) and starts at most ISSUE late, so L = -P + P//2 + 9. It must be
+    watching by the event at 0 + E: L + ceil(d*10P) <= 3, i.e. ceil(P/2) - ceil(P/5) >= 6.
+    P=19 -> 10-4 = 6 holds; P=18 -> 9-4 = 5 fails.
     """
-    assert diag_rules(uart_like(10)) == set()
-    assert diag_rules(uart_like(9)) == {"T1-sample"}
-    assert diag_rules(uart_like(8)) == {"T1-sample", "T5-watch"}
+    assert diag_rules(uart_like(19)) == set()
+    assert diag_rules(uart_like(18)) == {"T5-watch"}
+    assert diag_rules(uart_like(14)) == {"T5-watch"}
+    assert diag_rules(uart_like(13)) == {"T1-sample", "T5-watch"}
     assert diag_rules(uart_like(434)) == set()
 
 
@@ -119,11 +130,12 @@ def test_t3_rejects_spi_target_half_period_4():
     assert "T3-latency" in diag_rules(spi_like(4))
 
 
-def test_t3_accepts_6():
-    """Bit 0 (cpha 0): the target starts at E+1 = 4 after the clock owner's tb, so
-    H >= 4 + 1 + ceil(d*H) = 6; H=5 fails only the bit-0 bound."""
-    assert diag_rules(spi_like(6)) == set()
-    assert diag_rules(spi_like(5)) == {"T3-latency"}
+def test_t3_accepts_7():
+    """Bit 0 (cpha 0): the target starts at most E + ISSUE = 5 after the clock owner's tb, so
+    H >= 5 + 1 + ceil(d*H) = 7; H=6 fails only the bit-0 bound. Clocked XFER is exempt from
+    T5-overrun (isa §6)."""
+    assert diag_rules(spi_like(7)) == set()
+    assert diag_rules(spi_like(6)) == {"T3-latency"}
 
 
 def test_t4_rejects_min_gt_nom():
@@ -188,7 +200,7 @@ def test_r2_accepts_br_to_inside_block():
 
 
 def test_t1_message_names_the_real_bound():
-    """At 0 ppm a 4-cycle slot still fails: QUANT + 1 = 2 is not < 4//2. The message must say so."""
+    """At 0 ppm a 4-cycle slot still fails: QUANT + ISSUE = 3 is not < 4//2. The message must say so."""
     d = Description("t", parties=("a", "b"), tolerance_ppm=0)
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")
@@ -197,12 +209,13 @@ def test_t1_message_names_the_real_bound():
     with pytest.raises(CompileError) as e:
         compile_desc(d)
     (msg,) = [x.msg for x in e.value.diags if x.rule == "T1-sample"]
-    assert "drift 0 + QUANT 1 + 1 = 2" in msg and "P//2 = 2" in msg
+    assert "drift 0 + QUANT 1 + ISSUE 2 = 3" in msg and "P//2 = 2" in msg
 
 
-@pytest.mark.parametrize("P,ok", [(5, False), (6, True)])
+@pytest.mark.parametrize("P,ok", [(7, False), (8, True)])
 def test_t1_shortest_hold_slot_at_zero_ppm(P, ok):
-    """Even without drift a follower needs QUANT + 1 = 2 < P//2, so the shortest followed slot is 6."""
+    """Even without drift a follower needs QUANT + ISSUE = 3 < P//2, so the shortest followed slot
+    is 8."""
     d = Description("t", parties=("a", "b"), tolerance_ppm=0)
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")
@@ -214,7 +227,7 @@ def test_t1_shortest_hold_slot_at_zero_ppm(P, ok):
 @pytest.mark.parametrize("ppm,ok", [(20000, False), (10000, True)])
 def test_t1_sixteen_bit_unclocked_frame(ppm, ok):
     """P=16 after a 1P start bit: the last sample is at A + 16P = 272.
-    2%: ceil(5.44) + QUANT + 1 = 8, not < 8. 1%: 3 + 2 = 5 < 8."""
+    2%: ceil(5.44) + QUANT + ISSUE = 9, not < 8. 1%: 3 + 3 = 6 < 8."""
     from descs import slack
     d = Description("t", parties=("a", "b"), tolerance_ppm=ppm)
     ln = d.line("l", owner="a", idle=1)
@@ -307,7 +320,7 @@ def test_r2_taints_registers_at_the_abort_target():
     d.alu("ne", "r1", "r0", 3)
     d.br("top", cond="nz", reg="r1")
     d.halt()
-    assert diag_rules(d) == {"R2-branch"}
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
 def _cond_then(next_step, abort=False):
@@ -330,9 +343,14 @@ def test_t5_rejects_a_timed_step_after_a_cond_that_can_time_out():
     assert diag_rules(d) == {"T5-timeout"}
 
 
-def test_t5_accepts_an_idle_cond_after_a_cond_that_can_time_out():
-    d = _cond_then(lambda d, ln, p: d.cond("fall", ln, owner="a"))
+def test_t5_accepts_an_unbounded_cond_after_a_cond_that_can_time_out():
+    """The trailing COND is unbounded, as T5-timeout requires. It plans its edge at nom = 4: a
+    follower of the rise starts watching at most E + ISSUE = 5 after it, before the edge is
+    visible at 4 + E. With nom = 0 the owner's edge could come at 1 and be missed (T5-watch)."""
+    gap = lambda d: d.profile("GAP", nom=4, min=0, max=INF)  # noqa: E731
+    d = _cond_then(lambda d, ln, p: d.cond("fall", ln, owner="a", prof=gap(d)))
     assert diag_rules(d) == set()
+    assert diag_rules(_cond_then(lambda d, ln, p: d.cond("fall", ln, owner="a"))) == {"T5-watch"}
 
 
 def test_t5_accepts_a_timed_step_after_a_cond_with_abort():
@@ -366,4 +384,180 @@ def test_t5_rejects_an_abort_target_whose_first_cond_the_aborting_role_owns():
 
 
 def test_t5_accepts_uart_abort_to_frame_start():
-    assert diag_rules(uart_like(16)) == set()
+    assert diag_rules(uart_like(20)) == set()  # P >= 19 at 2% (test_t1_uart_period_boundary)
+
+
+def test_t5_overrun_owner_hold_after_untimed():
+    """An owner HOLD is planned at offset 0, so it may start at most ISSUE = 2 late (isa §6
+    T5-overrun). At pc 0 it starts at 2 (reset completes at 0): accepted. After an LI it starts
+    at 4: rejected."""
+    def desc(pre_li):
+        d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+        ln = d.line("l", owner="a", idle=1)
+        if pre_li:
+            d.li("r0", 1)
+        d.hold(ln, 0, owner="a", prof=d.profile("P", nom=16))
+        d.halt()
+        return d
+    assert diag_rules(desc(False)) == set()
+    assert diag_rules(desc(True)) == {"T5-overrun"}
+
+
+@pytest.mark.parametrize("nops,ok", [(2, True), (3, False)])
+def test_t5_overrun_hold_completion_carries_the_issue_slot(nops, ok):
+    """Rule cross-check (final review, issue 1). An owner HOLD drives, and completes, when it
+    starts: up to ISSUE late (isa §4.2). At 0 ppm with nom 8 the COND acts at 2 (tb := 2); HOLD 0
+    starts at 4, 2 late, so it completes at -nom + 2 = -6 from its end tb 10. ROLE_IF plus k NOPs
+    put HOLD 1 at 4 + 2(k + 1) against its plan at 10: 2 late for k = 2 (inside ISSUE), 4 late for
+    k = 3 (OVERRUN). The compiler must accept exactly the programs the model runs clean."""
+    from emu.isa import Role
+    from emu.model.engine import Engine
+    d = Description("t", parties=("a", "b"), tolerance_ppm=0)
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("P", nom=8)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    with d.only("a"):
+        for _ in range(nops):
+            d.nop()
+    d.hold(ln, 1, owner="a", prof=bit)
+    d.halt()
+    assert diag_rules(d) == (set() if ok else {"T5-overrun"})
+    e = Engine(compile_desc(d, check_timing=False), Role.P0)
+    for _ in range(60):
+        if e.halted:
+            break
+        e.cycle([1] * 8)
+    assert [(ev.kind, ev.measured) for ev in e.events] == ([] if ok else [("OVERRUN", 4)])
+
+
+def test_r2_rejects_branch_on_raw_evt_reg():
+    """isa §6 R2: RAW EVT taints its rd (evt differs between roles). r0 starts clean (LI), since
+    every register is tainted at entry."""
+    d, ln, p = two_party()
+    d.li("r0", 1)
+    d.label("x")
+    d.raw_evt("r0", 0)
+    d.br("x", cond="z", reg="r0")
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
+
+
+# ---------------------------------------------------------------- T5-stall
+def test_t5_stall_accepts_pop_then_an_unbounded_cond_it_does():
+    """isa §6: the library UART shape. b never pops, so its followed COND is fine."""
+    d, ln, p = two_party()
+    with d.only("a"):
+        d.pop("r0")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" not in diag_rules(d)
+
+
+def test_t5_stall_rejects_pop_then_an_owned_hold():
+    d, ln, p = two_party()
+    with d.only("a"):
+        d.pop("r0")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_rejects_pop_then_a_followed_step():
+    """The stricter reading (decisions 11-10): the very next timed step must be the staller's."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="b", idle=1)
+    with d.only("a"):
+        d.pop("r0")
+    d.cond("fall", ln, owner="b")
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_rejects_an_unclocked_src_fifo_owner():
+    """The XFER itself would start late; only a clock owner (or a lead block) makes followers wait."""
+    d, ln, p = two_party()
+    d.cond("fall", ln, owner="a")
+    d.xfer(8, ln, owner="a", prof=p, src="fifo")
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_accepts_src_fifo_on_a_lane_its_owner_clocks():
+    """A clock owner's src = FIFO waits before its first edge, so the followers wait with it."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    mosi = d.line("mosi", owner="a", idle=0)
+    half = d.profile("HALF", nom=8, min=7, max=INF)
+    d.xfer(8, d.lane("out", data=mosi, clk=sck), owner="a", prof=half, src="fifo")
+    assert "T5-stall" not in diag_rules(d)
+def _xfer_then_hold(kind):
+    """XFER 8, 5 NOPs, then an owned HOLD: the gap only fits a PP owner, which finishes on its last
+    bit. An OD owner reads its bits back and finishes P//2 + E later (isa §6 completion offsets)."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", kind=kind, owner="a", idle=1)
+    p = d.profile("P", nom=16, min=14, max=18)
+    d.cond("fall", ln, owner="a")
+    d.xfer(8, ln, owner="a", prof=p)
+    for _ in range(5):
+        d.nop()
+    d.hold(ln, 1, owner="a", prof=p)
+    d.halt()
+    return d
+
+
+def test_t5_overrun_uses_an_od_owners_readback_completion():
+    from simutil import run_sys
+    from emu.isa import Role
+    assert "T5-overrun" not in diag_rules(_xfer_then_hold("pp"))
+    assert "T5-overrun" in diag_rules(_xfer_then_hold("od"))
+    # the model agrees: the OD owner's HOLD starts late
+    t = run_sys(compile_desc(_xfer_then_hold("od"), check_timing=False), roles=(Role.P0,))
+    assert [e.kind for e in t.engines[0].events] == ["OVERRUN"]
+
+
+def _clocked(bounded, data_owner="a", fifo=False):
+    """a clocks a lane whose data line `data_owner` owns. Without `fifo`, a POPs first."""
+    d = Description("t", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=0)
+    data = d.line("data", owner=data_owner, idle=0)
+    half = d.profile("HALF", nom=8, min=7, max=9 if bounded else INF)
+    if not fifo:
+        with d.only("a"):
+            d.pop("r0")
+    d.xfer(8, d.lane("ln", data=data, clk=sck), owner=data_owner, prof=half,
+           src="fifo" if fifo else "zero")
+    return d
+
+
+def test_t5_stall_needs_an_unbounded_clocked_xfer():
+    """A clock follower's wait for the first edge times out at max + QUANT from its own start
+    (isa §4.3), so only an unbounded clocked XFER makes it wait through a stall."""
+    assert "T5-stall" in diag_rules(_clocked(bounded=True))
+    assert "T5-stall" in diag_rules(_clocked(bounded=True, fifo=True))
+    assert "T5-stall" not in diag_rules(_clocked(bounded=False))
+
+
+def test_t5_stall_accepts_a_read_its_staller_clocks():
+    """A master read after a POP: a clocks the lane and b owns the data. The followers of the
+    clock wait for a, so the step counts as a's (isa §6: a clocked XFER it clocks)."""
+    assert "T5-stall" not in diag_rules(_clocked(bounded=False, data_owner="b"))
+
+
+def test_t5_stall_covers_mon():
+    """MON owns no step, so nothing after a MON POP can make the others wait for it."""
+    d, ln, p = two_party()
+    with d.only("mon"):
+        d.pop("r0")
+    d.hold(ln, 0, owner="a", prof=p)
+    assert "T5-stall" in diag_rules(d)
+
+
+def test_t5_stall_checks_code_reached_only_from_abort_pc():
+    d, ln, p = two_party()
+    d.abort_to("recover")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=p, abort=True)
+    d.halt()
+    d.label("recover")
+    with d.only("a"):
+        d.pop("r0")
+    d.hold(ln, 1, owner="a", prof=p)
+    d.halt()
+    assert "T5-stall" in diag_rules(d)
