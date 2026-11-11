@@ -181,7 +181,7 @@ def _steps(low: Lowered) -> dict[int, _Step]:
             kw["n"] = unpack_xfer(ins.operand)[0]
             kw["chk"] = bool(ins.flags & F_CHK)
             lane = img.lanes[ins.line]
-            kw["od"] = img.lines[lane.data].kind == "od"
+            kw["od"] = any(x is not None and img.lines[x].kind == "od" for x in (lane.data, lane.data2))
             if lane.clk is not None:
                 kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)),
                           ldelay=lane.ldelay)
@@ -208,7 +208,8 @@ def completion(s: _Step, r: Role) -> tuple[int, int]:
         return c, c
     if s.is_clk_owner(r):
         # it completes at its last edge, or at its last sample if it follows a data line
-        c = 0 if s.drives_all(r) else (max(0, E - nom) if s.cpha == 0 else E)
+        # (an OD owner reads its bits back, so it completes like a follower, isa §6)
+        c = 0 if s.drives_all(r) and not s.od else (max(0, E - nom) if s.cpha == 0 else E)
         return c, c
     return E, E
 

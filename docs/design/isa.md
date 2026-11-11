@@ -10,9 +10,8 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 **Model status:** the encoding, the image, fetch and issue timing (§4.0), reserved codes (§3),
 `BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
-(§4.1) and clocked XFER on push-pull data lines, duplex included (§4.3, with CLK_PHASE, TIMEOUT
-and UNDERRUN), are v1. Still to come: OD data and stretching on clocked lanes, COND START/STOP and
-MEAS. The model keeps fractional clocks only to stand in for external devices.
+(§4.1) and clocked XFER, duplex and OD data with the let-go included (§4.3, with CLK_PHASE,
+TIMEOUT and UNDERRUN), are v1. Still to come: clock stretching, COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -252,7 +251,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 ### 4.3 `XFER n, lane, owner, src, dst, msb, prof`
 - **`dst` = the wire value, in every role.** The owner reads its own bits back at the point a
   follower in its position samples them:
-  - on an OD line, someone else's 0 shows up, and the owner completes on its last readback;
+  - on an OD line, someone else's 0 shows up, and the owner completes on its last readback. On a
+    clocked lane the readback is at the capture points: the clock owner's at capture + EDGE_LAT,
+    a clock follower's when it sees the capture edge;
   - on a PP line it equals `src`, and the owner completes on its last bit.
   - Readback isn't a follower's sample: it adds no `tr_sample` (architecture §5).
 - `dst = FIFO` pushes only in follow mode. The owner takes `src` at step start.
@@ -303,7 +304,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - `dst := (v2 << n) | v1`, so `n ≤ 8`.
   - A `dst = FIFO` push sends that same packed value, in every engine that drives fewer than all
     of the step's data lines.
-- **OD let-go.** After an XFER in which it drove an OD data line `D`:
+- **OD let-go.** After a clocked XFER in which it drove an OD data line `D` (also one that timed
+  out):
   - the engine keeps the last bit until the lane's next leading clock edge as it sees it (the
     clock owner: the cycle it drives that edge; others: the cycle they detect it);
   - it releases `D` `ldelay` cycles after that edge (same rule as launch), unless it launches a

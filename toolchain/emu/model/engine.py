@@ -114,6 +114,8 @@ class Engine:
         self.starts: list[tuple[int, int]] = []  # (pc, now) per instruction start: the tr_issue trace
         self._abort_at: int | None = None        # decision cycle of an abort, until abort_pc starts
         self._stalled = False                    # POP waited since the last timed step (isa §4.1)
+        # OD let-go (isa §4.3): OD data line -> (lane, owns the clock, ldelay, release cycle or None)
+        self._letgo: dict[int, tuple] = {}
         self.halted = False
         self.halt_cycle: int | None = None
         self.idle = False
@@ -134,13 +136,40 @@ class Engine:
         self.prev_inp = self.inp
         self.inp = self._pipe.pop()
         self.idle = False
+        pre = list(self.drv) if self._letgo else None
         next(self._proc)
+        if pre is not None:  # a let-go registered this cycle waits for a later edge
+            self._track_letgo(pre)
 
     def edge(self, line: int) -> bool:
         return self.prev_inp[line] != self.inp[line]
 
+    def _track_letgo(self, pre: list[int | None]) -> None:
+        """OD let-go (isa §4.3): after a clocked XFER in which it drove OD data line D, the engine
+        keeps the last bit until the lane's next leading clock edge as it sees it (the clock owner:
+        the cycle it drives that edge; others: the cycle they detect it), then releases D at the
+        launch time, edge + ldelay or max(detect, e + ldelay). Any drive of D cancels it (drive()),
+        and it runs whatever instruction is running."""
+        def level(v: int | None) -> int:
+            return 1 if v is None else v
+        for d, (lane, own, ld, at) in list(self._letgo.items()):
+            if at is None:
+                clk, lead = lane.clk, 1 - lane.cpol
+                if own:
+                    if level(pre[clk]) != lead and level(self.drv[clk]) == lead:
+                        at = self.now + ld
+                elif self.edge(clk) and self.inp[clk] == lead:
+                    at = max(self.now, self.now - EDGE_LAT + ld)
+                if at is None:
+                    continue
+                self._letgo[d] = (lane, own, ld, at)
+            if self.now >= at:
+                self.drv[d] = None
+                del self._letgo[d]
+
     # ------------------------------------------------------------------ helpers
     def drive(self, line: int, value: int) -> None:
+        self._letgo.pop(line, None)  # an explicit drive cancels a pending let-go (isa §4.3)
         if self.lines[line].kind == "pp":
             self.drv[line] = value & 1
         else:
@@ -199,6 +228,7 @@ class Engine:
         """Fatal follow failure on a step with ABORT: log, release OD lines, restart the
         timeline at `now`, jump to the abort vector. The step still ends in this cycle."""
         self.log("ABORT", measured=self.pc)
+        self._letgo.clear()
         for i, ln in enumerate(self.lines):
             if ln.kind == "od":
                 self.drv[i] = None
@@ -247,6 +277,7 @@ class Engine:
 
     def _halt(self) -> Gen:
         # isa §4.1: PP lines keep their level, OD lines are released
+        self._letgo.clear()
         for i, ln in enumerate(self.lines):
             if ln.kind == "od":
                 self.drv[i] = None
@@ -545,9 +576,8 @@ class Engine:
         has its own owner: an engine drives the lines it owns with its `src` and samples the
         others, and dst := (v2 << n) | v1."""
         dl = [lane.data] + ([lane.data2] if lane.data2 is not None else [])
-        if lane.stretch or any(self.lines[x].kind == "od" for x in dl):
-            raise NotImplementedError(f"stretch and OD data on a clocked lane land in V3b part 2 "
-                                      f"(pc {self.pc})")
+        if lane.stretch:
+            raise NotImplementedError(f"clock stretching lands in V3b part 2c (pc {self.pc})")
         H, cpol, cpha, ld = p.nom, lane.cpol, lane.cpha, lane.ldelay
         clk, mask = lane.clk, (1 << n) - 1
         own_clk = self.role != Role.MON and int(self.lines[clk].owner) == int(self.role)
@@ -555,6 +585,9 @@ class Engine:
         mine = [do] + [self.role != Role.MON and int(self.lines[x].owner) == int(self.role) for x in dl[1:]]
         drives = any(mine)
         follows = [i for i, m in enumerate(mine) if not m]  # the lines this engine samples
+        # an OD line it drives it reads back where a follower samples (no tr_sample, isa §4.3)
+        readback = [i for i, m in enumerate(mine) if m and self.lines[dl[i]].kind == "od"]
+        reads = follows + readback
         self._step_start(ins, rebase=not own_clk)
 
         def pos(k: int) -> int:  # value bit carried by bit slot k
@@ -579,7 +612,7 @@ class Engine:
                 v = self.regs[reg_of(src)]
             v &= mask
         start = self.now
-        vals = [v if m else 0 for m in mine]  # a PP line's wire value is what its owner sends
+        vals = [v if m and i not in readback else 0 for i, m in enumerate(mine)]  # PP: what it sends
 
         def launch_bit(k: int) -> None:
             for i, m in enumerate(mine):
@@ -587,8 +620,9 @@ class Engine:
                     self.drive(dl[i], v >> pos(k) & 1)
 
         def sample_bit(k: int) -> None:
-            for i in follows:
-                self.samples.append(Sample(self.pc, dl[i], self.now, H))
+            for i in reads:
+                if i in follows:
+                    self.samples.append(Sample(self.pc, dl[i], self.now, H))
                 vals[i] |= self.inp[dl[i]] << pos(k)
 
         if own_clk:
@@ -598,7 +632,7 @@ class Engine:
             edges = [(base + j * H, cpol ^ (j & 1)) for j in range(1, 2 * n + 1)]
             launch = (([base] + [base + 2 * k * H + ld for k in range(1, n)] if cpha == 0
                        else [base + (2 * k + 1) * H + ld for k in range(n)]) if drives else [])
-            samp = [base + (2 * k + 1 + cpha) * H + EDGE_LAT for k in range(n)] if follows else []
+            samp = [base + (2 * k + 1 + cpha) * H + EDGE_LAT for k in range(n)] if reads else []
             end = max([base + 2 * n * H] + samp)  # the later of the last edge and the last sample
             ei = li = si = 0
             while True:
@@ -634,7 +668,7 @@ class Engine:
                     last = ref = self.now
                     e = self.now - EDGE_LAT
                     leading = self.inp[clk] != cpol
-                    if leading == (cpha == 0) and follows:  # a capture edge
+                    if leading == (cpha == 0) and reads:  # a capture edge
                         sample_bit(kc)
                         kc += 1
                     if leading:
@@ -651,7 +685,9 @@ class Engine:
                         self._abort()
                         yield
                         return
-                    # no dst, no push; the step ends here
+                    # no dst, no push; the step ends here, and what it drove is let go as usual
+                    for i in readback:
+                        self._letgo[dl[i]] = (lane, own_clk, ld, None)
                     self.to = True
                     self.tb = self.now
                     self._reanchor(self.now)
@@ -667,6 +703,8 @@ class Engine:
                 yield
             self.tb = self.now - EDGE_LAT
         v = vals[0] if len(dl) == 1 else vals[1] << n | vals[0]
+        for i in readback:  # it keeps its last bit until the lane's next leading edge
+            self._letgo[dl[i]] = (lane, own_clk, ld, None)
         if follows and dst == Dst.FIFO:  # it drives fewer than all of the step's data lines
             self._push_rx(v)
         if dst >= Dst.R0:

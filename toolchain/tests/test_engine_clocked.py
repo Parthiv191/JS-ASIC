@@ -362,17 +362,10 @@ def test_t3_rejects_a_short_half_period(h):
             assert got(t, 0) == VALUE
 
 
-@pytest.mark.parametrize("what", ["stretch", "od", "od2"])
-def test_part_2_features_fail_loudly(what):
+def test_stretch_fails_loudly():
     img = spi()
-    lane = img.lanes[0]
-    if what == "stretch":
-        img = replace(img, lanes=[replace(lane, stretch=1)])
-    elif what == "od":
-        img = replace(img, lines=[img.lines[0], replace(img.lines[1], kind="od")])
-    else:
-        img = duplex(miso_kind="od")
-    with pytest.raises(NotImplementedError, match="part 2"):
+    img = replace(img, lanes=[replace(img.lanes[0], stretch=1)])
+    with pytest.raises(NotImplementedError, match="part 2c"):
         run_sys(img)
 
 
@@ -558,3 +551,149 @@ def test_t3_counts_ldelay():
     with pytest.raises(CompileError, match="T3") as e:
         duplex(h=12, lo=11, ldelay=7, ppm=50000, timing=True)
     assert "T4" not in str(e.value)
+
+
+# ---------------------------------------------------------------- OD data (isa §4.3, part 2b)
+HI2C = 8
+LD = 2
+
+
+def i2c_desc(steps, ldelay=LD, h=HI2C):
+    """SCL (push-pull here; stretching is part 2c) owned by a, cpol 1 / cpha 1 as I2C; SDA a
+    shared OD line. `steps` is a list of (owner, n, value) XFERs, each party loading its own
+    values into r0-r3 first; every XFER writes its wire value to r4 + i."""
+    d = Description("i2c", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=ldelay)
+    half = d.profile("H", nom=h, min=h - 1)
+    for party in ("a", "b"):
+        with d.only(party):
+            for i, (owner, _, value) in enumerate(steps):
+                if owner == party:
+                    d.li(f"r{i}", value)
+    for i, (owner, n, _) in enumerate(steps):
+        d.xfer(n, lane, owner=owner, prof=half, src=f"r{i}", dst=f"r{4 + i}", msb_first=True)
+    d.halt()
+    return d
+
+
+def i2c(steps, **kw):
+    return compile_desc(i2c_desc(steps, **kw), check_timing=False)
+
+
+def xfers(t, i):
+    return [r for r in t.engines[i].records if r.op == "XFER"]
+
+
+def edges_of(t, line, lo=0, hi=10 ** 9):
+    return [x for x in t.wire_edges[line] if lo <= x < hi]
+
+
+@pytest.mark.parametrize("sender", ["a", "b"])
+def test_od_owner_reads_back_the_wire(sender):
+    """dst is the wire value in every role: a glitch that pulls a released 1 of the byte low
+    reaches the sender's dst too (the clock owner reads back at capture + EDGE_LAT, a clock
+    follower when it sees the capture edge)."""
+    value = 0xFF
+    clean = run_sys(i2c([(sender, 8, value)]))
+    (rec,) = xfers(clean, 0)
+    assert all(xfers(clean, i)[0].value == value for i in range(3))
+    # pull SDA low across the third capture (trailing edge 2 of the first XFER)
+    cap2 = rec.tb - (2 * 8 - 6) * HI2C   # tb + 6H, from the end tb = tb0 + 16H
+    t = run_sys(i2c([(sender, 8, value)]), glitches=[Glitch(1, cap2 - 2, 6, 0)])
+    assert {xfers(t, i)[0].value for i in range(3)} == {0xDF}, [hex(xfers(t, i)[0].value) for i in range(3)]
+
+
+@pytest.mark.parametrize("sender", ["a", "b"])
+def test_od_owner_completes_on_its_last_readback(sender):
+    """isa §6: OD owners complete at the follow offsets (clocked: the last capture + EDGE_LAT),
+    as analysis.completion() says, in every role."""
+    d = i2c_desc([(sender, 8, 0x5A)])
+    step = next(s for s in _steps(lower(d)).values() if s.clocked)
+    t = run_sys(compile_desc(d, check_timing=False))
+    for i, r in enumerate((Role.P0, Role.P1, Role.MON)):
+        (rec,) = xfers(t, i)
+        assert rec.cycle - rec.tb == completion(step, r)[0], r
+
+
+@pytest.mark.parametrize("h,ld", [(HI2C, LD), (12, 5)])
+def test_ack_is_held_until_the_next_falling_scl(h, ld):
+    """OD let-go: the slave's ACK (0) stays on SDA after its XFER, through the high SCL, until
+    it sees the next leading edge (SCL falling); it lets go at max(detect, e + ldelay), so
+    ldelay 5 > EDGE_LAT waits past the detect. The master's next byte starts with a 1, so SDA
+    rises when the slave lets go. Without the let-go SDA would rise while SCL is high: a STOP."""
+    t = run_sys(i2c([("a", 8, 0xA4), ("b", 1, 0), ("a", 8, 0x80)], h=h, ldelay=ld))
+    assert [r.value for r in xfers(t, 1)] == [0xA4, 0, 0x80] and not t.engines[1].events
+    ack_end = xfers(t, 0)[1].tb               # the ACK's last (trailing) edge, drive cycle
+    lead = ack_end + h                         # the next byte's first leading edge (SCL falls)
+    sda_rise = [x for x in t.wire_edges[1] if x > ack_end]
+    # SCL is high from ack_end + 1 to lead; the slave sees the fall at lead + EDGE_LAT
+    assert sda_rise and sda_rise[0] == max(lead + EDGE_LAT, lead + ld) + 1, (lead, sda_rise)
+
+
+def test_a_new_launch_cancels_the_let_go():
+    """Any drive of the line cancels a pending release: two 0 bits in a row from the slave make
+    no SDA edge between them."""
+    t = run_sys(i2c([("a", 8, 0xA4), ("b", 1, 0), ("b", 1, 0), ("a", 8, 0x80)]))
+    first_ack_end, second_ack_end = xfers(t, 0)[1].tb, xfers(t, 0)[2].tb
+    assert not edges_of(t, 1, first_ack_end, second_ack_end + 1)
+    assert [r.value for r in xfers(t, 0)] == [0xA4, 0, 0, 0x80]
+
+
+def test_the_clock_owner_lets_go_at_its_own_edge():
+    """The master's byte ends with a 0; it keeps it until it drives the next leading edge (the
+    ACK clock's SCL fall) and lets go ldelay later. The slave pulls SDA low for the ACK when it
+    sees that edge, so SDA goes high for a moment while SCL is low."""
+    t = run_sys(i2c([("a", 8, 0xA4), ("b", 1, 0)]))
+    byte_end = xfers(t, 0)[0].tb
+    lead = byte_end + HI2C                     # ACK clock: leading edge driven by the master
+    assert edges_of(t, 1, byte_end + 1, lead + 2 * HI2C) == [lead + LD + 1, lead + EDGE_LAT + 1]
+    assert [r.value for r in xfers(t, 1)] == [0xA4, 0]
+
+
+def test_let_go_runs_during_untimed_instructions():
+    """The tracker watches the clock every cycle, whatever runs: after its ACK the slave is in a
+    RAW DELAY when the master's next byte starts, and still lets go at max(detect, e + ldelay).
+    Program: XFER 1 (ACK, b) · [b: RAW DELAY 60 · HALT] · XFER 8 (a, ONES) · HALT."""
+    d = Description("i2c", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=LD)
+    half = d.profile("H", nom=HI2C, min=HI2C - 1)
+    d.xfer(1, lane, owner="b", prof=half, src="zero")
+    with d.only("b"):
+        d.raw_delay(60)
+        d.halt()
+    d.xfer(8, lane, owner="a", prof=half, src="ones")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1))
+    delay_start = dict(t.engines[1].starts)[2]
+    ack_end = xfers(t, 0)[0].tb
+    lead = ack_end + HI2C
+    assert delay_start < lead + EDGE_LAT < delay_start + 60  # the slave is in its RAW DELAY
+    assert edges_of(t, 1, ack_end + 1)[0] == lead + EDGE_LAT + 1
+
+
+def test_let_go_also_after_a_timeout():
+    """A timed-out XFER drove its OD line too, so the let-go applies: the slave sends 0 with
+    cpha 0 (bit 0 at its start), the clock stops (a glitch holds SCL high), the slave times out
+    and keeps SDA low through its RAW DELAY, and lets go on the first SCL fall after the glitch."""
+    d = Description("i2c", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=0, ldelay=LD)
+    with d.only("b"):
+        d.li("r0", 0)
+    d.xfer(8, lane, owner="b", prof=d.profile("H", nom=HI2C, min=HI2C - 1, max=HI2C + 2), src="r0")
+    with d.only("b"):
+        d.raw_delay(200)
+    d.halt()
+    g_end = 13 + 60
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1),
+                glitches=[Glitch(0, 13, 60, 1)])
+    assert "TIMEOUT" in kinds(t, 1)
+    fall = min(x for x in t.wire_edges[0] if x >= g_end)  # the master's next SCL fall
+    halt = dict(t.engines[1].starts)[5]  # ROLE_IF, LI, XFER, ROLE_IF, RAW DELAY, HALT
+    rise = [x for x in t.wire_edges[1] if x > 13]
+    assert rise and rise[0] == fall + EDGE_LAT < halt, (fall, rise, halt)
