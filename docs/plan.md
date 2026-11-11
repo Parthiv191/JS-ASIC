@@ -28,7 +28,7 @@ submit if a later round fails.
 | V2 | trace contract (architecture §5) | verification | V1 | Nov 10 | Done (#7) |
 | V3 | model to v1: fetch/issue, start-up, EVT, FIFO depths | verification | V1 | Nov 10 | Done (#8, #17, #18, #19) |
 | V3b | model to v1: clocked XFER, START/STOP, MEAS (UART path complete for M1) | verification | V3 | Nov 20* | Mostly done: clocked XFER, duplex, OD data, clock stretching, bus detector, START/STOP, MEAS (#29–#33); left: gated lines, lead blocks, library I2C/SPI (parts 3b/3c) |
-| V4 | co-sim harness, model vs RTL trace | verification | V2, D4 | Nov 18* | Draft #16; #10–#13 are on `main`, waits on #14 |
+| V4 | co-sim harness, model vs RTL trace | verification | V2, D4 | Nov 18* | Draft #16, unblocked: the engine stack #10–#14 is on `main` |
 | V4b | co-sim on the UART program, all roles, RTL pin drives, gate level | verification | V4, D5 | Nov 27* | Not started |
 | V5 | FPGA bring-up (Basys 3): layers 1–5, then LOOPBACK | verification | D4 | Dec 5* | Not started (`fpga/` CI exists) |
 | V6 | Core on the FPGA: UART, SPI, I2C against real devices | verification | V5, D7 | Dec 13 | Not started |
@@ -37,7 +37,7 @@ submit if a later round fails.
 | D1 | CI path filter | devOps | — | Nov 10 | Done (#9) |
 | D2 | 2 × 512x32 SRAM on `main` at 8x4 | devOps | — | Nov 12* | Done (#10) |
 | D3 | RTL bring-up layers 1–4: TESTMODE, host SPI, GPIO override, LOOPBACK | devOps | D2 | Nov 12* | Done (#11, #12) |
-| D4 | engine 0: fetch/issue, untimed ops, timed steps | devOps | D3 | Nov 14* | Untimed half done (#13); timed steps #14 green, being brought up to `main` |
+| D4 | engine 0: fetch/issue, untimed ops, timed steps | devOps | D3 | Nov 14* | Done (#13, #14) |
 | D5 | FIFOs, PUSH/POP, `src`/`dst` = FIFO, TXDATA/RXDATA (a host-fed UART needs them) | devOps | D4 | Nov 21* | Not started |
 | D6 | first full place-and-route with engine 0: area and slow-corner timing | devOps | D4 | Nov 21* | Partial: #13 on `main`, 136.5K µm² cells after PnR, slow corner +7.64 ns; #14 253.5K µm², −2.90 ns; area branch 219.9K, −2.76 ns |
 | D7 | clocked lanes, bus detector (START/STOP, SELECT), engine 1 (layer 6) | devOps | D5 | Dec 5* | Not started |
@@ -56,7 +56,7 @@ submit if a later round fails.
 |---|---|---|
 | Area: post-PnR cells run 1.6–1.7× Yosys (#11, #13). #14 is 253.5K µm² after PnR (Yosys 167K); devOps's area branch cuts it to 219.9K. With the macros that's ~31% of the 1.208M µm² core for one engine without FIFOs, clocked lanes, the detector or engine 1 | two engines plus the rest may land near the 60% target | devOps reports PnR area per PR; the area branch first; the verdict at D9; cut order in chip-spec §4 |
 | Timing: slow corner −2.90 ns at 20 ns on #14, −2.76 ns on the area branch; +2.24 ns at 25 ns | 40 MHz fallback | decided at D9 (decision 11-10); no ISA change |
-| The fuzzer result holds only in the model | the gate also needs Core on the FPGA | V5 as soon as #14 merges; the host-driven fuzzer ships either way |
+| The fuzzer result holds only in the model | the gate also needs Core on the FPGA | V5 can start now (#14 merged); the host-driven fuzzer ships either way |
 | FPGA bring-up starts late | M2 and the gate slip together | V5 starts as soon as #11–#14 merge |
 | A two-engine harden trial overflows global routing (devOps, local) | the second engine may need a larger placement area or fewer flops | devOps tunes the routing adjustment; verdict at D9 |
 
