@@ -1,5 +1,7 @@
 # Role-Switching Protocol Emulator Implementation Plan
 
+> **Superseded (2026-11-10)** by [`docs/plan.md`](../../plan.md). Kept for its task designs.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the role-switching protocol emulator from the proposal: one owner-labeled description per protocol that runs as controller, target or monitor, extended with the team ISA draft's requirements and an on-chip learning bus fuzzer. Verification is a coverage-guided fuzz loop whose findings feed back into the generator and the regression suite.

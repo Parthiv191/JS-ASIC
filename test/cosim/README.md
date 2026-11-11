@@ -156,11 +156,11 @@ An OD line driven high for its 1s also fails, in the OD readback test, through t
 | od readback | tx, rx | on an OD line a glitch over a released 1 reaches `dst` in every role; the owner completes on its last readback |
 | od release | rx | HALT and an abort release the OD lines and keep the PP drives, with the lines on pins 5, 2 and 6. It found the unused-slot collision that #24 fixes. |
 | time clamp | tx | after a gap of about 4.2 M cycles, `tb` trails `now` by 2^22 (slow: `COSIM_SLOW=1`) |
-| illegal | P0 | a reserved code halts as ILLEGAL: `expect_fail` until devOps's #13 fix |
-| role branches | P0 | `tr_br` for ROLE_IF and RAW JPIN: `expect_fail` until devOps's #13 fix. Until then the other programs avoid both. |
+| illegal | P0 | a reserved code halts as ILLEGAL |
+| role branches | P0 | `tr_br` pulses for ROLE_IF and RAW JPIN (both gaps in #13 were fixed in #14) |
 
-Every test compares the pins and ACT. At gate level the two gap tests are skipped, because
-their gaps show only on the trace port.
+Every test compares the pins and ACT, at gate level too. There, illegal and role branches check
+only ACT: an ILLEGAL halts 2 cycles before the HALT behind it would.
 
 **Later**, each its own PR:
 1. The UART protocol program in every role, once the RTL and the model (step 3b) have FIFOs.

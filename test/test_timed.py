@@ -208,7 +208,8 @@ async def test_cond_follow(dut):
     """A followed FALL on the wire from w is detected at w + 2: e = w - 1, MEAS = e - tb, tb := e.
     An edge before min - QUANT logs EARLY and still completes."""
     prog = [cond(CondKind.FALL, 0, Owner.P0, 1, meas=1), HALT]
-    for w, early in ((101, False), (61, False), (40, True)):
+    # min 60: EARLY iff m = w - 1 < min - QUANT = 59, so the boundary is w = 59 / 60
+    for w, early in ((101, False), (61, False), (60, False), (59, True), (40, True)):
         host, bench = await setup(dut, prog, role=1, lines=lines_with(L0=PP0), profs={1: (60, 100, 140)},
                                   uio=0x01)
         bench.at[w] = 0x00

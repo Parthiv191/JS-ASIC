@@ -281,7 +281,31 @@ async def test_time_clamp(dut):
     await cosim(dut, rep, Role.P0)
 
 
-# ---------------------------------------------------------------- known gaps (README §3)
+@cocotb.test()
+async def test_illegal(dut):
+    """isa §3: a reserved ALU sub-code halts as ILLEGAL (EVT pulse, then the engine stops)."""
+    img = replace(frame(), words=[encode(Instr(Op.ALU, sub=10)), encode(Instr(Op.HALT))], debug={})
+    rep = model(img, Role.P0, peers=False)
+    assert pulse(2, Kind.EVT, 0, 10) in rep.expected
+    await cosim(dut, rep, Role.P0)
+
+
+@cocotb.test()
+async def test_role_branches(dut):
+    """architecture §5: tr_br pulses for ROLE_IF and RAW JPIN, not only for BR."""
+    d = Description("roles", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    with d.only("a"):
+        d.raw_jpin(ln, 1, "x")
+        d.nop()
+    d.label("x")
+    d.halt()
+    rep = model(compile_desc(d), Role.P0, peers=False)
+    assert [p.pc for p in rep.expected if p.kind == Kind.BR] == [0, 1]   # ROLE_IF, then RAW JPIN
+    await cosim(dut, rep, Role.P0)
+
+
+# ---------------------------------------------------------------- known gaps (README §3): none open
 async def expect_gap(dut, rep, role, gap):
     """Fail on exactly the known gap. Any other failure raises RuntimeError, which `expect_fail`
     doesn't absorb, so a half fix or an unrelated mismatch still shows. When the gap is fixed the
@@ -292,26 +316,3 @@ async def expect_gap(dut, rep, role, gap):
         if e.mismatch is None or not gap(e.mismatch):
             raise RuntimeError(f"failed for another reason than its gap:\n{e}") from e
         raise
-
-
-@cocotb.test(expect_fail=True, skip=GATES)  # the gap shows only on the trace port
-async def test_illegal(dut):
-    """isa §3: a reserved ALU sub-code halts as ILLEGAL. Gap: devOps's #13 runs it as a NOP."""
-    img = replace(frame(), words=[encode(Instr(Op.ALU, sub=10)), encode(Instr(Op.HALT))], debug={})
-    await expect_gap(dut, model(img, Role.P0, peers=False), Role.P0,
-                     lambda m: m.expected == pulse(2, Kind.EVT, 0, 10) and m.observed == pulse(4, Kind.ISSUE, 1))
-
-
-@cocotb.test(expect_fail=True, skip=GATES)  # the gap shows only on the trace port
-async def test_role_branches(dut):
-    """architecture §5: tr_br pulses for ROLE_IF and RAW JPIN. Gap: devOps's #13 pulses it only
-    for BR."""
-    d = Description("roles", parties=("a", "b"))
-    ln = d.line("l", owner="a", idle=1)
-    with d.only("a"):
-        d.raw_jpin(ln, 1, "x")
-        d.nop()
-    d.label("x")
-    d.halt()
-    await expect_gap(dut, model(compile_desc(d), Role.P0, peers=False), Role.P0,
-                     lambda m: m.expected is not None and m.expected.kind == Kind.BR and m.expected.pc == 0)
