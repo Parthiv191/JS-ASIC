@@ -17,7 +17,7 @@ from .devices import DEVICES, Target, TableDevice
 from .unit import FuzzConfig, FuzzUnit
 
 SEEDS = (0xACE1, 0x5EED, 0x1D2C, 0xBEEF, 0x7A3B)  # spread out: seeds 1 and 2 are one draw apart
-ITERS = 30_000  # ~1300 cycles each on the chip: 30K iterations is ~0.8 s at 50 MHz
+ITERS = 30_000  # ~1300 cycles each on the chip: 30K iterations is ~1 s at 40 MHz
 
 
 @dataclass

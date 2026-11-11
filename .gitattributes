@@ -1,0 +1,3 @@
+# Every PR appends rows to the decision log; keep both sides instead of conflicting
+docs/design/decisions.md merge=union
+.github/ci-failures.md merge=union

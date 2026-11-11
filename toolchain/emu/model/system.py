@@ -49,6 +49,10 @@ class EngineTrace:
     starts: list[tuple[int, int]] = field(default_factory=list)  # (pc, now) per instruction start
     bus_events: list[tuple[int, str]] = field(default_factory=list)  # detector confirmations (isa §4.7)
     evt: int = 0  # the sticky event register at the end of the run (isa §4.1)
+    halt_cycle: int | None = None  # the HALT's (or ILLEGAL's) start cycle
+    drives: list[tuple[int | None, ...]] = field(default_factory=list)  # per tick, the drive that
+    #                                                                     tick's wire was resolved from
+    regs: list[int] = field(default_factory=list)  # r0-r7 at the end of the run
 
     @property
     def violations(self) -> list[Event]:
@@ -63,6 +67,7 @@ class Trace:
     engines: list[EngineTrace]
     wire_edges: list[list[int]]
     contention: list[tuple[int, int]] = field(default_factory=list)
+    glitches: list[Glitch] = field(default_factory=list)
 
 
 def enabled(spec: EngineSpec, tick: int) -> bool:
@@ -111,6 +116,7 @@ class System:
         gap = max(-(-s.clock[1] // s.clock[0]) for s in self.specs)
         settle = (SYNC_LAT + 1) * gap
         last_edge = -settle - 1
+        drives: list[list[tuple[int | None, ...]]] = [[] for _ in self.engines]
         tick = 0
         while tick < max_ticks:
             if self._pushes:
@@ -126,6 +132,8 @@ class System:
                 for e, got in zip(self.engines, self._got):
                     got.extend(e.rx)
                     e.rx.clear()
+            for log, e in zip(drives, self.engines):
+                log.append(tuple(e.drv))
             wire, cont = resolve(self.lines, [e.drv for e in self.engines])
             for g in self.glitches:
                 if g.start <= tick < g.start + g.length:
@@ -156,9 +164,11 @@ class System:
                 EngineTrace(e.name, e.role, e.records, e.events, self._got[i] + e.rx, e.samples, e.branches,
                             e.halted, e.idle,
                             len(e.tx) + len(self._backlog[i]) + sum(len(p[2]) for p in self._pushes if p[1] == i),
-                            self._cycle_tick[i], e.starts, bus_events=e.bus_events, evt=e.evt)
+                            self._cycle_tick[i], e.starts, bus_events=e.bus_events, evt=e.evt,
+                            halt_cycle=e.halt_cycle, drives=drives[i], regs=list(e.regs))
                 for i, e in enumerate(self.engines)
             ],
             wire_edges=edges,
             contention=contention,
+            glitches=list(self.glitches),
         )
