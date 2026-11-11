@@ -409,6 +409,14 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T5-timeout", prev.pc, f"a follower that times out here finishes up to {late} "
                                                  f"cycles late, off the owner's timeline; the next timed "
                                                  f"step (pc {nxt_pc}) must be an unbounded COND, or add abort")
+            if prev is not None and prev.bus_wait and s.bus_wait:
+                # a bus edge inside the previous one's confirm window replaces its candidate
+                # (isa §4.7): that START or STOP is never confirmed, and its followers hang
+                confirm = s.bus_wait - 1
+                if s.prof.nom - drift(ppm, s.prof.nom) - Q < confirm:
+                    diags.add("T5-watch", nxt_pc, f"this bus edge comes {s.prof.nom} after the previous "
+                                                  f"one: it needs nom - drift - QUANT >= bus_confirm "
+                                                  f"{confirm}, or it replaces that one's candidate")
             if s.owner_role is None:
                 continue  # SHARED steps: Phase 4 (ARB)
             st = {}
@@ -499,10 +507,13 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             diags.add("T5-overrun", pc, f"owner starts at {o_hi}, after the planned action at {offset}")
         event = max(p.nom, o_lo)
         dr = drift(ppm, amax + p.nom)
+        # a followed START/STOP needs its follower waiting only by the confirm: the detector runs
+        # every cycle and the flag is sticky (isa §4.7), so bus_wait = bus_confirm + 1 more
+        seen_by = event + E + s.bus_wait
         for r in followers:
-            if st[r][1] + dr > event + E:
+            if st[r][1] + dr > seen_by:
                 diags.add("T5-watch", pc, f"{r.name} starts watching at {st[r][1]} but the event is "
-                                          f"visible at {event + E} (drift {dr})")
+                                          f"visible at {seen_by} (drift {dr})")
         if p.bounded or p.min > 0:
             late = max(p.nom, o_hi)
             m_lo, m_hi = event - dr - Q, late + dr + Q
