@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "toolchain"))
 
 from emu.isa import AluOp, BrCond, F_IRQ, F_REG, Instr, Op, RawOp, Role, encode, li, role_if_operand
 
-from chip import (COL1, E_FV_KIND, E_FV_PC, E_HALTED, E_IRQ_ID, E_NOW, E_PC, E_RUNNING, E_STATUS, E_TB,
+from chip import (FIFOS_EMPTY, COL1, E_FV_KIND, E_FV_PC, E_HALTED, E_IRQ_ID, E_NOW, E_PC, E_RUNNING, E_STATUS, E_TB,
                   E_VIOL, ENG0, ERR_CLR, IRQ, LINE, RUN, SOFT_RESET, STATUS_HOST_ERR, Host, eng_read,
                   get_reg, line_byte, reset, run_program, set_reg, wait_halted)
 
@@ -72,7 +72,7 @@ async def test_li_halt_timing(dut):
     """LI writes all 16 bits; HALT at index 3 starts at now = 2 + 3U = 8; tb stays 0."""
     host = await start(dut, [li(1, 0x1234), li(7, 0xBEEF), NOP, HALT])
     await wait_halted(host)
-    assert await eng_read(host, E_STATUS) == E_HALTED
+    assert await eng_read(host, E_STATUS) == E_HALTED | FIFOS_EMPTY
     assert await get_reg(host, 1) == 0x1234
     assert await get_reg(host, 7) == 0xBEEF
     assert await eng_read(host, E_PC, 2) == 3
@@ -272,7 +272,7 @@ async def test_host_err(dut):
     """While an engine runs, column 1, LINE and REG_DATA writes are refused and set host_err."""
     host = await start(dut, [li(1, 0x4242), br(BrCond.ALWAYS, 1)])  # runs forever
     await ClockCycles(dut.clk, 20)
-    assert await eng_read(host, E_STATUS) == E_RUNNING
+    assert await eng_read(host, E_STATUS) == E_RUNNING | FIFOS_EMPTY
     await host.write_words(COL1 + 4 * 8, [0x12345678])
     assert (await host.read(0x0003, 1))[0] & STATUS_HOST_ERR
     await host.write(ERR_CLR, [1])
@@ -297,7 +297,7 @@ async def test_soft_reset(dut):
     await host.write(0x0002, [0x5C])  # SCRATCH, a global
     await host.write(SOFT_RESET, [1])
     assert await host.read(RUN, 1) == [0]
-    assert await eng_read(host, E_STATUS) == 0
+    assert await eng_read(host, E_STATUS) == FIFOS_EMPTY
     assert await get_reg(host, 3) == 0
     assert await eng_read(host, E_PC, 2) == 0
     assert await host.read(0x0002, 1) == [0x5C]
