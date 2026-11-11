@@ -12,8 +12,7 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
 (§4.1) and clocked XFER, duplex and OD data with the let-go included (§4.3, with CLK_PHASE,
 TIMEOUT and UNDERRUN) and clock stretching, the I2C and SELECT bus detector with COND START/STOP and
-bus exits (§4.7), and COND MEAS are v1. Still to come: `gated` lines and their release on a SELECT
-STOP, and lead blocks (`R3-lead`). The model keeps fractional clocks only to stand in for external devices.
+bus exits (§4.7), COND MEAS and `gated` lines are v1. Still to come: lead blocks (`R3-lead`). The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -48,6 +47,10 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
   - `gated` (PP only): the owner drives the line only from its first owned step on it until
     the next STOP on a SELECT bus, or an abort; otherwise the line is released. For example, SPI
     MISO on a shared bus.
+    - The release comes from the engine's own detector (the cycle it confirms the STOP), or with
+      an abort or a bus exit (§4.1). The line is undriven from the next cycle.
+    - After a release, drives to the engine's gated lines (RAW SET too) do nothing until its next
+      timed step starts. So a step cut by a STOP drives none of its later bits.
   - Before RUN, every pin is an input. In `s0` (§4.0) each non-gated PP line the engine's role owns is
     driven to `idle`, so the drive is on the wire from `now = 1`, like any drive; every other line stays
     released. At `now = 0` a line reads what the pin reads: an owned idle-0 line with a pull-up reads 1,
@@ -427,7 +430,7 @@ host clears it.
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit or to `abort_pc`. `abort_pc` is not inside a block body. |
 | `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
-| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines |
+| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines (`S-line`) |
 | `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 
 ## 6. Timing rules (compiler)

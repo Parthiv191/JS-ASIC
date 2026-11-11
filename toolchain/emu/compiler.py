@@ -76,7 +76,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     def err(rule: str, step: Step, msg: str) -> None:
         diags.append(Diagnostic(rule, step.index, step.loc, msg))
 
-    lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle) for ln in desc.lines]
+    lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle, gated=ln.gated) for ln in desc.lines]
     profiles = [IDLE] + list(desc.profiles)
     lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha,
                      data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay,
@@ -188,6 +188,10 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                                f"{len(lanes)} lanes (max {NUM_LANES}), {len(lines)} lines (max {NUM_LINES})")
     if len(instrs) > prog_depth:
         err("S-range", desc.steps[-1], f"program has {len(instrs)} words (max {prog_depth})")
+    for ln in lines:
+        if ln.gated and ln.kind != "pp":
+            anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
+            err("S-line", anchor, f"line {ln.name!r}: `gated` only on push-pull lines (isa §2)")
 
     abort_pc = 0
     if desc.abort_label is not None:

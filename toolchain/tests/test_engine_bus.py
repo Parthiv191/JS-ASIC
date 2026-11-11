@@ -430,3 +430,109 @@ def test_t5_abort_on_a_bus_needs_a_bus_cond_or_no_abort():
         d.cond("fall", x, owner="a", prof=p, abort=True)
     with pytest.raises(CompileError, match="T5-abort"):
         compile_desc(i2c_desc(body, abort_label="top"))
+
+
+# ---------------------------------------------------------------- gated lines (isa §2, §4.7)
+def select_desc(body, abort_label=None):
+    """SELECT: CS (line 0) owned by a; MISO (line 1) a gated PP line owned by b; x (line 2) a
+    plain PP line owned by b. `body(d, cs, miso, x, p)` builds the program."""
+    d = Description("sel", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    miso = d.line("miso", owner="b", idle=1, gated=True)
+    x = d.line("x", owner="b", idle=1)
+    d.bus("select", cs)
+    if abort_label:
+        d.abort_to(abort_label)
+    body(d, cs, miso, x, d.profile("P", nom=NOM, min=0, max=INF))
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+def stops(t, i):
+    return [c for c, k in t.engines[i].bus_events if k == "STOP"]
+
+
+def test_a_gated_line_is_in_the_image_and_only_on_pp():
+    img = select_desc(lambda d, cs, miso, x, p: None)
+    assert [ln.gated for ln in img.lines] == [False, True, False]
+    d = Description("g", parties=("a", "b"))
+    d.line("o", "od", owner="a", idle=1, gated=True)
+    d.halt()
+    with pytest.raises(CompileError, match="S-line"):
+        compile_desc(d, check_timing=False)
+
+
+def test_a_select_stop_releases_gated_lines_only():
+    """b drives MISO and x low; a raises CS (STOP). b's detector confirms the STOP at c and
+    releases MISO, so the wire is 1 again from c + 1; x, not gated, stays low (isa §2)."""
+    def body(d, cs, miso, x, p):
+        d.cond("start", owner="a", prof=p)
+        d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
+        d.hold(x, 0, owner="b", prof=d.profile("H2", nom=10))
+        d.cond("stop", owner="a", prof=d.profile("W", nom=30, min=0, max=INF))
+    t = run_sys(select_desc(body), roles=(Role.P0, Role.P1))
+    (c,) = stops(t, 1)
+    assert len(t.wire_edges[1]) == 2 and t.wire_edges[1][1] == c + 1
+    assert len(t.wire_edges[2]) == 1
+
+
+def test_a_stop_mid_step_keeps_the_gated_line_released_until_the_next_owned_step():
+    """CS is lifted by a glitch while b sends 0x00 on MISO without ABORT: after the STOP the
+    rest of the XFER drives nothing, and b's next owned step on MISO (a HOLD 0) drives it again."""
+    def body(d, cs, miso, x, p):
+        d.cond("start", owner="a", prof=p)
+        d.xfer(8, miso, owner="b", prof=d.profile("U", nom=10), src="zero")
+        d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
+    t = run_sys(select_desc(body), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 400, 1)])
+    (c,) = stops(t, 1)
+    first = next(now for pc, now in t.engines[1].starts if pc == 1)
+    xfer, hold = [r for r in t.engines[1].records if r.op in ('XFER', 'HOLD')]
+    assert first < c < xfer.cycle - 20                 # the STOP lands mid-XFER
+    assert t.wire_edges[1] == [first + 1, c + 1, hold.tb - 10 + 1]  # the HOLD drives at its planned tb
+
+
+def test_an_abort_releases_gated_lines():
+    """b drives MISO low, then times out on a COND with ABORT (a is late): the abort releases
+    MISO in its cycle (isa §2), as it does OD lines."""
+    def body(d, cs, miso, x, p):
+        y = d.line("y", owner="a", idle=1)
+        d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
+        with d.only("a"):
+            d.raw_delay(200)
+        d.cond("fall", y, owner="a", prof=d.profile("T", nom=NOM, min=0, max=20), abort=True)
+        d.label("top")
+        d.cond("rise", y, owner="a", prof=p)
+    t = run_sys(select_desc(body, abort_label="top"), roles=(Role.P0, Role.P1))
+    (ab,) = [e for e in t.engines[1].events if e.kind == "ABORT"]
+    assert t.wire_edges[1][-1] == ab.cycle + 1
+
+
+def test_a_bus_exit_releases_gated_lines():
+    """After START and STOP, b drives MISO low and follows a long COND with ABORT; a glitch
+    drops CS (a START): the bus exit releases MISO in its cycle."""
+    def body(d, cs, miso, x, p):
+        y = d.line("y", owner="a", idle=1)
+        d.cond("start", owner="a", prof=p)
+        d.cond("stop", owner="a", prof=p)
+        d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
+        d.cond("fall", y, owner="a", prof=d.profile("L", nom=300, min=0, max=INF), abort=True)
+        d.label("top")
+        d.cond("start", owner="a", prof=p)
+    t = run_sys(select_desc(body, abort_label="top"), roles=(Role.P0, Role.P1),
+                glitches=[Glitch(0, 120, 400, 0)])
+    (bus,) = [e for e in t.engines[1].events if e.kind == "BUS"]
+    assert t.wire_edges[1][-1] == bus.cycle + 1
+
+
+def test_an_i2c_stop_leaves_gated_lines_driven():
+    """Only a SELECT STOP releases gated lines (isa §4.7): on I2C, b's gated PP line stays low
+    through the STOP."""
+    def body(d, sda, scl, p):
+        g = d.line("g", owner="b", idle=1, gated=True)
+        d.cond("start", owner="a", prof=p)
+        d.hold(g, 0, owner="b", prof=d.profile("H", nom=10))
+        d.hold(sda, 0, owner="a", prof=d.profile("Z", nom=10))
+        d.cond("stop", owner="a", prof=d.profile("W", nom=30, min=0, max=INF))
+    t = run_sys(i2c(body), roles=(Role.P0, Role.P1))
+    assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP"]
+    assert len(t.wire_edges[2]) == 1                   # g fell once and stayed low
