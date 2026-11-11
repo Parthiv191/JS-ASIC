@@ -44,6 +44,18 @@ transmitter, receiver and monitor from the same program.
 
 ## 5. The learning bus fuzzer
 
+**First result (model, #34).** Four devices with planted behaviour, 30K iterations, 5 seeds:
+
+| Device | Learning | Baseline (no feedback) |
+|---|---|---|
+| unlock (3-byte sequence) | 5/5 | 0/5 |
+| leak (progress shows only in timing) | 5/5 | 0/5 |
+| hang | 5/5 | 0/5 |
+| 16-bit magic (control, no partial feedback) | 0/5 | 0/5 |
+
+The model also caught a design flaw: a 16-bit LFSR with one step per draw replays the same ~5 200
+mutations and can't learn, so the unit uses a 32-bit LFSR with 16 steps per draw.
+
 *To come, from `design/bus-fuzzer.md`:* corpus distillation on the chip, the bitmap of observed
 responses, hang detection, and what the Dec 15 gate decided (on-chip or host-driven).
 
