@@ -455,6 +455,20 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             if p.nom < o_hi + 1 + drift(ppm, amax + p.nom):
                 diags.add("T3-latency", pc, f"data owner starts at {o_hi}; bit 0 is not valid before the "
                                             f"first capture edge at {p.nom}")
+        if p.max != INF:
+            # A bounded clock follower counts its timeout from its own start, then from each edge
+            # (isa §4.1). The clock owner re-bases to its start (cpha 0) or start - H (cpha 1), so
+            # its first edge is at max(0, start) + H or max(H, start), seen EDGE_LAT later.
+            c_hi = st[s.clk_owner][1] if s.clk_owner in st else 0
+            first = (max(0, c_hi) + p.nom if s.cpha == 0 else max(p.nom, c_hi)) + E
+            for r in st:
+                if not s.is_clk_owner(r) and first + dr - st[r][0] > p.max + Q:
+                    diags.add("T3-latency", pc, f"{r.name} may start at {st[r][0]} and time out: the first "
+                                                f"clock edge may be visible only at {first} (drift {dr}), "
+                                                f"past max {p.max} + QUANT after it")
+            if p.nom + drift(ppm, p.nom) > p.max + Q:
+                diags.add("T3-latency", pc, f"a clock phase of {p.nom} plus drift outlasts max {p.max} + "
+                                            f"QUANT: a bounded clock follower would time out")
         return
     if o_hi > ISSUE:
         diags.add("T5-overrun", pc, f"owner starts at {o_hi}, more than ISSUE after the step start")
