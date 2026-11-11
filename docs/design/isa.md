@@ -10,8 +10,9 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 **Model status:** the encoding, the image, fetch and issue timing (§4.0), reserved codes (§3),
 `BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
-(§4.1) and clocked XFER on one data line (§4.3, with CLK_PHASE, TIMEOUT and UNDERRUN) are v1.
-Still to come: duplex, OD data and stretching on clocked lanes, COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
+(§4.1) and clocked XFER on push-pull data lines, duplex included (§4.3, with CLK_PHASE, TIMEOUT
+and UNDERRUN), are v1. Still to come: OD data and stretching on clocked lanes, COND START/STOP and
+MEAS. The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -296,7 +297,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     - With `max < INF`, an edge missing for `max + QUANT` logs TIMEOUT (abort with ABORT).
   - The clock owner completes at the later of its last trailing edge and its last sample.
 - **Duplex** (clocked, with `data2`): each data line follows the rules above with its own owner
-  (from the line config).
+  (from the line config). An engine sends its own `src` on the data line it owns and samples the
+  other, so the clock owner of a duplex step always follows a data line and completes at its last
+  sample.
   - `dst := (v2 << n) | v1`, so `n ≤ 8`.
   - A `dst = FIFO` push sends that same packed value, in every engine that drives fewer than all
     of the step's data lines.
@@ -401,7 +404,7 @@ host clears it.
 
 | Rule | Statement |
 |---|---|
-| `R1-owner` | A timed step's owner field is the owner of its data line: COND/HOLD's line, XFER's lane `data`. It is a party, or `shared` on OD; on a SHARED OD line the owner field may be either party or `shared`. The clock and `data2` drivers come from their line owners. A lane's clock has a party owner, and a duplex `data2` owner differs from `data`'s. |
+| `R1-owner` | A timed step's owner field is the owner of its data line: COND/HOLD's line, XFER's lane `data`. It is a party, or `shared` on OD; on a SHARED OD line the owner field may be either party or `shared`. The clock and `data2` drivers come from their line owners. A lane's clock has a party owner. A duplex step has a party owner, and `data2` belongs to the other party. |
 | `R1-shared` | `shared` only on OD lines |
 | `R1-bus` | COND START/STOP is owned by the master line's owner (I2C: the `bus_b` owner; SELECT: the `bus_a` owner). It is follow-only for SE0. |
 | `R2-branch` | Outside role blocks, `BR Z/NZ` tests only clean registers: written by `XFER dst`, `LI`, `ALU` on clean inputs, or `CRC GET` of a clean state. Taints: `POP`, `RAW GET/EVT`, `COND meas`, any write in a role block, and every register at program entry (until written; §1) and at `abort_pc`. The CRC state is a ninth taint slot; it's a forward dataflow analysis. **Inside a role block any branch is allowed.** `RAW JPIN` and `BR TO` are only legal in role blocks. `BR ROLE` is a role split like `ROLE_IF`: the analysis follows each role's path, and `R3-escape` applies to its target. |
@@ -410,7 +413,7 @@ host clears it.
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit or to `abort_pc`. `abort_pc` is not inside a block body. |
 | `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
-| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines |
+| `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol`, and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines |
 | `S-bus` | I2C: `bus_a` and `bus_b` are OD, and START/STOP steps are used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`. |
 
 ## 6. Timing rules (compiler)
@@ -429,8 +432,8 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 |---|---|
 | `T1-sample` | Follower sample of slot `k`: `ceil(d·(A + (k+1)·P)) + QUANT + ISSUE < P//2` |
 | `T2-window` | A bounded COND, and the accumulated CHK windows: `min ≤ nom − ceil(d·(A + nom)) − QUANT` (COND: only if `min > 0`) and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. The anchor rule: a CHK unclocked XFER at `A = 0` is rejected; drop `check` or put a timed step first. |
-| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. A bounded clock follower: the first edge, seen at `F = (cpha 0: max(0, L_clk) + H; cpha 1: max(H, L_clk)) + EDGE_LAT`, needs `F + ceil(d·(A + H)) − L_lo ≤ max + QUANT`, where `L_clk` is the clock owner's latest start and `L_lo` the follower's earliest; and `H + ceil(d·H) ≤ max + QUANT`. |
-| `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. Stretch lanes: `H ≥ EDGE_LAT + 2`. `ldelay ≤ H − EDGE_LAT − 2`. |
+| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner (of `data` or `data2`) that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. A bounded clock follower: the first edge, seen at `F = (cpha 0: max(0, L_clk) + H; cpha 1: max(H, L_clk)) + EDGE_LAT`, needs `F + ceil(d·(A + H)) − L_lo ≤ max + QUANT`, where `L_clk` is the clock owner's latest start and `L_lo` the follower's earliest; and `H + ceil(d·H) ≤ max + QUANT`. |
+| `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. Stretch lanes: `H ≥ EDGE_LAT + 2`. A lane with an `ldelay`: `ldelay ≤ H − EDGE_LAT − 2`. |
 | `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample) |
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
