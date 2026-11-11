@@ -19,6 +19,7 @@ project:
   source_files:
     - "project.v"
     - "host_spi.v"
+    - "engine.v"
     - "uart_tx.v"
     - "prog_mem.v"
 

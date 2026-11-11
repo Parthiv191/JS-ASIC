@@ -13,7 +13,9 @@
 
   "//": "PL_TARGET_DENSITY_PCT - You can increase this if Global Placement fails with error GPL-0302.",
   "//": "Users have reported that values up to 80 worked well for them.",
-  "PL_TARGET_DENSITY_PCT": 60,
+  "//": "JS-ASIC: 40, not 60. At ~10% utilization the placer packed engine 0 at 60% just below",
+  "//": "column 1's signal pins, and global routing overflowed there on Metal3 (gds run 42762937958).",
+  "PL_TARGET_DENSITY_PCT": 40,
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
@@ -85,6 +87,15 @@
   "//": "the Magic.DRC step, not the GDS that is streamed out.",
   "ERROR_ON_MAGIC_DRC": 0,
   "MAGIC_GDS_FLATGLOB": ["lvsres_*", "*_CELL_SUB", "VIA_M1_*", "VIA_M2_*", "RSC_*", "*_CELL_CORNER", "*_BITKIT_CORNER"],
+  "//": "Skipped: on 8x4 with the two macros it took 44-55 min of the 120 min gds job (runs",
+  "//": "42758486820, 42766887181) for a report nothing reads. The precheck job runs the",
+  "//": "sign-off KLayout SG13CMOS5L DRC on the final GDS.",
+  "RUN_MAGIC_DRC": 0,
+
+  "//": "OpenROAD thread count. Unset, LibreLane 3.1.0.dev3 passes '-threads None', OpenROAD",
+  "//": "rejects it (ORD-0032) and every step runs on one thread: detailed routing with engine 0",
+  "//": "took 110 min (run 42766885905). GitHub's ubuntu-24.04 runners have 4 vCPUs.",
+  "OPENROAD_THREADS": 4,
 
   "//": "Slew and load into the macros. Hold fixing (after CTS) puts weak delay cells on the",
   "//": "address and data nets, and one driver feeds the same pin on both macros. Run cc3339f",
@@ -121,6 +132,12 @@
 
   "//": "Fail on global-route overflow (the template allows it, which hides congestion; architecture 9).",
   "GRT_ALLOW_CONGESTION": 0,
+
+  "//": "JS-ASIC: global-route derating 0.2 (LibreLane default 0.3). With engine 0, run 42765965907",
+  "//": "overflowed 13 tracks (1-2 per gcell, Metal3, inside the engine's register-file wiring) at",
+  "//": "14% routing usage; OpenROAD suggested <= 16%. Re-run locally on that run's post-CTS odb:",
+  "//": "0.3 -> 78 overflows, 0.2 -> 0. Detailed routing still has to come out clean.",
+  "GRT_ADJUSTMENT": 0.2,
 
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
