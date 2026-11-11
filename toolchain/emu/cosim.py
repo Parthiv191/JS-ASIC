@@ -102,7 +102,7 @@ def stimulus(trace: Trace, e: int) -> list[int]:
     """Per tick, the `uio_in` byte the RTL must see while it plays engine `e`: the wire of every
     other engine (undriven reads 1), with the run's glitches, line i on pin LINE[i].pin."""
     others = [et.drives for i, et in enumerate(trace.engines) if i != e]
-    pins = [i if ln.pin is None else ln.pin for i, ln in enumerate(trace.lines)]
+    pins = _pin_map(trace)
     out = []
     for t in range(trace.ticks):
         wire, _ = resolve(trace.lines, [d[t] for d in others])
@@ -115,6 +115,60 @@ def stimulus(trace: Trace, e: int) -> list[int]:
                 byte &= ~(1 << pins[i])
         out.append(byte)
     return out
+
+
+def _pin_map(trace: Trace) -> list[int]:
+    return [i if ln.pin is None else ln.pin for i, ln in enumerate(trace.lines)]
+
+
+def pins(trace: Trace, e: int, ticks: range) -> list[tuple[int, int]]:
+    """Per tick, the (uio_oe, uio_out) bytes model engine `e` puts on the pins: a driven line
+    sets its pin's oe bit and its out bit to the level; out is 0 where oe is 0 (it never reaches
+    the wire). Before RUN (tick < 0) every pin is an input; past the run the last drive holds.
+    Equal entries share one tuple, so a run of millions of ticks stays small."""
+    drives, pin = trace.engines[e].drives, _pin_map(trace)
+    seen: dict[tuple[int | None, ...], tuple[int, int]] = {}
+
+    def byte(d: tuple[int | None, ...]) -> tuple[int, int]:
+        if d not in seen:
+            oe = lvl = 0
+            for i, v in enumerate(d):
+                if v is not None:
+                    oe |= 1 << pin[i]
+                    lvl |= (v & 1) << pin[i]
+            seen[d] = (oe, lvl)
+        return seen[d]
+
+    return [(0, 0) if t < 0 else byte(drives[min(t, len(drives) - 1)]) for t in ticks]
+
+
+def _pin_state(oe: int, out: int, p: int) -> str:
+    return f"driven {out >> p & 1}" if oe >> p & 1 else "released"
+
+
+@dataclass
+class PinMismatch:
+    tick: int
+    pins: list[int]               # the pins that differ
+    expected: tuple[int, int]     # (uio_oe, uio_out)
+    observed: tuple[int, int]
+
+    def __str__(self) -> str:
+        lines = [f"pin mismatch at tick {self.tick}:"]
+        lines += [f"  pin {p}: expected {_pin_state(*self.expected, p)}, observed {_pin_state(*self.observed, p)}"
+                  for p in self.pins]
+        return "\n".join(lines)
+
+
+def compare_pins(expected: list[tuple[int, int]], observed: list[tuple[int, int]],
+                 first: int) -> PinMismatch | None:
+    """The first tick where the pins differ, or None. Entry k of both lists is tick `first` + k.
+    A pin differs when its oe differs, or when both drive it to different levels."""
+    for k, ((eo, ev), (oo, ov)) in enumerate(zip(expected, observed, strict=True)):
+        bad = (eo ^ oo) | (eo & oo & (ev ^ ov))
+        if bad:
+            return PinMismatch(first + k, [p for p in range(8) if bad >> p & 1], (eo, ev), (oo, ov))
+    return None
 
 
 @dataclass

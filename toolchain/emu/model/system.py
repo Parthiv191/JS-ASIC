@@ -49,7 +49,7 @@ class EngineTrace:
     starts: list[tuple[int, int]] = field(default_factory=list)  # (pc, now) per instruction start
     halt_cycle: int | None = None  # the HALT's (or ILLEGAL's) start cycle
     drives: list[tuple[int | None, ...]] = field(default_factory=list)  # per tick, the drive that
-    #                                                                     tick's wire was resolved from
+    #     tick's wire was resolved from, then one more: the drive after the run, which holds from then on
     regs: list[int] = field(default_factory=list)  # r0-r7 at the end of the run
 
     @property
@@ -154,6 +154,8 @@ class System:
                     and tick - last_edge > settle and all(e.idle for e in self.engines)):
                 quiescent = True
                 break
+        for log, e in zip(drives, self.engines):
+            log.append(tuple(e.drv))
         return Trace(
             ticks=tick,
             quiescent=quiescent,

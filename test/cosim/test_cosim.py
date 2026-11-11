@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import cocotb
 
-from harness import CosimMismatch, cosim
+from harness import GATES, CosimMismatch, cosim
 
 from emu.compiler import compile_desc
 from emu.cosim import Kind, pulse, replay
@@ -223,6 +223,34 @@ async def test_od_readback(dut, role):
     await cosim(dut, rep, role)
 
 
+@cocotb.test()
+@cocotb.parametrize(case=["halt", "abort"])
+async def test_od_release(dut, case):
+    """isa §4.1: HALT and an abort release the OD lines and keep the PP drives. P1 pulls OD line
+    `o` low and drives PP line `q` 0, then follows P0's fall with ABORT: P0 makes it (HALT) or no
+    one does (the COND times out and aborts). The lines sit on pins 5, 2 and 6, so the line-to-pin
+    map shows too. Only the pins show any of this."""
+    d = Description("release", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    o = d.line("o", "od", owner="b", idle=1)
+    q = d.line("q", owner="b", idle=1)
+    h = d.profile("H", nom=8)
+    win = d.profile("W", nom=20, min=16, max=24)
+    d.abort_to("end")
+    d.hold(o, 0, owner="b", prof=h)
+    d.hold(q, 0, owner="b", prof=h)
+    d.cond("fall", ln, owner="a", prof=win, abort=True)
+    d.mark(7)
+    d.label("end")
+    d.halt()
+    img = compile_desc(d, check_timing=False)
+    img = replace(img, lines=[replace(x, pin=p) for x, p in zip(img.lines, (5, 2, 6))])
+    rep = model(img, Role.P1, peers=case == "halt")
+    drv = rep.trace.engines[0].drives
+    assert ("ABORT" in kinds(rep)) == (case == "abort") and (None, 0, 0) in drv and drv[-1] == (None, None, 0)
+    await cosim(dut, rep, Role.P1)
+
+
 CLAMP = 1 << 22
 
 
@@ -261,7 +289,7 @@ async def expect_gap(dut, rep, role, gap):
         raise
 
 
-@cocotb.test(expect_fail=True)
+@cocotb.test(expect_fail=True, skip=GATES)  # the gap shows only on the trace port
 async def test_illegal(dut):
     """isa §3: a reserved ALU sub-code halts as ILLEGAL. Gap: devOps's #13 runs it as a NOP."""
     img = replace(frame(), words=[encode(Instr(Op.ALU, sub=10)), encode(Instr(Op.HALT))], debug={})
@@ -269,7 +297,7 @@ async def test_illegal(dut):
                      lambda m: m.expected == pulse(2, Kind.EVT, 0, 10) and m.observed == pulse(4, Kind.ISSUE, 1))
 
 
-@cocotb.test(expect_fail=True)
+@cocotb.test(expect_fail=True, skip=GATES)  # the gap shows only on the trace port
 async def test_role_branches(dut):
     """architecture §5: tr_br pulses for ROLE_IF and RAW JPIN. Gap: devOps's #13 pulses it only
     for BR."""

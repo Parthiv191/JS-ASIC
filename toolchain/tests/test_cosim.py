@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from emu.compiler import compile_desc
-from emu.cosim import Kind, Pulse, compare, expected, replay
+from emu.cosim import Kind, Pulse, compare, compare_pins, expected, pins, replay
 from emu.desc import Description
 from emu.isa import Role
 from emu.model.engine import Event
@@ -171,3 +171,68 @@ def test_replay_host_reads_rx_only_after_the_run():
     rep = replay([EngineSpec(img, Role.P0), EngineSpec(img, Role.P1)], 0)
     peer = rep.trace.engines[1]
     assert peer.rx == list(range(8)) and [e.kind for e in peer.events] == ["OVERFLOW"]
+
+
+# ---------------------------------------------------------------- pins
+def _holds_od():
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", "od", owner="a", idle=1)
+    p = d.profile("H", nom=4)
+    d.hold(ln, 0, owner="a", prof=p)
+    d.hold(ln, 1, owner="a", prof=p)
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+def test_trace_keeps_the_drive_after_the_run():
+    """drives has one entry per tick plus the drive after the run, which holds from then on."""
+    t = System([EngineSpec(_holds(), Role.P0)]).run(100)
+    assert len(t.engines[0].drives) == t.ticks + 1 and t.engines[0].drives[-1] == (1,)
+
+
+def test_pins_follow_the_drives():
+    """PP line l on pin 0: released before RUN and in s0, idle 1 from now = 1 (isa §2), HOLD 0 on
+    the wire from 3, HOLD 1 from 5 (isa §4.2), still driven after HALT and after the run."""
+    t = System([EngineSpec(_holds(), Role.P0)]).run(100)
+    assert pins(t, 0, range(-1, 7)) == [(0, 0), (0, 0), (1, 1), (1, 1), (1, 0), (1, 0), (1, 1), (1, 1)]
+    assert pins(t, 0, range(t.ticks - 1, t.ticks + 3)) == [(1, 1)] * 4
+
+
+def test_pins_od_releases_its_1s():
+    """An OD line is driven only to 0; its idle 1 and its 1s are released (isa §4.3)."""
+    t = System([EngineSpec(_holds_od(), Role.P0)]).run(100)
+    assert pins(t, 0, range(0, 7)) == [(0, 0), (0, 0), (0, 0), (1, 0), (1, 0), (0, 0), (0, 0)]
+
+
+def test_pins_map_lines_to_pins():
+    img = _holds()
+    img = replace(img, lines=[replace(img.lines[0], pin=5)] + img.lines[1:])
+    t = System([EngineSpec(img, Role.P0)]).run(100)
+    assert pins(t, 0, range(3, 6)) == [(0x20, 0), (0x20, 0), (0x20, 0x20)]
+
+
+def test_pins_of_a_follower_are_released():
+    img = _holds()
+    t = System([EngineSpec(img, Role.P0), EngineSpec(img, Role.P1)]).run(100)
+    assert set(pins(t, 1, range(-2, t.ticks + 2))) == {(0, 0)}
+
+
+def test_compare_pins_equal_is_none():
+    run = [(0, 0), (1, 1), (1, 0)]
+    assert compare_pins(run, list(run), first=-1) is None
+
+
+def test_compare_pins_reports_the_first_tick_and_pin():
+    m = compare_pins([(0, 0), (0x09, 0x08), (0x09, 0)], [(0, 0), (0x01, 0), (0x08, 0)], first=10)
+    assert (m.tick, m.pins, m.expected, m.observed) == (11, [3], (0x09, 0x08), (0x01, 0))
+    assert "pin 3: expected driven 1, observed released" in str(m)
+
+
+def test_compare_pins_reports_a_wrong_level():
+    m = compare_pins([(0x04, 0)], [(0x04, 0x04)], first=0)
+    assert m.pins == [2] and "pin 2: expected driven 0, observed driven 1" in str(m)
+
+
+def test_compare_pins_ignores_out_on_released_pins():
+    """uio_out of a pin with uio_oe = 0 never reaches the wire."""
+    assert compare_pins([(0x01, 0x01)], [(0x01, 0xFF)], first=0) is None
