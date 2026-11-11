@@ -769,6 +769,29 @@ def test_one_let_go_tracker_per_engine(sender, role):
         assert rise and rise[0] == rec_b.cycle + 2, (wire, rec_b, rise)
 
 
+
+@pytest.mark.parametrize("ld", [0, 3])
+def test_a_launching_edge_in_the_take_cycle_counts(ld):
+    """The let-go is taken the cycle after its XFER completes, and the tracker sees an edge in
+    that cycle too. Compiled with every timing rule on: the clock owner's COND FALL (the next
+    leading edge, cpha 1) lands in the take cycle, so the release is ldelay after it. (Found by
+    #25's pin check on devOps's #50: its tracker waited for a later edge and held SDA.)"""
+    d = Description("od", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=ld)
+    d.li("r0", 0)
+    d.xfer(8, lane, owner="a", prof=d.profile("H", nom=12, min=11, max=INF), src="r0")
+    d.cond("fall", scl, owner="a", prof=d.profile("C", nom=4, min=0, max=INF))
+    d.raw_delay(40)
+    d.halt()
+    t = run_sys(compile_desc(d), roles=(Role.P0,))
+    x, c = [r for r in t.engines[0].records if r.op in ("XFER", "COND")]
+    assert c.tb == x.cycle + 1                       # the edge is in the take cycle
+    rise = [e for e in t.wire_edges[1] if e > x.tb]
+    assert rise and rise[0] == c.tb + ld + 1, (x, c, rise)
+
+
 def test_no_let_go_without_a_drive():
     """A cpha 1 XFER that times out before its first edge drove nothing, so it lets nothing go:
     the slave's earlier HOLD 0 stays on SDA when a leading edge comes later."""

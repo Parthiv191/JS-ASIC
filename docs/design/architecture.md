@@ -167,6 +167,7 @@ removes them because nothing loads them. All are valid in the clk cycle of their
 | `tr_mark` | 1 | pulse: MARK runs | `MARK` event |
 | `tr_br`, `tr_taken` | 1 + 1 | pulse: a conditional decision (BR Z/NZ/TO/ROLE, RAW JPIN, ROLE_IF), in the instruction's start cycle; whether it left the fall-through path (ROLE_IF: skipped) | `Branch(pc, taken, cycle)` |
 | `tr_sample`, `tr_line` | 1 + 3 | pulse: a follower samples a line; which line | `Sample(pc, line, cycle)` |
+| `tr_sample2`, `tr_line2` | 1 + 3 | pulse: in the same cycle, a duplex engine that follows both data lines (MON) samples `data2`; which line. `tr_sample`/`tr_line` keep the first followed line | the second `Sample` of that cycle |
 | `tr_halted` | 1 | level: the engine has halted (HALT or ILLEGAL) | `halt_cycle` |
 
 - **What the co-sim compares, per engine:** every pulse with `(tr_pc, tr_now)` and its fields,
