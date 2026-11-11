@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 from .image import Image
+from .isa import TX_DEPTH
 from .model.bus import resolve
 from .model.system import EngineSpec, Glitch, System, Trace
 
@@ -191,6 +192,7 @@ class Replay:
     engine: int
     expected: list[Pulse]
     stimulus: list[int]  # uio_in per tick
+    tx: list[int] = field(default_factory=list)  # the RTL engine's host words, written before RUN
 
 
 def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple = (),
@@ -202,8 +204,10 @@ def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple 
         raise ValueError(f"the RTL's engine must run at clock (1, 1) and phase 0, not {me.clock}, {me.phase}")
     if any(s.image != me.image for s in specs):
         raise ValueError("every engine must run the same image")
-    if (tx or {}).get(engine):
-        raise ValueError("no host words for the RTL's engine until the RTL has FIFOs")
+    mine = list((tx or {}).get(engine, []))
+    if len(mine) > TX_DEPTH:
+        raise ValueError(f"the harness writes the RTL's host words before RUN: at most TX_DEPTH = {TX_DEPTH}, "
+                         f"got {len(mine)}")
     s = System(list(specs), glitches=glitches, host_reads_rx=False)  # the harness reads RX after the run
     for i, words in (tx or {}).items():
         s.host_push(i, words)
@@ -218,4 +222,4 @@ def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple 
         for t in range(g.start, min(g.start + g.length, trace.ticks)):
             if own[t][g.wire] is not None and not od_pull:
                 raise ValueError(f"glitch on line {g.wire} at tick {t} is over the RTL's own drive")
-    return Replay(me.image, trace, engine, expected(trace, engine), stimulus(trace, engine))
+    return Replay(me.image, trace, engine, expected(trace, engine), stimulus(trace, engine), mine)

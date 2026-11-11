@@ -137,10 +137,16 @@ def test_replay_rejects_a_slow_or_late_rtl_engine(clock, phase):
         replay([EngineSpec(img, Role.P1, clock=clock, phase=phase), EngineSpec(img, Role.P0)], 0)
 
 
-def test_replay_rejects_host_words_for_the_rtl_engine():
+def test_replay_takes_up_to_tx_depth_host_words_for_the_rtl_engine():
+    """The harness writes the RTL's host words to TXDATA before RUN, as the model pushes them at
+    tick 0, so at most TX_DEPTH (4) fit; more would need a host push timed during the run."""
     img = _holds()
-    with pytest.raises(ValueError, match="FIFO"):
-        replay([EngineSpec(img, Role.P1), EngineSpec(img, Role.P0)], 0, tx={0: [1]})
+    specs = [EngineSpec(img, Role.P1), EngineSpec(img, Role.P0)]
+    rep = replay(specs, 0, tx={0: [1, 2, 3, 4], 1: [9]})
+    assert rep.tx == [1, 2, 3, 4] and rep.trace.engines[0].tx_left == 4
+    assert replay(specs, 0).tx == []
+    with pytest.raises(ValueError, match="TX_DEPTH"):
+        replay(specs, 0, tx={0: [1, 2, 3, 4, 5]})
 
 
 def test_replay_rejects_two_images():

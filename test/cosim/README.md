@@ -54,11 +54,13 @@ devOps's SPI host (`test/chip.py`) without editing it.
 - **Glitches** only pull an OD line to 0, or touch a line the RTL isn't driving at that tick
   (checked tick by tick). The chip reads its own drive inside, so a glitch over it would reach the
   model and not the RTL.
-- No PP contention in the model run, and no host words for the RTL's engine until the RTL has
-  FIFOs (other engines may have them).
+- No PP contention in the model run.
+- **Host words:** the model pushes each engine's host words at tick 0. For the RTL's engine the
+  harness writes them to TXDATA before RUN (RUN keeps the TX FIFO), so at most 4, the TX depth.
+  After the run it compares the TX and RX counts at 0x03 and reads RX out over RXDATA.
 
 **Loading:** reset, then `Image.host_writes()` (the tables at 0x0400, the program at 0x1000),
-ROLE at `0x2000`, RUN = 1. Registers are 0 after reset, as in the model.
+ROLE at `0x2000`, the RTL engine's host words to TXDATA, RUN = 1. Registers are 0 after reset, as in the model.
 
 ## 2. Pulses
 
@@ -158,16 +160,17 @@ An OD line driven high for its 1s also fails, in the OD readback test, through t
 | time clamp | tx | after a gap of about 4.2 M cycles, `tb` trails `now` by 2^22 (slow: `COSIM_SLOW=1`) |
 | illegal | P0 | a reserved code halts as ILLEGAL |
 | role branches | P0 | `tr_br` pulses for ROLE_IF and RAW JPIN (both gaps in #13 were fixed in #14) |
+| uart protocol | tx, rx, mon | the library UART (`emu/protocols/uart.py`) from the FIFOs: tx POPs its host's 4 words (the RTL's from TXDATA), rx and mon push them into RX (the RTL's read over RXDATA); peers up to 2% slow |
 
 Every test compares the pins and ACT, at gate level too. There, illegal and role branches check
 only ACT: an ILLEGAL halts 2 cycles before the HALT behind it would.
 
 **Later**, each its own PR:
-1. The UART protocol program in every role, once the RTL and the model (step 3b) have FIFOs.
+1. SPI and I2C, the library protocols (`emu/protocols`), once the RTL has clocked XFER and the bus.
 2. Engine 1: both engines on-chip with LOOPBACK, against a two-engine model.
 3. Random programs from the compiler, with the shrinker (verification.md layer 4).
-4. SPI and I2C as the model gains clocked XFER and START/STOP.
-5. The other `uo_out` pins against the model: IRQ, and ERR (any VIOL bit).
+4. The other `uo_out` pins against the model: IRQ, and ERR (any VIOL bit).
+5. Host words during the run (more than 4 for the RTL's engine), timed as the model pushes them.
 
 ## 5. Running
 

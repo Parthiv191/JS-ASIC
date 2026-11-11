@@ -15,20 +15,21 @@ from emu.cosim import Kind, pulse, replay
 from emu.desc import Description
 from emu.isa import Instr, Op, Role, encode
 from emu.model.system import EngineSpec, Glitch
-from emu.protocols import slack
+from emu.protocols import get, slack
 
 ALU_OPS = ("add", "sub", "and", "or", "xor", "shl", "shr", "eq", "ne", "lt")
 P = 20        # bit cycles: UART at 2% needs P >= 19 (isa §6)
 DATA = 0xA4   # reads 0x25 reversed, so the bit order shows on the wire (0xA5 and 0x5A read the same)
-# Programs avoid ROLE_IF and RAW JPIN: devOps's tr_br doesn't pulse for them yet (test_role_branches).
 
 
-def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=()):
-    """The RTL plays `role`; the model also runs every other role (unless `peers` is False)."""
+def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=(), host=None):
+    """The RTL plays `role`; the model also runs every other role (unless `peers` is False).
+    `host` maps a party role to its host's TX words (the RTL's are written before RUN)."""
     specs = [EngineSpec(img, role)]
     if peers:
         specs += [EngineSpec(img, r, clock=peer_clock, phase=peer_phase) for r in Role if r != role]
-    return replay(specs, 0, glitches=glitches)
+    tx = {i: (host or {}).get(s.role, []) for i, s in enumerate(specs) if s.role != Role.MON}
+    return replay(specs, 0, glitches=glitches, tx=tx)
 
 
 def kinds(rep):
@@ -173,6 +174,22 @@ async def test_xfer_follower(dut, msb, check, resync):
 async def test_uart_frame(dut, role, peer_clock, peer_phase):
     """A UART frame as tx (P0), rx (P1) and mon, against peers up to 2% slow and out of phase."""
     await cosim(dut, model(frame(), role, peer_clock, peer_phase), role)
+
+
+UART_WORDS = [0xA4, 0x3C, 0x00, 0xFF]  # 4: the TX FIFO's depth, all written before RUN
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], peer_clock=[(1, 1), (49, 50)])
+async def test_uart_protocol(dut, role, peer_clock):
+    """The library UART (emu/protocols/uart.py) from the FIFOs, as tx, rx and mon, against peers up
+    to 2% slow: tx takes its host's words by POP (the RTL from TXDATA), rx and mon push what they
+    receive into RX (the RTL's read back over RXDATA). Plan step 4's M1 target."""
+    rep = model(compile_desc(get("uart").build(bit_cycles=P)), role, peer_clock, host={Role.P0: UART_WORDS})
+    et = rep.trace.engines[0]
+    assert et.rx == ([] if role == Role.P0 else UART_WORDS) and et.tx_left == 0 and not et.events
+    assert rep.tx == (UART_WORDS if role == Role.P0 else [])
+    await cosim(dut, rep, role)
 
 
 GLITCHES = {  # on the receiver, perfect clocks; tick 72 is the middle of data bit 2 on the wire
