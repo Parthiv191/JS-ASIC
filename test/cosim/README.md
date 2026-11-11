@@ -118,8 +118,8 @@ the bits it sent instead of the ones it read back.
 | raw evt | rx | TIMEOUT and LEVEL set their `evt` bits; RAW EVT reads `evt`, then clears the masked bits |
 | od readback | tx, rx | on an OD line a glitch over a released 1 reaches `dst` in every role; the owner completes on its last readback |
 | time clamp | tx | after a gap of about 4.2 M cycles, `tb` trails `now` by 2^22 (slow: `COSIM_SLOW=1`) |
-| illegal | P0 | a reserved code halts as ILLEGAL: `expect_fail` until devOps's #13 fix |
-| role branches | P0 | `tr_br` for ROLE_IF and RAW JPIN: `expect_fail` until devOps's #13 fix. Until then the other programs avoid both. |
+| illegal | P0 | a reserved code halts as ILLEGAL |
+| role branches | P0 | `tr_br` pulses for ROLE_IF and RAW JPIN (both gaps in #13 were fixed in #14) |
 
 **Not checked yet: the RTL's own pin drives** (Later 1). In an owner role (tx, HOLD and COND
 do) co-sim checks the RTL's trace and registers, not its wire, so a wrong drive level, bit order
