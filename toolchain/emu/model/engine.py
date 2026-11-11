@@ -434,12 +434,13 @@ class Engine:
     def _op_xfer(self, ins: Instr) -> Gen:
         p = self.image.profiles[ins.prof]
         lane = self.image.lanes[ins.line]
-        if lane.clk is not None:
-            raise NotImplementedError(f"clocked XFER lands in Task 8 (pc {self.pc})")
         n, src, dst = unpack_xfer(ins.operand)
         msb = bool(ins.flags & F_MSB)
         if src == Src.FZ:
             raise NotImplementedError(f"XFER src=FZ lands in Task 20 (pc {self.pc})")
+        if lane.clk is not None:
+            yield from self._xfer_clocked(ins, p, lane, n, src, dst, msb)
+            return
         self._step_start(ins)
         line, P, mask = lane.data, p.nom, (1 << n) - 1
 
@@ -529,5 +530,135 @@ class Engine:
             self.regs[reg_of(dst)] = v & REG_MASK
         self._accumulate(p, n)
         self._record(ins, mode, v)
+        self.pc += 1
+        yield
+
+    def _xfer_clocked(self, ins: Instr, p, lane, n: int, src: Src, dst: Dst, msb: bool) -> Gen:
+        """Clocked XFER on one data line (isa §4.1, §4.3), with H = nom.
+
+        The clock owner (the clk line's party, never MON) drives leading edge k (the clock goes to
+        1 - cpol) at tb + (2k+1)H and trailing edge k (to cpol) at tb + (2k+2)H, then
+        tb := tb + 2nH. Data is captured on the leading edges with cpha 0 and on the trailing ones
+        with cpha 1, and launched on the others; with cpha 0, bit 0 goes out at the step start.
+        Every other engine follows the clock, telling the edges apart by level."""
+        if lane.data2 is not None or lane.stretch or self.lines[lane.data].kind == "od":
+            raise NotImplementedError(f"duplex, stretch and OD data on a clocked lane land in V3b "
+                                      f"part 2 (pc {self.pc})")
+        self._step_start(ins)
+        H, cpol, cpha, ld = p.nom, lane.cpol, lane.cpha, lane.ldelay
+        data, clk, mask = lane.data, lane.clk, (1 << n) - 1
+        own_clk = self.role != Role.MON and int(self.lines[clk].owner) == int(self.role)
+        do = self.does(ins)
+
+        def pos(k: int) -> int:  # value bit carried by bit slot k
+            return n - 1 - k if msb else k
+
+        v = 0
+        if do:
+            if src == Src.FIFO:
+                if own_clk:
+                    while not self.tx:  # checked every cycle; the step starts when it takes the word
+                        self.idle = True
+                        yield
+                    v = self.tx.popleft()
+                elif self.tx:
+                    v = self.tx.popleft()
+                else:
+                    self.log("UNDERRUN")  # it can't hold the clock: send ONES, consume nothing
+                    v = mask
+            elif src == Src.ONES:
+                v = mask
+            elif src != Src.ZERO:
+                v = self.regs[reg_of(src)]
+            v &= mask
+        start, got = self.now, 0
+
+        if own_clk:
+            # never overruns (isa §4.1): bit 0 (cpha 0) or the first edge (cpha 1) is never late
+            self.tb = max(self.tb, start) if cpha == 0 else max(self.tb, start - H)
+            base = self.tb
+            edges = [(base + j * H, cpol ^ (j & 1)) for j in range(1, 2 * n + 1)]
+            if do:
+                launch = ([base] + [base + 2 * k * H + ld for k in range(1, n)] if cpha == 0
+                          else [base + (2 * k + 1) * H + ld for k in range(n)])
+                samp: list[int] = []
+            else:
+                launch = []
+                samp = [base + (2 * k + 1 + cpha) * H + EDGE_LAT for k in range(n)]
+            end = max([base + 2 * n * H] + samp)  # the later of the last edge and the last sample
+            ei = li = si = 0
+            while True:
+                while ei < len(edges) and edges[ei][0] <= self.now:
+                    self.drive(clk, edges[ei][1])
+                    ei += 1
+                while li < len(launch) and launch[li] <= self.now:
+                    self.drive(data, v >> pos(li) & 1)
+                    li += 1
+                if si < len(samp) and self.now >= samp[si]:
+                    self.samples.append(Sample(self.pc, data, self.now, H))
+                    got |= self.inp[data] << pos(si)
+                    si += 1
+                if self.now >= end:
+                    break
+                yield
+            self.tb = base + 2 * n * H
+        else:
+            # cpha 0: bit 0 at max(start, tb); edge launches at max(detect, e + ldelay)
+            pending = [(max(start, self.tb), 0)] if do and cpha == 0 else []
+            nlead = ntrail = kc = 0
+            last: int | None = None     # detect cycle of this step's last edge
+            ref = start                 # the timeout counts from the start, then from each edge
+            while True:
+                if self.edge(clk):
+                    if (last is not None and ins.flags & F_CHK and self.now - last < p.min - QUANT):
+                        self.log("CLK_PHASE", measured=self.now - last, lo=p.min, hi=p.max)
+                        if ins.flags & F_ABORT:
+                            self._abort()
+                            yield
+                            return
+                    last = ref = self.now
+                    e = self.now - EDGE_LAT
+                    leading = self.inp[clk] != cpol
+                    if leading == (cpha == 0) and not do and kc < n:  # a capture edge
+                        self.samples.append(Sample(self.pc, data, self.now, H))
+                        got |= self.inp[data] << pos(kc)
+                        kc += 1
+                    if leading:
+                        if do and cpha == 1 and nlead < n:
+                            pending.append((max(self.now, e + ld), nlead))
+                        nlead += 1
+                    else:
+                        ntrail += 1
+                        if do and cpha == 0 and ntrail < n:
+                            pending.append((max(self.now, e + ld), ntrail))
+                elif p.max != INF and self.now - ref > p.max + QUANT:  # an edge wins (isa §4.1)
+                    self.log("TIMEOUT", measured=self.now - ref, lo=p.min, hi=p.max)
+                    if ins.flags & F_ABORT:
+                        self._abort()
+                        yield
+                        return
+                    # no dst, no push; the step ends here
+                    self.to = True
+                    self.tb = self.now
+                    self._reanchor(self.now)
+                    self._record(ins, "do" if do else "follow")
+                    self.pc += 1
+                    yield
+                    return
+                while pending and pending[0][0] <= self.now:
+                    self.drive(data, v >> pos(pending[0][1]) & 1)
+                    pending.pop(0)
+                if ntrail == n:
+                    break
+                yield
+            self.tb = self.now - EDGE_LAT
+        if not do:
+            v = got
+            if dst == Dst.FIFO:
+                self._push_rx(v)
+        if dst >= Dst.R0:
+            self.regs[reg_of(dst)] = v & REG_MASK
+        self._reanchor(self.tb)  # a clocked XFER is an anchor (isa §4.3, §6)
+        self._record(ins, "do" if do else "follow", v)
         self.pc += 1
         yield

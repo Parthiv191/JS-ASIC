@@ -267,6 +267,10 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
                                f"{_name(desc, ln.owner)!r}")
         if clk is not None and lines[clk].owner not in (Owner.P0, Owner.P1):
             err("R1-owner", s, f"clock line {lines[clk].name!r} needs a party owner")
+        if clk is not None and lines[clk].idle != la.cpol:
+            # engines tell a leading edge by the level the clock goes to (isa §4.3)
+            err("S-lane", s, f"clock line {lines[clk].name!r} idles at {lines[clk].idle}, "
+                             f"not at the lane's cpol {la.cpol}")
         if s.kind == "xfer" and clk is None and a["abort"] and not a["check"]:
             err("S-flags", s, "abort on an unclocked xfer needs check: an out-of-window edge is its "
                               "only fatal failure")

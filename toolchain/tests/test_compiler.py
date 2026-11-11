@@ -55,7 +55,7 @@ def test_r1_accepts_shared_on_od():
 
 def test_r1_rejects_clock_line_without_party_owner():
     d, pp, od, p = base()
-    lane = d.lane("ln", data=pp, clk=od)
+    lane = d.lane("ln", data=pp, clk=od, cpol=1)  # od idles at 1: only R1-owner fires
     d.xfer(8, lane, owner="a", prof=p)
     assert rules(d) == {"R1-owner"}
 
