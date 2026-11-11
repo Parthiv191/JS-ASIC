@@ -774,12 +774,11 @@ module engine #(
               // OD let-go (isa §4.3): it keeps an OD line it drove until the lane's next launching
               // edge (cpha 1, or after a timeout), or releases it ldelay after its last edge (cpha
               // 0, run to the end): the clock owner at tb + ldelay, others at max(now, e + ldelay)
+              // (registered the next cycle from the latched s_*; here only whether, and its mode)
               if (lg_reg && !abort_now && (dv_nx || launch) && ((c_do && c_od) || (c_dx && c_mine2 && c_od2))) begin
-                if (!c_cpha && !nodst) begin
-                  lg_c0 = c_own ? ((c_ld > tb_nx[3:0] - 4'd1) ? c_ld - (tb_nx[3:0] - 4'd1) : 4'd0)
-                                : ((c_ld > 4'd3) ? c_ld - 4'd3 : 4'd0);
-                  lg_now = (lg_c0 == 4'd0);
-                end
+                lg_now = !c_cpha && !nodst;   // count mode: ldelay after its last edge
+                lg_c0  = {3'd0, wt_end};      // the clock owner's last edge was a stretched release:
+                                              // tb is E before now (c >= t + E)
               end else lg_reg = 1'b0;
             end
           end else if (c_do) begin
@@ -896,10 +895,10 @@ module engine #(
                          (busy && ev[TIMEOUT]) || (evq_st && ev_q[TIMEOUT]), conf & conf_stp, conf & ~conf_stp};
   wire        gate_cl  = abort_now | (start & stop_op) | sel_stop;   // abort_now includes a bus exit
   wire        gate_eff = (gate_on | st) & ~gate_cl;
-  wire        gok_c  = ~gated_pins[c_pin]  | gate_eff;
-  wire        gok_c2 = ~gated_pins[c_pin2] | gate_eff;
-  wire        gok_ck = ~gated_pins[c_cpin] | gate_eff;
-  wire        gok_l  = ~gated_pins[l_pin]  | gate_eff;
+  wire        gok_c  = ~gated_pins[c_pin]  | gate_on | st;   // a shut this cycle releases after the drives
+  wire        gok_c2 = ~gated_pins[c_pin2] | gate_on | st;   // a shut this cycle releases after the drives
+  wire        gok_ck = ~gated_pins[c_cpin] | gate_on | st;   // a shut this cycle releases after the drives
+  wire        gok_l  = ~gated_pins[l_pin]  | gate_on | st;   // a shut this cycle releases after the drives
   wire [5:0]  evt_clr = ((start && op == OP_RAW && sub == RAW_EVT) ? operand[5:0] : 6'h0) |
                         {4'h0, {2{c_on & bus_clr}}};
 
@@ -940,10 +939,21 @@ module engine #(
   wire lg_x1 = (drv_en && c_pin == lg_p1) || (drv2_en && c_pin2 == lg_p1) || ((raw_set || raw_rel) && l_pin == lg_p1);
   wire lg_x2 = (drv_en && c_pin == lg_p2) || (drv2_en && c_pin2 == lg_p2) || ((raw_set || raw_rel) && l_pin == lg_p2);
   // a new let-go (lg_reg) holds data and/or data2; the old lines it doesn't hold go at once
-  wire lg_n1 = c_do & c_od, lg_n2 = c_dx & c_mine2 & c_od2;
-  wire lg_new = lg_reg & ~abort_now;
-  wire lg_go1 = lg_v1 & ~lg_x1 & (lg_rel | (lg_new & ~(lg_n1 && c_pin == lg_p1) & ~(lg_n2 && c_pin2 == lg_p1)));
-  wire lg_go2 = lg_v2 & ~lg_x2 & (lg_rel | (lg_new & ~(lg_n1 && c_pin == lg_p2) & ~(lg_n2 && c_pin2 == lg_p2)));
+  // A let-go is taken the cycle after its XFER completes (lg_rq), from the latched s_*, which no
+  // new step has overwritten yet: off the completion cycle's deep logic. Count mode releases at
+  // completion + c0: c0 = ldelay (clock owner; ldelay - E after a stretched last edge) or
+  // max(0, ldelay - E) (others); c0 <= 1 releases now, at completion + 1 (the model's cycle for
+  // c0 = 0; isa reads "at completion": flagged to verification).
+  reg         lg_rq, lg_cmq, lg_a3q;
+  wire        lg_n1 = lg_rq & s_do & s_od, lg_n2 = lg_rq & s_dx & s_mine2 & s_od2;
+  wire        lg_new = lg_rq;
+  wire [3:0]  lg_ldm3 = (s_ld > 4'd3) ? s_ld - 4'd3 : 4'd0;
+  wire [3:0]  lg_c0q  = (s_own && !lg_a3q) ? s_ld : lg_ldm3;
+  wire        lg_nowq = lg_cmq && (lg_c0q <= 4'd1);
+  wire        lg_xn1 = (drv_en && c_pin == s_pin) || (drv2_en && c_pin2 == s_pin) || ((raw_set || raw_rel) && l_pin == s_pin);
+  wire        lg_xn2 = (drv_en && c_pin == s_pin2) || (drv2_en && c_pin2 == s_pin2) || ((raw_set || raw_rel) && l_pin == s_pin2);
+  wire lg_go1 = lg_v1 & ~lg_x1 & (lg_rel | (lg_new & ~(lg_n1 && s_pin == lg_p1) & ~(lg_n2 && s_pin2 == lg_p1)));
+  wire lg_go2 = lg_v2 & ~lg_x2 & (lg_rel | (lg_new & ~(lg_n1 && s_pin == lg_p2) & ~(lg_n2 && s_pin2 == lg_p2)));
 
   // FIRST_VIOL: the lowest fatal or timing kind (0-6, 10) logged this cycle
   reg [3:0] fv_new;
@@ -1010,6 +1020,7 @@ module engine #(
       lg_p1 <= 3'd0; lg_p2 <= 3'd0; lg_cp <= 3'd0; lg_ld <= 4'd0; lg_cnt <= 4'd0;
       s_bus <= 1'b0; gate_on <= 1'b0; cand_v <= 1'b0; cand_stop <= 1'b0; cand_lvl <= 1'b0;
       cand_n <= 8'd0; start_age <= 24'sd0; stop_age <= 24'sd0;
+      lg_rq <= 1'b0; lg_cmq <= 1'b0; lg_a3q <= 1'b0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else if (soft_reset) begin
       started  <= 1'b0;
@@ -1044,7 +1055,7 @@ module engine #(
       acc_pend <= 1'b0; acc_clrq <= 1'b0; wq_v <= 1'b0; ev_q <= 11'h0; evq_st <= 1'b0;
       pop_wait <= 1'b0; stalled <= 1'b0; s_fwait <= 1'b0; s_wt <= 1'b0;
       lg_v1 <= 1'b0; lg_v2 <= 1'b0; gate_on <= 1'b0; cand_v <= 1'b0;
-      start_age <= 24'sd0; stop_age <= 24'sd0;
+      start_age <= 24'sd0; stop_age <= 24'sd0; lg_rq <= 1'b0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else begin
       sync_m <= pin_in;
@@ -1075,6 +1086,7 @@ module engine #(
         lg_v2    <= 1'b0;
         gate_on  <= 1'b0;
         cand_v   <= 1'b0;
+        lg_rq    <= 1'b0;
         drv_low  <= 8'h00;
         drv_high <= 8'h00;
       end else if (s0) begin
@@ -1084,6 +1096,7 @@ module engine #(
         cand_v   <= 1'b0;
         start_age <= 24'sd1;    // start_e = stop_e = 0
         stop_age  <= 24'sd1;
+        lg_rq    <= 1'b0;
         pop_wait <= 1'b0;
         stalled  <= 1'b0;
         s_fwait  <= 1'b0;
@@ -1160,16 +1173,18 @@ module engine #(
         if (lg_rel || lg_x1) lg_v1 <= 1'b0;
         if (lg_rel || lg_x2) lg_v2 <= 1'b0;
         lg_wait <= lg_wait_n; lg_cnt <= lg_cnt_n;
+        lg_rq <= lg_reg & ~abort_now; lg_cmq <= lg_now; lg_a3q <= lg_c0[0];
         if (lg_new) begin
-          if (lg_now) begin
-            // released now (cpha 0, ldelay already past): no entry
-            if (lg_n1) begin drv_low[c_pin]  <= 1'b0; drv_high[c_pin]  <= 1'b0; end
-            if (lg_n2) begin drv_low[c_pin2] <= 1'b0; drv_high[c_pin2] <= 1'b0; end
+          if (lg_nowq) begin
+            // released now (cpha 0, ldelay already past); a drive this cycle wins
+            if (lg_n1 && !lg_xn1) begin drv_low[s_pin]  <= 1'b0; drv_high[s_pin]  <= 1'b0; end
+            if (lg_n2 && !lg_xn2) begin drv_low[s_pin2] <= 1'b0; drv_high[s_pin2] <= 1'b0; end
             lg_v1 <= 1'b0; lg_v2 <= 1'b0;
           end else begin
-            lg_v1 <= lg_n1; lg_v2 <= lg_n2; lg_p1 <= c_pin; lg_p2 <= c_pin2; lg_cp <= c_cpin;
-            lg_L <= c_cpha ? ~c_cpol : c_cpol; lg_own <= c_own; lg_ld <= c_ld;
-            lg_wait <= c_cpha | nodst; lg_cnt <= lg_c0 - 4'd1;
+            lg_v1 <= lg_n1 & ~lg_xn1; lg_v2 <= lg_n2 & ~lg_xn2;
+            lg_p1 <= s_pin; lg_p2 <= s_pin2; lg_cp <= s_cpin;
+            lg_L <= s_cpha ? ~s_cpol : s_cpol; lg_own <= s_own; lg_ld <= s_ld;
+            lg_wait <= ~lg_cmq; lg_cnt <= lg_c0q - 4'd2;
           end
         end
         if (drv2_en && gok_c2) begin
