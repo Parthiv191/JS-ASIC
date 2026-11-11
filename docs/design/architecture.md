@@ -2,7 +2,7 @@
 
 Status: v1 (updated 2026-11-10), owner: verification role (§9: devOps role). What the chip is for: `chip-spec.md`.
 Instructions: `isa.md`. Why: `decisions.md`. Process: IHP CMOS5L via Tiny Tapeout, 8x4 tiles
-(core ~1.2M µm², scaled from 6x4's ~902K; the first 8x4 harden gives the exact figure), 50 MHz
+(core ~1.2M µm², scaled from 6x4's ~902K; the first 8x4 harden gives the exact figure), 40 MHz
 target. Tier tags (Core/Plus/…) as in chip-spec §4.
 
 ## 1. Blocks
@@ -237,7 +237,7 @@ removes them because nothing loads them. All are valid in the clk cycle of their
   display;
 - whether the RP2040 sets the straps before releasing `rst_n` and leaves `uio` tristated;
 - the QSPI Pmod sits on `uio`;
-- 3.3 V pads, any pad pull-ups, and 50 MHz through the IHP mux.
+- 3.3 V pads, any pad pull-ups, and 40 MHz through the IHP mux.
 
 The RP2040 can host (PIO SPI) and act as the protocol peer on `uio`, which makes a
 self-contained bring-up rig.
@@ -290,4 +290,4 @@ the gate. Levers, in order, if it comes in over:
 | Congestion and IR drop with full logic | first full harden |
 | The macro positions and §9 rules, which come from 6x4 | first 8x4 harden (devOps) |
 | TT demo-board facts | §8 |
-| Sign-off clock: 50 MHz target, 40 MHz fallback. #14 misses 50 MHz by 2.9 ns at the slow corner (1.08 V, 125 °C) and passes typical by 5.6 ns. The clock comes from the board, so 40 MHz changes no silicon and no cycle counts. Until the decision, no area goes into timing fixes. | engine 1's harden: devOps reports slack at 20 and 25 ns |
+| Sign-off clock: **40 MHz, decided 11-11.** One engine missed 50 MHz by 2.76 ns at the slow corner (#36); two engines with FIFOs pass 40 MHz with ~0.5 ns to spare. The clock comes from the board, so this changes no silicon and no cycle counts; protocol rates scale by 0.8 (chip-spec §5). | decided |
