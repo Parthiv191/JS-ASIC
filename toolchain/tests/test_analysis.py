@@ -429,3 +429,39 @@ def test_t5_overrun_hold_completion_carries_the_issue_slot(nops, ok):
             break
         e.cycle([1] * 8)
     assert [(ev.kind, ev.measured) for ev in e.events] == ([] if ok else [("OVERRUN", 4)])
+
+
+def test_r2_rejects_branch_on_raw_evt_reg():
+    """isa §6 R2: RAW EVT taints its rd (evt differs between roles). r0 starts clean (LI), since
+    every register is tainted at entry."""
+    d, ln, p = two_party()
+    d.li("r0", 1)
+    d.label("x")
+    d.raw_evt("r0", 0)
+    d.br("x", cond="z", reg="r0")
+    assert diag_rules(d, check_timing=False) == {"R2-branch"}
+
+
+def _xfer_then_hold(kind):
+    """XFER 8, 5 NOPs, then an owned HOLD: the gap only fits a PP owner, which finishes on its last
+    bit. An OD owner reads its bits back and finishes P//2 + E later (isa §6 completion offsets)."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", kind=kind, owner="a", idle=1)
+    p = d.profile("P", nom=16, min=14, max=18)
+    d.cond("fall", ln, owner="a")
+    d.xfer(8, ln, owner="a", prof=p)
+    for _ in range(5):
+        d.nop()
+    d.hold(ln, 1, owner="a", prof=p)
+    d.halt()
+    return d
+
+
+def test_t5_overrun_uses_an_od_owners_readback_completion():
+    from simutil import run_sys
+    from emu.isa import Role
+    assert "T5-overrun" not in diag_rules(_xfer_then_hold("pp"))
+    assert "T5-overrun" in diag_rules(_xfer_then_hold("od"))
+    # the model agrees: the OD owner's HOLD starts late
+    t = run_sys(compile_desc(_xfer_then_hold("od"), check_timing=False), roles=(Role.P0,))
+    assert [e.kind for e in t.engines[0].events] == ["OVERRUN"]

@@ -6,7 +6,7 @@ from emu.compiler import compile_desc
 from emu.desc import Description
 from emu.isa import EDGE_LAT, INF, QUANT, Role
 from emu.model.engine import Engine
-from emu.model.system import Glitch
+from emu.model.system import EngineSpec, Glitch, System
 
 from simutil import kinds, run_sys
 
@@ -404,3 +404,88 @@ def test_abort_restart_costs_3_or_4(mx, t, cost):
     assert [(ev.kind, ev.cycle) for ev in e.events if ev.kind in ("TIMEOUT", "ABORT")] == [
         ("TIMEOUT", t), ("ABORT", t)]
     assert e.starts[:2] == [(0, 2), (2, t + cost)]
+
+
+def test_violations_set_their_evt_bits():
+    """isa §4.1: TIMEOUT sets evt bit 2 and LEVEL bit 3. A follower with no
+    owner: a stuck-low line gives the fall, the bounded rise times out (no ABORT), then the
+    HOLD 1 reads 0."""
+    d = Description("e", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    d.cond("fall", ln, owner="a")
+    d.cond("rise", ln, owner="a", prof=bit)
+    d.hold(ln, 1, owner="a", prof=bit)
+    d.raw_evt("r0", 0b0100)
+    d.raw_evt("r1", 0)
+    d.halt()
+    s = System([EngineSpec(compile_desc(d, check_timing=False), Role.P1)], glitches=[Glitch(0, 10, 400, 0)])
+    t = s.run(2000)
+    assert kinds(t, 0) == ["TIMEOUT", "LEVEL"]
+    assert s.engines[0].regs[:2] == [0b1100, 0b1000]
+
+
+def _long_gap_then_hold(loops):
+    """`loops` x RAW DELAY 4000 on P0, then an owned HOLD planned at tb = 0."""
+    d = Description("g", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=10, min=8, max=12)
+    d.li("r0", loops)
+    d.label("loop")
+    d.raw_delay(4000)
+    d.alu("sub", "r0", "r0", 1)
+    d.br("loop", cond="nz", reg="r0")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+def test_tb_and_the_anchor_trail_now_by_at_most_the_clamp(monkeypatch):
+    """isa §4.1: in every cycle, if now - tb > 2^22 then tb := now - 2^22, the anchor likewise.
+    With the clamp at 64, the HOLD after the gap is planned 64 cycles back: OVERRUN(64), and
+    its tb is the clamped one plus nom."""
+    import emu.model.engine as engine_mod
+    monkeypatch.setattr(engine_mod, "TIME_CLAMP", 64)
+    e = Engine(_long_gap_then_hold(1), Role.P0)
+    for _ in range(300):
+        e.cycle([1])
+    assert (e.now - e.tb, e.now - e.anchor) == (64, 64)
+    while not e.halted:
+        e.cycle([1])
+    (hold,) = e.records
+    start = next(now for pc, now in e.starts if pc == hold.pc)
+    assert hold.tb == start - 64 + 10
+    assert [(ev.kind, ev.measured) for ev in e.events] == [("OVERRUN", 64)]
+
+
+def test_overrun_values_saturate_at_0xffff():
+    """isa §4.1: OVERRUN values saturate at 0xFFFF (the gap here is about 72000 cycles)."""
+    e = Engine(_long_gap_then_hold(18), Role.P0)
+    while not e.halted:
+        e.cycle([1])
+    assert [(ev.kind, ev.measured) for ev in e.events] == [("OVERRUN", 0xFFFF)]
+
+
+def test_od_owner_reads_the_wire_back_where_a_follower_samples():
+    """isa §4.3: dst is the wire value in every role. On an OD line an owner reads its bits back
+    at a follower's sample points, so another party's 0 shows up: a glitch over data bit 2
+    (a released 1 of 0xA4) gives 0xA0 to the owner and the follower alike. The owner completes
+    on its last readback, at base + 7P + P//2 + EDGE_LAT; readback is not a follower's sample,
+    so it adds no Sample records."""
+    d = Description("od", parties=("a", "b"))
+    ln = d.line("l", kind="od", owner="a", idle=1)
+    bit = d.profile("BIT", nom=20, min=19, max=21)
+    d.li("r0", 0xA4)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.xfer(8, ln, owner="a", prof=bit, src="r0", dst="r1")
+    d.hold(ln, 1, owner="a", prof=bit)
+    d.halt()
+    s = System([EngineSpec(compile_desc(d), r) for r in (Role.P0, Role.P1)], glitches=[Glitch(0, 74, 4, 0)])
+    t = s.run(2000)
+    owner = t.engines[0]
+    xfer = next(r for r in owner.records if r.op == "XFER")
+    base = 24  # COND fall at now 4, then the 20-cycle start bit
+    assert (xfer.value, xfer.cycle, xfer.tb) == (0xA0, base + 7 * 20 + 10 + EDGE_LAT, base + 8 * 20)
+    assert [e.regs[1] for e in s.engines] == [0xA0, 0xA0]
+    assert not owner.samples and not owner.violations

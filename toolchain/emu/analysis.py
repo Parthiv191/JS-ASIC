@@ -122,12 +122,12 @@ def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int
         return put(ins.rd, tainted)
     if ins.op == Op.POP:
         return put(ins.rd, True)
-    if ins.op == Op.RAW and ins.sub == RawOp.GET:
+    if ins.op == Op.RAW and ins.sub in (RawOp.GET, RawOp.EVT):
         return put(ins.rd, True)
     if ins.op == Op.XFER:
         dst = unpack_xfer(ins.operand)[2]
         if dst >= Dst.R0:
-            # on an open-drain line the owner stores what it sent, the followers what they read
+            # on an open-drain line the wire can differ from what the owner sent
             return put(reg_of(dst), inblock or ins.line in od_lanes)
     return t
 
@@ -145,6 +145,7 @@ class _Step:
     cpha: int = 0
     chk: bool = False
     abort: bool = False
+    od: bool = False  # an XFER whose data line is open-drain: its owner reads the bits back
 
     def does(self, r: Role) -> bool:
         return r != Role.MON and (self.owner == Owner.SHARED or int(self.owner) == int(r))
@@ -169,6 +170,7 @@ def _steps(low: Lowered) -> dict[int, _Step]:
             kw["n"] = unpack_xfer(ins.operand)[0]
             kw["chk"] = bool(ins.flags & F_CHK)
             lane = img.lanes[ins.line]
+            kw["od"] = img.lines[lane.data].kind == "od"
             if lane.clk is not None:
                 kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)))
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
@@ -186,7 +188,7 @@ def completion(s: _Step, r: Role) -> tuple[int, int]:
         c = 0 if s.does(r) else E
         return c, c
     if s.op == Op.HOLD or not s.clocked:
-        if s.does(r):
+        if s.does(r) and not s.od:  # an OD owner reads back, so it finishes as a follower does
             return -nom, max(ISSUE - s.n * nom, -nom)
         c = -nom + nom // 2 + E
         return c, c

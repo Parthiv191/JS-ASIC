@@ -12,12 +12,18 @@ from typing import Iterator
 
 from ..image import Image
 from ..isa import (
-    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, NUM_REGS, QUANT, REG_MASK, SYNC_LAT, U, AluOp,
+    EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, MEAS_MAX, NUM_REGS, QUANT, REG_MASK, SYNC_LAT,
+    TIME_CLAMP, U, AluOp,
     BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved, unpack_cond,
     unpack_role_if, unpack_xfer,
 )
 
 VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE"})
+SATURATING = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "EDGE", "CLK_PHASE"})  # measured in cycles
+# the sticky event register's bits (isa §4.1); 0 START and 1 STOP come with the bus detector
+EVT_BIT = {"TIMEOUT": 1 << 2, "LEVEL": 1 << 3, "EDGE": 1 << 3, "CLK_PHASE": 1 << 3,
+           "OVERFLOW": 1 << 4, "UNDERRUN": 1 << 5}
+EVT_MASK = 0x3F
 BIG = 1 << 40  # upper edge of an accumulated window that contains an unbounded step
 
 
@@ -73,7 +79,8 @@ def _decode(w: int) -> Instr | None:
 
 
 class Engine:
-    def __init__(self, image: Image, role: Role, name: str = "", regs: list[int] | None = None):
+    def __init__(self, image: Image, role: Role, name: str = "", regs: list[int] | None = None,
+                 evt: int = 0):
         self.image = image
         self.role = Role(role)
         self.name = name or self.role.name
@@ -84,6 +91,7 @@ class Engine:
         self.regs = [0] * NUM_REGS if regs is None else [v & REG_MASK for v in regs]
         if len(self.regs) != NUM_REGS:
             raise ValueError(f"need {NUM_REGS} registers, got {len(self.regs)}")
+        self.evt = evt & EVT_MASK  # sticky; survives RUN like r0-r7 (reset and SOFT_RESET clear it)
         self.tb = 0
         self.to = False            # timeout flag (isa-v0 §4)
         self.anchor = 0            # cycle of the last re-anchoring event (COND, clocked XFER, abort)
@@ -116,6 +124,10 @@ class Engine:
             return
         w = list(wire[: len(self.lines)])
         self.now += 1
+        # 24-bit time (isa §4.1): tb and the anchor never trail now by more than 2^22
+        floor = self.now - TIME_CLAMP
+        self.tb = max(self.tb, floor)
+        self.anchor = max(self.anchor, floor)
         self._pipe.insert(0, w)
         self.prev_inp = self.inp
         self.inp = self._pipe.pop()
@@ -136,6 +148,9 @@ class Engine:
         return self.role != Role.MON and (ins.owner == Owner.SHARED or int(ins.owner) == int(self.role))
 
     def log(self, kind: str, measured=None, lo=None, hi=None) -> None:
+        if kind in SATURATING and measured is not None:
+            measured = min(measured, MEAS_MAX)
+        self.evt |= EVT_BIT.get(kind, 0)
         self.events.append(Event(kind, self.pc, self.now, measured, lo, hi))
 
     def wait_until(self, t: int) -> Gen:
@@ -291,8 +306,9 @@ class Engine:
         line = ins.ra
         nxt = self.pc + 1
         if op == RawOp.EVT:
-            raise NotImplementedError(f"RAW EVT lands with the v1 model (pc {self.pc})")
-        if op == RawOp.SET:
+            self.regs[ins.rd] = self.evt
+            self.evt &= ~ins.operand & EVT_MASK
+        elif op == RawOp.SET:
             self.drive(line, ins.operand & 1)
         elif op == RawOp.REL:
             self.drv[line] = None
@@ -421,13 +437,30 @@ class Engine:
                 v = self.regs[reg_of(src)]
             v &= mask
             base = self.tb
-            for k in range(n):
-                planned = base + k * P
-                yield from self.wait_until(planned)
-                self._late(planned, slot0=k == 0)
-                self.drive(line, v >> pos(k) & 1)
-                if k < n - 1:
+            if self.lines[line].kind == "pp":  # dst = src; complete on the last bit
+                for k in range(n):
+                    planned = base + k * P
+                    yield from self.wait_until(planned)
+                    self._late(planned, slot0=k == 0)
+                    self.drive(line, v >> pos(k) & 1)
+                    if k < n - 1:
+                        yield
+            else:
+                # an OD owner reads each bit back where a follower samples it (a 0 from someone
+                # else shows up), at most one per cycle, and completes on the last one
+                got, k, j = 0, 0, 0
+                while True:
+                    if k < n and self.now >= base + k * P:
+                        self._late(base + k * P, slot0=k == 0)
+                        self.drive(line, v >> pos(k) & 1)
+                        k += 1
+                    if self.now >= base + j * P + P // 2 + EDGE_LAT:
+                        got |= self.inp[line] << pos(j)
+                        j += 1
+                        if j == n:
+                            break
                     yield
+                v = got
             self.tb = base + n * P
             mode = "do"
         else:
