@@ -25,21 +25,21 @@ Brief: https://blog.janestreet.com/protocol-emulator-asic-competition/ (posted S
 
 | # | Requirement | Where we meet it | Status |
 |---|---|---|---|
-| R1 | Open-source, general-purpose protocol emulator | timing-engine ISA, no fixed protocol logic (chip-spec §1); Apache 2.0 `LICENSE` | Partial: the engine is in RTL review (#13, #14) |
-| R2 | Reprogrammable after fabrication | programs load over host SPI into the program SRAM (architecture §4); standalone boot from flash is Plus | Partial: host SPI and SRAM access in #11 |
-| R3 | UART, SPI, I2C | all three in every role (chip-spec §5) | Partial: UART in the model at v1; SPI and I2C need clocked lanes and the bus detector |
+| R1 | Open-source, general-purpose protocol emulator | timing-engine ISA, no fixed protocol logic (chip-spec §1); Apache 2.0 `LICENSE` | Partial: engine 0 with untimed and timed steps on `main` (#13, #14); FIFOs, clocked lanes and engine 1 to come |
+| R2 | Reprogrammable after fabrication | programs load over host SPI into the program SRAM (architecture §4); standalone boot from flash is Plus | Partial: the host loads the program SRAM and tables over SPI on `main` (#11, #13, #14); host software (R8) to come |
+| R3 | UART, SPI, I2C | all three in every role (chip-spec §5) | Partial: the model has UART, clocked lanes, clock stretching and the I2C bus detector (#29–#33); the library I2C/SPI protocols and the RTL to come |
 | R4 | Stretch: low-speed USB, 10 Mbit Ethernet | USB-LS sniffer is Stretch (chip-spec §4); Ethernet not planned | Not yet; Ethernet out of scope |
 | R5 | Controller and target roles (a plus) | role switching: one description, every role | Partial |
 | R6 | IHP 130 nm CMOS5L through the TT IHP Verilog template | decisions 11-02; CI on the CMOS5L template | Met |
 | R7 | At most 8x4 tiles | `info.yaml` `tiles: "8x4"` | Met |
 | R8 | Program loading is part of the design; any documented host | host SPI (architecture §4); host software in `host/` | Not yet: `host/` doesn't exist |
-| R9 | Use `rst_n`; state is lost when deselected, so programs reload | reset sync and safe reset (architecture §2) | Partial (#11) |
+| R9 | Use `rst_n`; state is lost when deselected, so programs reload | reset sync and safe reset (architecture §2) | Met in the RTL (#11); programs reload after reset through the host |
 | R10 | Software side: assembler or toolchain plus example programs | `toolchain/` (compiler, model); `toolchain/emu/protocols/` | Partial: UART only |
-| R11 | Public repo with RTL, tests and a passing GDS and precheck from the TT flow | CI `gds.yaml` (harden, precheck, `gl_test`) | Partial: the repo is public; gds passes on the bring-up design, not yet the engine |
+| R11 | Public repo with RTL, tests and a passing GDS and precheck from the TT flow | CI `gds.yaml` (harden, precheck, `gl_test`) | Partial: gds and precheck pass with engine 0 (#13, #14); the full design to come |
 | R12 | Architecture and ISA documentation | `docs/design/architecture.md`, `isa.md` | Met (kept current by verification) |
-| R13 | Verification write-up | `docs/design/verification.md`; `docs/writeup.md` | Partial: the writeup doesn't exist yet |
+| R13 | Verification write-up | `docs/design/verification.md`; `docs/writeup.md` | Partial: `writeup.md` skeleton with the verification layers (#21) |
 | R14 | Describe AI use in the write-up | `decisions.md` "Claude (delegated)" rows; `docs/writeup.md` | Partial |
-| R15 | Document any external parts the design needs | architecture §8 (pull-ups); `docs/info.md` | Partial: `info.md` describes the old bring-up design |
+| R15 | Document any external parts the design needs | architecture §8 (pull-ups); `docs/info.md` | Partial: `info.md` describes the emulator (#26); pull-up values to confirm with TT (Q3) |
 | R16 | Stick to the TT flow; a custom GDS action only for the 6-hour limit, still passing precheck | CI uses the TT flow | Met |
 | R17 | Gate-level simulation strongly recommended | CI `gl_test` | Met |
 | R18 | One entry per team | one repo | Met |
@@ -49,13 +49,14 @@ Brief: https://blog.janestreet.com/protocol-emulator-asic-competition/ (posted S
 | Rule | Where | Status |
 |---|---|---|
 | Tile size in `info.yaml` | `tiles: "8x4"` | Met |
-| `info.yaml` fields: title, author, description, language, `clock_hz`, `top_module` (`tt_um_` prefix), `source_files`, pinout | `info.yaml` | Partial: the description and pinout are the bring-up design's, and `source_files` changes with #11 |
-| Datasheet `docs/info.md`: how it works, how to test, external hardware; images < 512 KB each, < 1 MB in all | `docs/info.md` | Not yet: describes the bring-up design |
-| Pins: 8 in, 8 out, 8 bidirectional, plus clock and reset; no analog pads | architecture §8 | Met in the spec; the `info.yaml` pinout follows once #11 merges |
+| `info.yaml` fields: title, author, description, language, `clock_hz`, `top_module` (`tt_um_` prefix), `source_files`, pinout | `info.yaml` | Met: description and pinout per architecture §8 (#26); `clock_hz` see the timing row |
+| Datasheet `docs/info.md`: how it works, how to test, external hardware; images < 512 KB each, < 1 MB in all | `docs/info.md` | Met (#26); updated as features land |
+| Pins: 8 in, 8 out, 8 bidirectional, plus clock and reset; no analog pads | architecture §8 | Met (#26) |
 | Pad speed (TT Discord, 11-10): ~60 MHz out, ~75 MHz in | the fastest pin toggles at clk/2 = 25 MHz at 50 MHz; host SPI and flash SCK at ≤ clk/8 | Met |
 | Demo board I/O is 3.3 V; external parts go on a Pmod | architecture §8 | Open (to check: architecture §8 "Verify against the TT demo-board docs") |
 | IHP SRAM macros allowed, several, if they fit and pass precheck | 2 × `RM_IHPSG13_1P_512x32` (architecture §3) | Met on the harness (#10 re-checks at 8x4) |
 | Precheck clean | CI `gds.yaml` | Met on every passing gds run |
+| Timing at `clock_hz` (50 MHz) | slow corner on `main` after #14: −2.90 ns at 20 ns, +2.10 ns at 25 ns; #36 −2.76 ns | **Not met at 50 MHz**; met at 40 MHz. The sign-off clock is decided at D9 (decision 11-10); `clock_hz` changes then if needed |
 | Open-source license | `LICENSE`, Apache 2.0 | Met |
 
 ## 4. Open questions
