@@ -87,6 +87,8 @@ class Engine:
         self.name = name or self.role.name
         self.instrs: list[Instr | None] = [_decode(w) for w in image.words]  # None: a free opcode
         self.lines = image.lines
+        # clocks the owner stretch-waits on (isa §4.3): those of lanes with `stretch`
+        self._stretch_clocks = {la.clk for la in image.lanes if la.stretch and la.clk is not None}
         self.pc = 0
         # r0-r7 keep their values across RUN; reset clears them (isa §1)
         self.regs = [0] * NUM_REGS if regs is None else [v & REG_MASK for v in regs]
@@ -207,6 +209,32 @@ class Engine:
     def wait_until(self, t: int) -> Gen:
         while self.now < t:
             yield
+
+    def _await_release(self, line: int, t: int, p, ref: int) -> Gen:
+        """Clock stretching (isa §4.3): after releasing `line` in cycle t, wait until it reads 1,
+        at the earliest EDGE_LAT later; return e = that cycle - EDGE_LAT. Bounded by the profile's
+        max, counted from `ref` as the followers count: TIMEOUT when now - EDGE_LAT - ref >
+        max + QUANT; then returns None. The caller continues in the cycle it returns."""
+        while True:
+            if self.now >= t + EDGE_LAT and self.inp[line] == 1:
+                return self.now - EDGE_LAT
+            if p.max != INF and self.now - EDGE_LAT - ref > p.max + QUANT:
+                self.log("TIMEOUT", measured=self.now - EDGE_LAT - ref, lo=p.min, hi=p.max)
+                return None
+            yield
+
+    def _stretch_timeout(self, ins: Instr) -> Gen:
+        """A stretch wait timed out: abort with ABORT, else to := 1, tb := now and the step ends."""
+        if ins.flags & F_ABORT:
+            self._abort()
+            yield
+            return
+        self.to = True
+        self.tb = self.now
+        self._reanchor(self.now)
+        self._record(ins, "do")
+        self.pc += 1
+        yield
 
     def _record(self, ins: Instr, mode: str, value: int | None = None) -> None:
         self.records.append(StepRecord(self.pc, ins.op.name, mode, value, self.now, self.tb))
@@ -401,8 +429,16 @@ class Engine:
             if p.bounded:
                 self._late(planned, slot0=p.nom == 0)
             self.drive(ins.line, level)
-            self.tb = self.now
-            self._reanchor(self.now)
+            act = self.now
+            if level == 1 and ins.line in self._stretch_clocks:
+                # timed from tb, as its followers time the edge (isa §4.2)
+                e = yield from self._await_release(ins.line, act, p, ref=self.tb)
+                if e is None:
+                    yield from self._stretch_timeout(ins)
+                    return
+                act = max(act, e)  # the edge is when the clock really rose
+            self.tb = act
+            self._reanchor(act)
             self._record(ins, "do")
             self.pc += 1
             yield
@@ -579,8 +615,6 @@ class Engine:
         has its own owner: an engine drives the lines it owns with its `src` and samples the
         others, and dst := (v2 << n) | v1."""
         dl = [lane.data] + ([lane.data2] if lane.data2 is not None else [])
-        if lane.stretch:
-            raise NotImplementedError(f"clock stretching lands in V3b part 2c (pc {self.pc})")
         H, cpol, cpha, ld = p.nom, lane.cpol, lane.cpha, lane.ldelay
         clk, mask = lane.clk, (1 << n) - 1
         own_clk = self.role != Role.MON and int(self.lines[clk].owner) == int(self.role)
@@ -636,25 +670,61 @@ class Engine:
             self.tb = max(self.tb, start) if cpha == 0 else max(self.tb, start - H)
             base = self.tb
             edges = [(base + j * H, cpol ^ (j & 1)) for j in range(1, 2 * n + 1)]
-            launch = (([base] + [base + 2 * k * H + ld for k in range(1, n)] if cpha == 0
-                       else [base + (2 * k + 1) * H + ld for k in range(n)]) if drives else [])
+            # bit k's launching edge (an index into edges): cpha 0, the trailing edge of bit k-1
+            # (bit 0 goes out at base); cpha 1, the leading edge of bit k. A launch is at that
+            # edge's real drive cycle + ldelay, so a stretch delays it with its edge.
+            launch_edge = [2 * k - 1 if cpha == 0 else 2 * k for k in range(n)] if drives else []
+            driven_at: list[int] = []
             samp = [base + (2 * k + 1 + cpha) * H + EDGE_LAT for k in range(n)] if reads else []
             end = max([base + 2 * n * H] + samp)  # the later of the last edge and the last sample
             ei = li = si = 0
+            # Stretching (isa §4.3): after each release (an edge to 1) the owner waits to read the
+            # clock 1; until then it makes no later edge and takes no sample, and when it sees it
+            # at c the rest of the step shifts by max(0, c - EDGE_LAT - t). Launches go on at their
+            # planned time plus the shift so far.
+            shift, wait = 0, None
             while True:
-                while ei < len(edges) and edges[ei][0] <= self.now:
+                if wait is not None:
+                    if self.now >= wait + EDGE_LAT and self.inp[clk] == 1:
+                        shift += max(0, self.now - EDGE_LAT - wait)
+                        wait = None
+                    elif p.max != INF and self.now - EDGE_LAT - (wait - H) > p.max + QUANT:
+                        # counted from the previous edge (t - H), as a clock follower counts
+                        self.log("TIMEOUT", measured=self.now - EDGE_LAT - (wait - H), lo=p.min, hi=p.max)
+                        if ins.flags & F_ABORT:
+                            self._abort()
+                            yield
+                            return
+                        for i in readback:
+                            if drove[i]:
+                                self._letgo[dl[i]] = (lane, own_clk, ld, None)
+                        self.to = True
+                        self.tb = self.now
+                        self._reanchor(self.now)
+                        self._record(ins, "do" if do else "follow")
+                        self.pc += 1
+                        yield
+                        return
+                while wait is None and ei < len(edges) and edges[ei][0] + shift <= self.now:
                     self.drive(clk, edges[ei][1])
+                    driven_at.append(self.now)
+                    if lane.stretch and edges[ei][1] == 1:
+                        wait = self.now
                     ei += 1
-                while li < len(launch) and launch[li] <= self.now:
+                while li < len(launch_edge):
+                    j = launch_edge[li]
+                    at = base if j < 0 else (driven_at[j] + ld if j < len(driven_at) else None)
+                    if at is None or at > self.now:
+                        break
                     launch_bit(li)
                     li += 1
-                if si < len(samp) and self.now >= samp[si]:
+                if wait is None and si < len(samp) and self.now >= samp[si] + shift:
                     sample_bit(si)
                     si += 1
-                if self.now >= end:
+                if wait is None and self.now >= end + shift:
                     break
                 yield
-            self.tb = base + 2 * n * H
+            self.tb = base + 2 * n * H + shift
         else:
             # cpha 0: bit 0 at max(start, tb); edge launches at max(detect, e + ldelay)
             pending = [(max(start, self.tb), 0)] if drives and cpha == 0 else []

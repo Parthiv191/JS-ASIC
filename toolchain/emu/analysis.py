@@ -11,8 +11,8 @@ from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
     EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
-    RawOp, Role, Src,
-    reg_of, unpack_role_if, unpack_xfer,
+    CondKind, RawOp, Role, Src,
+    reg_of, unpack_cond, unpack_role_if, unpack_xfer,
 )
 
 ROLES = (Role.P0, Role.P1, Role.MON)
@@ -149,6 +149,9 @@ class _Step:
     od: bool = False  # an XFER whose data line is open-drain: its owner reads the bits back
     d2_owner: Role | None = None  # duplex: the party that drives data2 (isa §4.3)
     od_drivers: frozenset = frozenset()  # parties that may drive an OD data line of the lane
+    stretch: bool = False   # a clocked XFER on a stretch lane
+    cpol: int = 0
+    stretch_wait: bool = False  # a HOLD 1 / COND RISE on a stretch lane's clock: its owner waits
     ldelay: int = 0
 
     def does(self, r: Role) -> bool:
@@ -174,6 +177,7 @@ class _Step:
 def _steps(low: Lowered) -> dict[int, _Step]:
     img = low.image
     out = {}
+    stretch_clocks = {la.clk for la in img.lanes if la.stretch and la.clk is not None}
     for pc, ins in enumerate(low.instrs):
         if ins.op not in (Op.COND, Op.HOLD, Op.XFER):
             continue
@@ -186,7 +190,7 @@ def _steps(low: Lowered) -> dict[int, _Step]:
             kw["od"] = any(x is not None and img.lines[x].kind == "od" for x in (lane.data, lane.data2))
             if lane.clk is not None:
                 kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)),
-                          ldelay=lane.ldelay)
+                          ldelay=lane.ldelay, stretch=bool(lane.stretch), cpol=lane.cpol)
                 if lane.data2 is not None and img.lines[lane.data2].owner in (Owner.P0, Owner.P1):
                     kw["d2_owner"] = Role(int(img.lines[lane.data2].owner))
                 od = set()
@@ -195,6 +199,9 @@ def _steps(low: Lowered) -> dict[int, _Step]:
                         ow = img.lines[x].owner
                         od |= {Role.P0, Role.P1} if ow == Owner.SHARED else {Role(int(ow))}
                 kw["od_drivers"] = frozenset(od)
+        if ins.op == Op.COND and ins.line in stretch_clocks:
+            # isa §4.3: COND RISE clk waits for the release to be seen
+            kw["stretch_wait"] = ins.op == Op.COND and unpack_cond(ins.operand)[0] == CondKind.RISE
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
     return out
 
@@ -206,18 +213,21 @@ def completion(s: _Step, r: Role) -> tuple[int, int]:
     T5-overrun bounds the start). So does a 1-bit unclocked XFER; with more bits the last one is
     planned past ISSUE, so the lateness is absorbed."""
     nom = s.prof.nom
+    wait = E if s.stretch_wait and s.does(r) else 0  # it sees its own release EDGE_LAT later
     if s.op == Op.COND:
-        c = 0 if s.does(r) else E
+        c = wait if s.does(r) else E
         return c, c
     if s.op == Op.HOLD or not s.clocked:
         if s.does(r) and not s.od:  # an OD owner reads back, so it finishes as a follower does
-            return -nom, max(ISSUE - s.n * nom, -nom)
+            return -nom + wait, max(ISSUE - s.n * nom, -nom) + wait
         c = -nom + nom // 2 + E
         return c, c
     if s.is_clk_owner(r):
         # it completes at its last edge, or at its last sample if it follows a data line
         # (an OD owner reads its bits back, so it completes like a follower, isa §6)
         c = 0 if s.drives_all(r) and not s.od else (max(0, E - nom) if s.cpha == 0 else E)
+        if s.stretch and s.cpol == 1:  # its last edge is a release: it completes when it sees it
+            c = max(c, E)
         return c, c
     return E, E
 
@@ -312,6 +322,8 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
         if s.clocked and p.nom < 2:
             diags.add("T4-profile", pc, "clocked XFER needs a half period >= 2")
             continue
+        if s.stretch and p.nom < E + 2:
+            diags.add("T4-profile", pc, f"a stretch lane needs H >= EDGE_LAT + 2 = {E + 2}, got {p.nom}")
         # T1: follower sample points
         if s.op == Op.HOLD or (s.op == Op.XFER and not s.clocked):
             P = p.nom

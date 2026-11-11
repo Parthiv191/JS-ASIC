@@ -60,6 +60,7 @@ class LaneDecl:
     cpha: int
     data2: LineRef | None = None  # duplex: the second data line, with its own owner (isa §4.3)
     ldelay: int = 0               # launch delay after the launching clock edge, cycles
+    stretch: bool = False         # the clock owner waits for each release to be seen (isa §4.3)
 
 
 @dataclass
@@ -120,14 +121,14 @@ class Description:
         return ProfRef(name, len(self.profiles))
 
     def lane(self, name: str, data: LineRef, clk: LineRef | None = None, cpol: int = 0, cpha: int = 0,
-             data2: LineRef | None = None, ldelay: int = 0) -> LaneRef:
+             data2: LineRef | None = None, ldelay: int = 0, stretch: bool = False) -> LaneRef:
         self._unique(name, [la.name for la in self.lanes], "lane")
         if cpol not in (0, 1) or cpha not in (0, 1):
             raise ValueError("cpol/cpha must be 0 or 1")
         if not 0 <= ldelay <= 15:
             raise ValueError(f"ldelay must be 0..15 (4 bits), got {ldelay}")
         self.lanes.append(LaneDecl(name, self._line(data), None if clk is None else self._line(clk), cpol, cpha,
-                                   None if data2 is None else self._line(data2), ldelay))
+                                   None if data2 is None else self._line(data2), ldelay, bool(stretch)))
         return LaneRef(name, len(self.lanes) - 1)
 
     def label(self, name: str) -> None:

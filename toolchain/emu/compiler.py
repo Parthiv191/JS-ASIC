@@ -79,7 +79,8 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle) for ln in desc.lines]
     profiles = [IDLE] + list(desc.profiles)
     lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha,
-                     data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay)
+                     data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay,
+                     stretch=int(la.stretch))
              for la in desc.lanes]
 
     # ---- pass 1: layout (pcs, labels, spans) ----
@@ -268,10 +269,15 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
                                f"{_name(desc, ln.owner)!r}")
         if clk is not None and lines[clk].owner not in (Owner.P0, Owner.P1):
             err("R1-owner", s, f"clock line {lines[clk].name!r} needs a party owner")
-        if clk is not None and lines[clk].idle != la.cpol:
+        if clk is not None and lines[clk].kind == "od" and lines[clk].idle != 1:
+            err("S-lane", s, f"OD clock line {lines[clk].name!r} rests released, so it idles at 1 "
+                             f"(and its lane has cpol 1)")
+        elif clk is not None and lines[clk].idle != la.cpol:
             # engines tell a leading edge by the level the clock goes to (isa §4.3)
             err("S-lane", s, f"clock line {lines[clk].name!r} idles at {lines[clk].idle}, "
                              f"not at the lane's cpol {la.cpol}")
+        if s.kind == "xfer" and isinstance(ref, LaneRef) and la.stretch and (clk is None or lines[clk].kind != "od"):
+            err("S-bus", s, f"lane {la.name!r} stretches, so its clock must be an OD line")
         if s.kind == "xfer" and isinstance(ref, LaneRef):
             used = [x.index for x in (la.data, la.clk, la.data2) if x is not None]
             if len(set(used)) != len(used):
@@ -291,6 +297,10 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
         if s.kind == "xfer" and clk is None and a["abort"] and not a["check"]:
             err("S-flags", s, "abort on an unclocked xfer needs check: an out-of-window edge is its "
                               "only fatal failure")
+    if s.kind == "hold" and a["level"] == 1 and any(
+            la.stretch and la.clk is not None and la.clk.index == a["line"].index for la in desc.lanes):
+        err("S-bus", s, f"HOLD 1 on stretch clock {lines[a['line'].index].name!r}: its followers would "
+                        f"keep the unstretched timeline; release it with COND RISE")
     if s.kind in ("raw_set", "raw_rel"):
         ln = lines[a["line"].index]
         if ln.kind == "pp":
