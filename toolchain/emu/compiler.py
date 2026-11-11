@@ -78,7 +78,8 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
 
     lines = [LineCfg(ln.name, ln.kind, _owner(desc, ln.owner), ln.idle) for ln in desc.lines]
     profiles = [IDLE] + list(desc.profiles)
-    lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha)
+    lanes = [LaneCfg(la.data.index, None if la.clk is None else la.clk.index, la.cpol, la.cpha,
+                     data2=None if la.data2 is None else la.data2.index, ldelay=la.ldelay)
              for la in desc.lanes]
 
     # ---- pass 1: layout (pcs, labels, spans) ----
@@ -267,6 +268,26 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
                                f"{_name(desc, ln.owner)!r}")
         if clk is not None and lines[clk].owner not in (Owner.P0, Owner.P1):
             err("R1-owner", s, f"clock line {lines[clk].name!r} needs a party owner")
+        if clk is not None and lines[clk].idle != la.cpol:
+            # engines tell a leading edge by the level the clock goes to (isa §4.3)
+            err("S-lane", s, f"clock line {lines[clk].name!r} idles at {lines[clk].idle}, "
+                             f"not at the lane's cpol {la.cpol}")
+        if s.kind == "xfer" and isinstance(ref, LaneRef):
+            used = [x.index for x in (la.data, la.clk, la.data2) if x is not None]
+            if len(set(used)) != len(used):
+                err("S-lane", s, f"lane {la.name!r} uses one line twice (data, clk and data2 are "
+                                 f"distinct lines)")
+        if s.kind == "xfer" and isinstance(ref, LaneRef) and la.data2 is not None:
+            d2 = lines[la.data2.index]
+            if clk is None:
+                err("S-lane", s, f"data2 line {d2.name!r} on an unclocked lane (duplex needs a clock)")
+            # one party per data line: the step has a party owner and data2 belongs to the other
+            if (s.owner == SHARED or d2.owner not in (Owner.P0, Owner.P1)
+                    or d2.owner == _owner(desc, s.owner)):
+                err("R1-owner", s, f"duplex: the step needs a party owner, and data2 line {d2.name!r} "
+                                   f"the other party")
+            if a["n"] > 8:
+                err("S-range", s, f"duplex XFER of {a['n']} bits: dst packs both lines, so n <= 8")
         if s.kind == "xfer" and clk is None and a["abort"] and not a["check"]:
             err("S-flags", s, "abort on an unclocked xfer needs check: an out-of-window edge is its "
                               "only fatal failure")

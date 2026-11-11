@@ -146,6 +146,8 @@ class _Step:
     chk: bool = False
     abort: bool = False
     od: bool = False  # an XFER whose data line is open-drain: its owner reads the bits back
+    d2_owner: Role | None = None  # duplex: the party that drives data2 (isa §4.3)
+    ldelay: int = 0
 
     def does(self, r: Role) -> bool:
         return r != Role.MON and (self.owner == Owner.SHARED or int(self.owner) == int(r))
@@ -156,6 +158,15 @@ class _Step:
     @property
     def owner_role(self) -> Role | None:
         return Role(int(self.owner)) if self.owner in (Owner.P0, Owner.P1) else None
+
+    @property
+    def data_owners(self) -> set[Role]:
+        """The parties that drive a data line of the step: data's owner, and data2's."""
+        return {r for r in (self.owner_role, self.d2_owner) if r is not None}
+
+    def drives_all(self, r: Role) -> bool:
+        """r drives every data line of the step, so it follows none."""
+        return self.does(r) and self.d2_owner is None
 
 
 def _steps(low: Lowered) -> dict[int, _Step]:
@@ -172,7 +183,10 @@ def _steps(low: Lowered) -> dict[int, _Step]:
             lane = img.lanes[ins.line]
             kw["od"] = img.lines[lane.data].kind == "od"
             if lane.clk is not None:
-                kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)))
+                kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)),
+                          ldelay=lane.ldelay)
+                if lane.data2 is not None and img.lines[lane.data2].owner in (Owner.P0, Owner.P1):
+                    kw["d2_owner"] = Role(int(img.lines[lane.data2].owner))
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
     return out
 
@@ -193,7 +207,8 @@ def completion(s: _Step, r: Role) -> tuple[int, int]:
         c = -nom + nom // 2 + E
         return c, c
     if s.is_clk_owner(r):
-        c = 0 if s.does(r) else (max(0, E - nom) if s.cpha == 0 else E)
+        # it completes at its last edge, or at its last sample if it follows a data line
+        c = 0 if s.drives_all(r) else (max(0, E - nom) if s.cpha == 0 else E)
         return c, c
     return E, E
 
@@ -319,9 +334,13 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T2-window", pc, f"clock-phase window [{p.min},{p.max}] does not contain {H}±{m}")
             if H - drift(ppm, H) < 2:
                 diags.add("T3-latency", pc, f"half period {H} too short for a clock follower")
-            if s.owner_role is not None and s.owner_role != s.clk_owner and H < E + 1 + drift(ppm, 2 * H):
-                diags.add("T3-latency", pc, f"half period {H} < EDGE_LAT + 1 + drift: a data owner that "
-                                            f"follows the clock cannot launch in time")
+            if s.ldelay and s.ldelay > H - E - 2:
+                diags.add("T4-profile", pc, f"ldelay {s.ldelay} > H - EDGE_LAT - 2 = {H - E - 2}")
+            for o in sorted(s.data_owners - {s.clk_owner}):
+                if H < E + 1 + s.ldelay + drift(ppm, 2 * H):
+                    diags.add("T3-latency", pc, f"half period {H} < EDGE_LAT + 1 + ldelay {s.ldelay} + drift: "
+                                                f"{o.name} owns a data line, follows the clock and cannot "
+                                                f"launch in time")
 
     # an abort restarts only the roles that fail: they must re-sync on the other party's next event
     aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}
@@ -408,7 +427,8 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
                                                    f"timed step must be one it owns that makes the others "
                                                    f"wait (an unbounded COND it does, or an unbounded "
                                                    f"clocked XFER it clocks)")
-            elif ins.op == Op.XFER and steps[pc].does(r) and unpack_xfer(ins.operand)[1] == Src.FIFO:
+            elif (ins.op == Op.XFER and (steps[pc].does(r) or r == steps[pc].d2_owner)
+                  and unpack_xfer(ins.operand)[1] == Src.FIFO):  # it drives a data line from TX
                 s = steps[pc]
                 if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r):
                     diags.add("T5-stall", pc, f"{r.name} owns this src = FIFO XFER and waits here while "
@@ -450,11 +470,25 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             if not s.is_clk_owner(r) and st[r][1] + dr > first_obs:
                 diags.add("T5-watch", pc, f"{r.name} starts at {st[r][1]}, after the first clock edge "
                                           f"is visible at {first_obs}")
-        if o != s.clk_owner and s.cpha == 0:
-            # bit 0 is launched when the data owner starts the step
-            if p.nom < o_hi + 1 + drift(ppm, amax + p.nom):
-                diags.add("T3-latency", pc, f"data owner starts at {o_hi}; bit 0 is not valid before the "
-                                            f"first capture edge at {p.nom}")
+        for d in sorted(s.data_owners - {s.clk_owner}):
+            # with cpha 0 bit 0 is launched when the data owner starts the step
+            if s.cpha == 0 and d in st and p.nom < st[d][1] + 1 + drift(ppm, amax + p.nom):
+                diags.add("T3-latency", pc, f"data owner {d.name} starts at {st[d][1]}; bit 0 is not valid "
+                                            f"before the first capture edge at {p.nom}")
+        if p.max != INF:
+            # A bounded clock follower counts its timeout from its own start, then from each edge
+            # (isa §4.1). The clock owner re-bases to its start (cpha 0) or start - H (cpha 1), so
+            # its first edge is at max(0, start) + H or max(H, start), seen EDGE_LAT later.
+            c_hi = st[s.clk_owner][1] if s.clk_owner in st else 0
+            first = (max(0, c_hi) + p.nom if s.cpha == 0 else max(p.nom, c_hi)) + E
+            for r in st:
+                if not s.is_clk_owner(r) and first + dr - st[r][0] > p.max + Q:
+                    diags.add("T3-latency", pc, f"{r.name} may start at {st[r][0]} and time out: the first "
+                                                f"clock edge may be visible only at {first} (drift {dr}), "
+                                                f"past max {p.max} + QUANT after it")
+            if p.nom + drift(ppm, p.nom) > p.max + Q:
+                diags.add("T3-latency", pc, f"a clock phase of {p.nom} plus drift outlasts max {p.max} + "
+                                            f"QUANT: a bounded clock follower would time out")
         return
     if o_hi > ISSUE:
         diags.add("T5-overrun", pc, f"owner starts at {o_hi}, more than ISSUE after the step start")
