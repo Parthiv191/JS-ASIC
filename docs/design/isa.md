@@ -11,7 +11,9 @@ Tags: **[P]** Proposed, **[O]** Open. Everything else is Decided.
 `BR ROLE`, registers across RUN (§1), start-up drives (§2), `evt` and `RAW EVT`, the 24-bit clamp
 (§4.1), an OD owner's readback (§4.3), the FIFO depths with OVERFLOW (§4.9) and the stall re-base
 (§4.1) and clocked XFER, duplex and OD data with the let-go included (§4.3, with CLK_PHASE,
-TIMEOUT and UNDERRUN) and clock stretching, are v1. Still to come: COND START/STOP and MEAS. The model keeps fractional clocks only to stand in for external devices.
+TIMEOUT and UNDERRUN) and clock stretching, the I2C and SELECT bus detector with COND START/STOP and
+bus exits (§4.7), and COND MEAS are v1. Still to come: `gated` lines and their release on a SELECT
+STOP, and lead blocks (`R3-lead`). The model keeps fractional clocks only to stand in for external devices.
 
 ## 1. Constants and per-engine state
 
@@ -366,7 +368,8 @@ host clears it.
 
   - On confirmation (the end of cycle `c + bus_confirm`): set the flag, and its own anchor
     (`start_e` or `stop_e`) `:= c − EDGE_LAT`. The flag is visible from the next cycle.
-  - A failed confirm drops the candidate. A new candidate replaces the old one.
+  - A failed confirm drops the candidate. A new candidate replaces the old one, except in the old
+    one's confirm cycle: a window that held is confirmed first, then the new edge is a candidate.
   - `start_e` and `stop_e` take part in the 24-bit clamp. COND START anchors on `start_e`, COND
     STOP on `stop_e`.
 - **Bus exits.** During any timed step except a followed COND START/STOP (those handle their
@@ -425,7 +428,7 @@ host clears it.
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit or to `abort_pc`. `abort_pc` is not inside a block body. |
 | `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
 | `S-*` | Names resolve; fields in range; tables fit the chip's sizes; program ≤ 512; `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines |
-| `S-bus` | I2C: `bus_a` and `bus_b` are OD, and START/STOP steps are used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
+| `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 
 ## 6. Timing rules (compiler)
 
@@ -448,7 +451,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 | `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample) |
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
-| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows **or does** |
+| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows **or does**. On a bus it has ABORT only if it is a followed COND START/STOP: a bus exit leaves its flag set, so any other ABORT step there would exit again at once, forever. |
 | `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block. MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
 
 - Completion offsets relative to the step's end `tb`:

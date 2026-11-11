@@ -123,6 +123,11 @@ def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int
         return put(ins.rd, tainted)
     if ins.op == Op.POP:
         return put(ins.rd, True)
+    if ins.op == Op.COND:
+        _, meas, rd = unpack_cond(ins.operand)
+        if meas:  # isa §5 R2: COND meas taints its register
+            return put(rd, True)
+        return t
     if ins.op == Op.RAW and ins.sub in (RawOp.GET, RawOp.EVT):
         return put(ins.rd, True)
     if ins.op == Op.XFER:
@@ -152,6 +157,7 @@ class _Step:
     stretch: bool = False   # a clocked XFER on a stretch lane
     cpol: int = 0
     stretch_wait: bool = False  # a HOLD 1 / COND RISE on a stretch lane's clock: its owner waits
+    bus_wait: int = 0  # COND START/STOP: a follower completes bus_confirm + 1 after the edge is seen
     ldelay: int = 0
 
     def does(self, r: Role) -> bool:
@@ -199,7 +205,9 @@ def _steps(low: Lowered) -> dict[int, _Step]:
                         ow = img.lines[x].owner
                         od |= {Role.P0, Role.P1} if ow == Owner.SHARED else {Role(int(ow))}
                 kw["od_drivers"] = frozenset(od)
-        if ins.op == Op.COND and ins.line in stretch_clocks:
+        if ins.op == Op.COND and unpack_cond(ins.operand)[0] in (CondKind.START, CondKind.STOP):
+            kw["bus_wait"] = img.bus.confirm_cycles + 1
+        elif ins.op == Op.COND and ins.line in stretch_clocks:
             # isa §4.3: COND RISE clk waits for the release to be seen
             kw["stretch_wait"] = ins.op == Op.COND and unpack_cond(ins.operand)[0] == CondKind.RISE
         out[pc] = _Step(pc, ins.op, ins.owner, prof, **kw)
@@ -215,7 +223,7 @@ def completion(s: _Step, r: Role) -> tuple[int, int]:
     nom = s.prof.nom
     wait = E if s.stretch_wait and s.does(r) else 0  # it sees its own release EDGE_LAT later
     if s.op == Op.COND:
-        c = wait if s.does(r) else E
+        c = wait if s.does(r) else E + s.bus_wait  # START/STOP: E + bus_confirm + 1 (isa §6)
         return c, c
     if s.op == Op.HOLD or not s.clocked:
         if s.does(r) and not s.od:  # an OD owner reads back, so it finishes as a follower does
@@ -368,6 +376,7 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     # an abort restarts only the roles that fail: they must re-sync on the other party's next event
     aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}
     apc = low.image.abort_pc
+    bus_on = int(low.image.bus.kind) != 0
     for r in sorted(aborting):
         for pc in gaps(instrs, timed, apc, r):
             s = steps[pc]
@@ -375,6 +384,11 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T5-abort", pc, f"{r.name} can abort and restart at pc {apc}; the first timed "
                                           f"step it reaches there must be an unbounded COND it follows, "
                                           f"so it waits for the other party's next event")
+            elif bus_on and s.abort and not s.bus_wait:
+                # a bus exit leaves its flag set, so this step's ABORT would exit again at once
+                diags.add("T5-abort", pc, f"on a bus the first step at abort_pc may have ABORT only if "
+                                          f"it is a followed COND START/STOP: after a bus exit the flag "
+                                          f"stays set, so it would exit again, forever")
 
     _check_stalls(low, steps, timed, diags)
 

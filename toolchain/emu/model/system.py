@@ -47,6 +47,8 @@ class EngineTrace:
     cycle_tick: list[int]  # tick of every clock enable, also after HALT (the clock keeps running);
     #                         engine cycle c (1-based) ran in tick cycle_tick[c - 1]
     starts: list[tuple[int, int]] = field(default_factory=list)  # (pc, now) per instruction start
+    bus_events: list[tuple[int, str]] = field(default_factory=list)  # detector confirmations (isa §4.7)
+    evt: int = 0  # the sticky event register at the end of the run (isa §4.1)
 
     @property
     def violations(self) -> list[Event]:
@@ -154,7 +156,7 @@ class System:
                 EngineTrace(e.name, e.role, e.records, e.events, self._got[i] + e.rx, e.samples, e.branches,
                             e.halted, e.idle,
                             len(e.tx) + len(self._backlog[i]) + sum(len(p[2]) for p in self._pushes if p[1] == i),
-                            self._cycle_tick[i], e.starts)
+                            self._cycle_tick[i], e.starts, bus_events=e.bus_events, evt=e.evt)
                 for i, e in enumerate(self.engines)
             ],
             wire_edges=edges,

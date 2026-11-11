@@ -8,10 +8,10 @@ import warnings
 from dataclasses import dataclass, field
 
 from .desc import MON, SHARED, Description, LaneRef, LineRef, Step
-from .image import IDLE, Image, LaneCfg, LineCfg
+from .image import IDLE, BusCfg, Image, LaneCfg, LineCfg
 from .isa import (
     F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, NUM_LANES, NUM_LINES, NUM_PROFILES, PROG_DEPTH,
-    AluOp, BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
+    AluOp, BrCond, BusKind, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
     role_if_operand, role_mask, xfer_operand,
 )
 
@@ -214,7 +214,26 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
             debug[p] = f"{st.loc} only({','.join(sorted(st.block or ()))})"
         else:
             debug[p] = f"{st.loc} {st.kind} {_summary(st)}".rstrip()
-    image = Image(desc.name, desc.parties, words, profiles, lines, lanes, abort_pc, desc.tolerance_ppm, debug)
+    bus = BusCfg()
+    if desc.bus_cfg is not None:
+        kind, a, b, confirm = desc.bus_cfg
+        bus = BusCfg(BusKind[kind.upper()], a.index, 0 if b is None else b.index, confirm)
+        anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
+        if kind == "i2c" and (lines[a.index].kind != "od" or lines[b.index].kind != "od"):
+            err("S-bus", anchor, "an I2C bus needs OD lines for SDA (a) and SCL (b)")
+        if kind == "i2c" and a.index == b.index:
+            err("S-bus", anchor, "an I2C bus needs two lines: SDA (a) and SCL (b)")
+        if kind == "i2c" and not any(la.data.index == a.index and la.clk is not None and la.clk.index == b.index
+                                     and la.cpol == 1 and la.cpha == 1 for la in desc.lanes):
+            err("S-bus", anchor, "an I2C bus is used with a cpol 1, cpha 1 lane on (SDA, SCL)")
+        master = lines[(b if kind == "i2c" else a).index]
+        if master.owner not in (Owner.P0, Owner.P1):
+            err("S-bus", anchor, f"the bus's master line {master.name!r} needs a party owner (it alone "
+                                 f"runs no detector)")
+        if kind == "select" and lines[a.index].kind != "pp":
+            err("S-bus", anchor, "a SELECT bus needs a push-pull CS line (a)")
+    image = Image(desc.name, desc.parties, words, profiles, lines, lanes, abort_pc, desc.tolerance_ppm, debug,
+                  bus=bus)
     if not any(d.rule == "S-table" for d in diags):
         try:
             image.table_bytes()  # the bytes the host writes: every field must fit its slot
@@ -249,6 +268,17 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
             err("R3-timed-in-role", s, f"{s.kind} inside a role block")
         if s.owner is None:
             err("R1-owner", s, "timed step without an owner")
+            return
+        if s.kind == "cond" and a["kind"] in ("start", "stop"):
+            # isa §5 R1-bus, S-bus: on the bus, owned by the master line's owner (I2C: SCL, SELECT: CS)
+            if desc.bus_cfg is None:
+                err("S-bus", s, f"COND {a['kind']} needs a bus (bus_kind is NONE)")
+                return
+            kind, bus_a, bus_b = desc.bus_cfg[0], desc.bus_cfg[1], desc.bus_cfg[2]
+            master = lines[(bus_b if kind == "i2c" else bus_a).index]
+            if master.owner != _owner(desc, s.owner):
+                err("R1-bus", s, f"COND {a['kind']} is owned by {master.name!r}'s owner, "
+                                 f"{_name(desc, master.owner)!r}")
             return
         if s.kind in ("cond", "hold"):
             data = a["line"].index
@@ -294,7 +324,7 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
                                    f"the other party")
             if a["n"] > 8:
                 err("S-range", s, f"duplex XFER of {a['n']} bits: dst packs both lines, so n <= 8")
-        if s.kind == "xfer" and clk is None and a["abort"] and not a["check"]:
+        if s.kind == "xfer" and clk is None and a["abort"] and not a["check"] and desc.bus_cfg is None:
             err("S-flags", s, "abort on an unclocked xfer needs check: an out-of-window edge is its "
                               "only fatal failure")
     if s.kind == "hold" and a["level"] == 1 and any(
@@ -322,7 +352,9 @@ def _instr(desc, s: Step, a: dict, target, lane_index) -> Instr:
             (F_RESYNC if a.get("resync") else 0)
     k = s.kind
     if k == "cond":
-        return Instr(Op.COND, owner, a["line"].index, prof, operand=cond_operand(CondKind[a["kind"].upper()]),
+        meas = None if a.get("meas") is None else reg(a["meas"])
+        line = 0 if a["line"] is None else a["line"].index  # START/STOP: line field 0 (isa §3)
+        return Instr(Op.COND, owner, line, prof, operand=cond_operand(CondKind[a["kind"].upper()], meas),
                      flags=flags)
     if k == "hold":
         return Instr(Op.HOLD, owner, a["line"].index, prof, operand=a["level"], flags=flags)

@@ -15,17 +15,23 @@ from ..isa import (
     EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, MEAS_MAX, NUM_REGS, QUANT, REG_MASK, RX_DEPTH,
     SYNC_LAT,
     TIME_CLAMP, U, AluOp,
-    BrCond, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved, unpack_cond,
+    BrCond, BusKind, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved,
+    unpack_cond,
     unpack_role_if, unpack_xfer,
 )
 
 VIOLATIONS = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "LEVEL", "EDGE", "CLK_PHASE", "OVERFLOW", "UNDERRUN"})
 SATURATING = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "EDGE", "CLK_PHASE"})  # measured in cycles
-# the sticky event register's bits (isa §4.1); 0 START and 1 STOP come with the bus detector
+# the sticky event register's bits (isa §4.1); 0 START and 1 STOP are the bus flags (§4.7)
 EVT_BIT = {"TIMEOUT": 1 << 2, "LEVEL": 1 << 3, "EDGE": 1 << 3, "CLK_PHASE": 1 << 3,
            "OVERFLOW": 1 << 4, "UNDERRUN": 1 << 5}
 EVT_MASK = 0x3F
 BIG = 1 << 40  # upper edge of an accumulated window that contains an unbounded step
+START_BIT, STOP_BIT = 1 << 0, 1 << 1
+
+
+class _BusExit(Exception):
+    """A timed step with ABORT found a bus flag set when it started (isa §4.7)."""
 
 
 @dataclass(frozen=True)
@@ -87,6 +93,21 @@ class Engine:
         self.name = name or self.role.name
         self.instrs: list[Instr | None] = [_decode(w) for w in image.words]  # None: a free opcode
         self.lines = image.lines
+        # the bus detector (isa §4.7) runs in every role except the master line's owner
+        bus = image.bus
+        self._bus_kind = BusKind(bus.kind)
+        self._bus_a, self._bus_b, self._confirm = bus.a, bus.b, bus.confirm_cycles
+        if self._bus_kind == BusKind.SE0:
+            raise NotImplementedError("the SE0 bus (USB-LS, isa §4.10) is not in the model")
+        if self._bus_kind != BusKind.NONE:
+            master = self.lines[bus.b if self._bus_kind == BusKind.I2C else bus.a].owner
+            self._detects = self.role == Role.MON or int(master) != int(self.role)
+        else:
+            self._detects = False
+        self._cand: tuple[int, int, int] | None = None   # (cycle seen, flag bit, bus_a level)
+        self.start_e = self.stop_e = 0
+        self.bus_events: list[tuple[int, str]] = []     # (cycle confirmed, START/STOP)
+        self._step: Instr | None = None                   # the timed step a bus flag may exit
         # clocks the owner stretch-waits on (isa §4.3): those of lanes with `stretch`
         self._stretch_clocks = {la.clk for la in image.lanes if la.stretch and la.clk is not None}
         self.pc = 0
@@ -134,14 +155,85 @@ class Engine:
         floor = self.now - TIME_CLAMP
         self.tb = max(self.tb, floor)
         self.anchor = max(self.anchor, floor)
+        self.start_e = max(self.start_e, floor)
+        self.stop_e = max(self.stop_e, floor)
         self._pipe.insert(0, w)
         self.prev_inp = self.inp
         self.inp = self._pipe.pop()
         self.idle = False
         pre = list(self.drv) if self._letgo else None
-        next(self._proc)
+        if self._step is not None and self._exit_due(self._step):
+            self._bus_exit()  # a flag set during a timed step with ABORT (isa §4.7)
+        else:
+            try:
+                next(self._proc)
+            except _BusExit:  # at the step's start
+                self._bus_exit()
         if pre is not None:  # a let-go registered this cycle waits for a later edge
             self._track_letgo(pre)
+        if self._detects and (self._detect() or self._cand is not None):
+            self.idle = False  # a candidate being confirmed, or a flag just set, keeps the run going
+
+    def _detect(self) -> bool:
+        """The START/STOP detector (isa §4.7), at the end of the cycle, so a flag set now is
+        visible from the next cycle. A new candidate replaces the old; a failed confirm drops it.
+        True when it confirmed one this cycle."""
+        a, b, i2c = self._bus_a, self._bus_b, self._bus_kind == BusKind.I2C
+        confirmed = False
+        # the pending candidate first: a new edge in its confirm cycle doesn't undo a full window
+        if self._cand is not None and self.now > self._cand[0]:
+            holds = self.inp[b] == 1 if i2c else self.inp[a] == self._cand[2]
+            if not holds:
+                self._cand = None
+            elif self.now >= self._cand[0] + self._confirm:
+                confirmed = self._confirm_candidate()
+        new = (self.edge(a) and self.inp[b] == 1 and self.prev_inp[b] == 1) if i2c else self.edge(a)
+        if new:
+            self._cand = (self.now, START_BIT if self.inp[a] == 0 else STOP_BIT, self.inp[a])
+            if self._confirm == 0:
+                confirmed = self._confirm_candidate() or confirmed
+        return confirmed
+
+    def _confirm_candidate(self) -> bool:
+        c, bit, _ = self._cand
+        self._cand = None
+        self.evt |= bit
+        if bit == START_BIT:
+            self.start_e = c - EDGE_LAT
+        else:
+            self.stop_e = c - EDGE_LAT
+        self.bus_events.append((self.now, "START" if bit == START_BIT else "STOP"))
+        return True
+
+    def _bus_step(self, ins: Instr) -> bool:
+        """A followed COND START/STOP handles the flags itself (isa §4.2)."""
+        return (ins.op == Op.COND and unpack_cond(ins.operand)[0] in (CondKind.START, CondKind.STOP)
+                and not self.does(ins))
+
+    def _exit_due(self, ins: Instr) -> bool:
+        return bool(ins.flags & F_ABORT) and bool(self.evt & (START_BIT | STOP_BIT)) and not self._bus_step(ins)
+
+    def _bus_exit(self) -> None:
+        """A bus exit (isa §4.1, §4.7): normal, not a fault: a BUS record, no ABORT, no VIOL; the
+        flag stays set. It releases OD lines, sets tb := now and goes to abort_pc."""
+        self.log("BUS")
+        self._letgo.clear()
+        for i, ln in enumerate(self.lines):
+            if ln.kind == "od":
+                self.drv[i] = None
+        self.tb = self.now
+        self._reanchor(self.now)
+        self.pc = self.image.abort_pc
+        self._abort_at = self.now
+        self._step = None
+        if self._proc is not None:
+            self._proc.close()
+        self._proc = self._resume_after_exit()
+
+    def _resume_after_exit(self) -> Gen:
+        t, self._abort_at = self._abort_at, None
+        yield from self.wait_until(t + 1 + ((t + 1) & 1) + 2)  # as an abort (isa §4.0)
+        yield from self._loop()
 
     def edge(self, line: int) -> bool:
         return self.prev_inp[line] != self.inp[line]
@@ -192,6 +284,9 @@ class Engine:
         stalled, self._stalled = self._stalled, False
         if stalled and rebase and self.does(ins):
             self.tb = max(self.tb, self.now)
+        self._step = None if self._bus_step(ins) else ins
+        if self._step is not None and self._exit_due(ins):
+            raise _BusExit
 
     def _push_rx(self, v: int) -> None:
         """Into the RX FIFO; when it is full the word is dropped with OVERFLOW (isa §4.9)."""
@@ -237,6 +332,7 @@ class Engine:
         yield
 
     def _record(self, ins: Instr, mode: str, value: int | None = None) -> None:
+        self._step = None
         self.records.append(StepRecord(self.pc, ins.op.name, mode, value, self.now, self.tb))
 
     def _reanchor(self, at: int) -> None:
@@ -259,6 +355,7 @@ class Engine:
         """Fatal follow failure on a step with ABORT: log, release OD lines, restart the
         timeline at `now`, jump to the abort vector. The step still ends in this cycle."""
         self.log("ABORT", measured=self.pc)
+        self._step = None
         self._letgo.clear()
         for i, ln in enumerate(self.lines):
             if ln.kind == "od":
@@ -286,6 +383,9 @@ class Engine:
                     self.drv[i] = ln.idle
         yield
         yield
+        yield from self._loop()
+
+    def _loop(self) -> Gen:
         while True:
             if self.pc >= len(self.instrs):
                 yield from self._halt()
@@ -416,27 +516,36 @@ class Engine:
     # ------------------------------------------------------------------ timed steps (isa-v0 §4.1-4.3)
     def _op_cond(self, ins: Instr) -> Gen:
         p = self.image.profiles[ins.prof]
-        kind, meas, _ = unpack_cond(ins.operand)
-        if meas:
-            raise NotImplementedError(f"COND MEAS lands with the v1 model (pc {self.pc})")
-        if kind not in (CondKind.FALL, CondKind.RISE):
-            raise NotImplementedError(f"COND {kind.name} lands in Phase 4 (pc {self.pc})")
-        level = 1 if kind == CondKind.RISE else 0
+        kind, meas, rd = unpack_cond(ins.operand)
+        bus = kind in (CondKind.START, CondKind.STOP)
+        line = self._bus_a if bus else ins.line   # START = FALL on bus_a, STOP = RISE (isa §4.2)
+        level = 1 if kind in (CondKind.RISE, CondKind.STOP) else 0
+
+        def measure(m: int) -> None:  # isa §4.2: rd := min(max(m, 0), 0xFFFF)
+            if meas:
+                self.regs[rd] = min(max(m, 0), 0xFFFF)
+
         self._step_start(ins)
+        if bus and not self.does(ins):
+            yield from self._follow_bus(ins, p, kind, measure)
+            return
         if self.does(ins):
             planned = self.tb + p.nom
             yield from self.wait_until(planned)
             if p.bounded:
                 self._late(planned, slot0=p.nom == 0)
-            self.drive(ins.line, level)
+            self.drive(line, level)
             act = self.now
-            if level == 1 and ins.line in self._stretch_clocks:
+            if level == 1 and line in self._stretch_clocks:
                 # timed from tb, as its followers time the edge (isa §4.2)
-                e = yield from self._await_release(ins.line, act, p, ref=self.tb)
+                e = yield from self._await_release(line, act, p, ref=self.tb)
                 if e is None:
+                    if not ins.flags & F_ABORT:
+                        measure(0xFFFF)  # a TIMEOUT writes 0xFFFF (isa §4.2)
                     yield from self._stretch_timeout(ins)
                     return
                 act = max(act, e)  # the edge is when the clock really rose
+            measure(act - self.tb)
             self.tb = act
             self._reanchor(act)
             self._record(ins, "do")
@@ -449,6 +558,7 @@ class Engine:
                 m = e - self.tb
                 if p.min > 0 and m < p.min - QUANT:
                     self.log("EARLY", measured=m, lo=p.min, hi=p.max)
+                measure(m)
                 self.tb = e
                 self._reanchor(e)
                 break
@@ -458,11 +568,49 @@ class Engine:
                     self._abort()
                     yield
                     return
+                measure(0xFFFF)
                 self.to = True
                 self.tb += p.nom
                 self._reanchor(self.tb)
                 break
             self.idle = not p.bounded  # waiting forever on the other party
+            yield
+        self._record(ins, "follow")
+        self.pc += 1
+        yield
+
+    def _follow_bus(self, ins: Instr, p, kind: CondKind, measure) -> Gen:
+        """A followed COND START/STOP (isa §4.2): completes when its flag is set, also before the
+        step. m = start_e - tb (or stop_e), the EARLY check, then tb := that anchor. START and STOP
+        each clear both flags. The timeout check uses now - EDGE_LAT - bus_confirm. A followed
+        START ignores STOP; a followed STOP that sees START is a bus event: a bus exit with ABORT,
+        otherwise it keeps waiting."""
+        want = START_BIT if kind == CondKind.START else STOP_BIT
+        while True:
+            if self.evt & want:
+                anchor = self.start_e if kind == CondKind.START else self.stop_e
+                m = anchor - self.tb
+                if p.min > 0 and m < p.min - QUANT:
+                    self.log("EARLY", measured=m, lo=p.min, hi=p.max)
+                measure(m)
+                self.evt &= ~(START_BIT | STOP_BIT)
+                self.tb = anchor
+                self._reanchor(anchor)
+                break
+            if kind == CondKind.STOP and self.evt & START_BIT and ins.flags & F_ABORT:
+                raise _BusExit  # a bus event (isa §4.2); cycle() makes the exit
+            if p.bounded and self.now - EDGE_LAT - self._confirm > self.tb + p.max + QUANT:
+                self.log("TIMEOUT", measured=self.now - EDGE_LAT - self._confirm - self.tb, lo=p.min, hi=p.max)
+                if ins.flags & F_ABORT:
+                    self._abort()
+                    yield
+                    return
+                measure(0xFFFF)
+                self.to = True
+                self.tb += p.nom
+                self._reanchor(self.tb)
+                break
+            self.idle = not p.bounded
             yield
         self._record(ins, "follow")
         self.pc += 1
