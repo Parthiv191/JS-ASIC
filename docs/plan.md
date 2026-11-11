@@ -44,9 +44,9 @@ submit if a later round fails.
 | D8 | capture log, DBG_HALT and readback | devOps | D7 | Dec 9* | Not started |
 | D9 | area and timing verdict at engine 1's harden; sign-off clock 50 or 40 MHz | devOps | D7 | Dec 6* | Not started |
 | D10 | fuzzer model (`toolchain/emu/fuzz/`) and the baseline comparison | devOps | V7 | Dec 12* | **Not started** |
-| S1 | `challenge.md`, `plan.md` | supervisor | — | Nov 10 | This PR |
+| S1 | `challenge.md`, `plan.md` | supervisor | — | Nov 10 | Done (#20) |
 | S2 | `info.md` and `info.yaml` pinout to architecture §8 | supervisor | D3 | Nov 13* | Not started |
-| S3 | `writeup.md` skeleton; `demo.md` for the FPGA demo | supervisor | — | Nov 20* | Not started |
+| S3 | `writeup.md` skeleton; `demo.md` for the FPGA demo | supervisor | — | Nov 20* | Skeletons in review |
 | S4 | M1 evidence and the `m1-first-chip` tag | supervisor | V4b, D6 | Nov 29 | — |
 | S5 | Dec 15 gate report: met or not, with evidence and the cut order | supervisor | V6, D10 | Dec 14 | — |
 
