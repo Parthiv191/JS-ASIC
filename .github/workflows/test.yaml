@@ -13,9 +13,17 @@ jobs:
         with:
           submodules: recursive
 
+      # apt mirrors have had DNS outages (.github/ci-failures.md): retry fetches machine-wide,
+      # then wait out a short outage before anything installs
+      - name: Make apt retry
+        shell: bash
+        run: |
+          echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-retries
+          for i in 1 2 3 4 5 6; do sudo apt-get update && break; echo "apt-get update failed ($i), retrying"; sleep 30; done
+
       - name: Install iverilog
         shell: bash
-        run: sudo apt-get update && sudo apt-get install -y iverilog
+        run: sudo apt-get install -y iverilog
 
       # Set Python up and install cocotb
       - name: Setup python
