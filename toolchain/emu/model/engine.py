@@ -149,13 +149,14 @@ class Engine:
     def does(self, ins: Instr) -> bool:
         return self.role != Role.MON and (ins.owner == Owner.SHARED or int(ins.owner) == int(self.role))
 
-    def _step_start(self, ins: Instr) -> None:
+    def _step_start(self, ins: Instr, rebase: bool = True) -> None:
         """A timed step starts: clear `to`, and end any stall. If the owner stalled since its last
         timed step, an owned step starts on its own time: tb := max(tb, start) (the stall
-        re-base, isa §4.1). A followed step takes its timing from the other party instead."""
+        re-base, isa §4.1). A followed step takes its timing from the other party instead, and a
+        clock owner's clocked XFER re-bases by its own rule (`rebase` False)."""
         self.to = False
         stalled, self._stalled = self._stalled, False
-        if stalled and self.does(ins):
+        if stalled and rebase and self.does(ins):
             self.tb = max(self.tb, self.now)
 
     def _push_rx(self, v: int) -> None:
@@ -544,11 +545,11 @@ class Engine:
         if lane.data2 is not None or lane.stretch or self.lines[lane.data].kind == "od":
             raise NotImplementedError(f"duplex, stretch and OD data on a clocked lane land in V3b "
                                       f"part 2 (pc {self.pc})")
-        self._step_start(ins)
         H, cpol, cpha, ld = p.nom, lane.cpol, lane.cpha, lane.ldelay
         data, clk, mask = lane.data, lane.clk, (1 << n) - 1
         own_clk = self.role != Role.MON and int(self.lines[clk].owner) == int(self.role)
         do = self.does(ins)
+        self._step_start(ins, rebase=not own_clk)
 
         def pos(k: int) -> int:  # value bit carried by bit slot k
             return n - 1 - k if msb else k
@@ -609,7 +610,9 @@ class Engine:
             last: int | None = None     # detect cycle of this step's last edge
             ref = start                 # the timeout counts from the start, then from each edge
             while True:
-                if self.edge(clk):
+                # counting starts at the first leading edge: an edge to cpol before it is the
+                # clock settling to its idle level (an idle-0 clock's start-up drive, isa §2)
+                if self.edge(clk) and (nlead or self.inp[clk] != cpol):
                     if (last is not None and ins.flags & F_CHK and self.now - last < p.min - QUANT):
                         self.log("CLK_PHASE", measured=self.now - last, lo=p.min, hi=p.max)
                         if ins.flags & F_ABORT:
@@ -619,12 +622,12 @@ class Engine:
                     last = ref = self.now
                     e = self.now - EDGE_LAT
                     leading = self.inp[clk] != cpol
-                    if leading == (cpha == 0) and not do and kc < n:  # a capture edge
+                    if leading == (cpha == 0) and not do:  # a capture edge
                         self.samples.append(Sample(self.pc, data, self.now, H))
                         got |= self.inp[data] << pos(kc)
                         kc += 1
                     if leading:
-                        if do and cpha == 1 and nlead < n:
+                        if do and cpha == 1:
                             pending.append((max(self.now, e + ld), nlead))
                         nlead += 1
                     else:

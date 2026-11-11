@@ -175,7 +175,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     before the first edge).
   - **Stall re-base.** If an owned step starts late because its owner stalled (`POP`, or a
     `src = FIFO` wait), it sets `tb := max(tb, start)` and logs nothing. `T5-stall` (§6) keeps
-    the followers safe.
+    the followers safe. A clock owner's clocked XFER re-bases by its own rule (above) instead,
+    whoever owns the data.
     - A POP stall lasts until the next timed step: an owned one re-bases to its start; a followed
       one takes its timing from the other party, and the stall re-bases nothing later.
     - A `src = FIFO` step's start is the cycle it takes the word.
@@ -281,7 +282,9 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     edge.
   - The clock owner (not MON) makes the edges, then `tb := tb + 2nH`. Every other engine tells
     the edges apart by level: a leading edge is the clock going to `1−cpol` (`S-lane` makes the
-    clock idle at `cpol`).
+    clock idle at `cpol`). A clock follower counts from its first leading edge: an edge to `cpol`
+    before it is the clock settling to its idle level (an idle-0 clock's start-up drive, §2)
+    and is ignored.
   - **Launch:** a data owner that owns the clock launches at the edge time + `ldelay`. Any other
     data owner launches at `max(detect, e + ldelay)`, where `e = detect − EDGE_LAT`. It never
     logs OVERRUN, its `cpha = 0` bit 0 included: T3 bounds how late that can be.
@@ -426,7 +429,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 |---|---|
 | `T1-sample` | Follower sample of slot `k`: `ceil(d·(A + (k+1)·P)) + QUANT + ISSUE < P//2` |
 | `T2-window` | A bounded COND, and the accumulated CHK windows: `min ≤ nom − ceil(d·(A + nom)) − QUANT` (COND: only if `min > 0`) and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. The anchor rule: a CHK unclocked XFER at `A = 0` is rejected; drop `check` or put a timed step first. |
-| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. |
+| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. A bounded clock follower: the first edge, seen at `F = (cpha 0: max(0, L_clk) + H; cpha 1: max(H, L_clk)) + EDGE_LAT`, needs `F + ceil(d·(A + H)) − L_lo ≤ max + QUANT`, where `L_clk` is the clock owner's latest start and `L_lo` the follower's earliest; and `H + ceil(d·H) ≤ max + QUANT`. |
 | `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. Stretch lanes: `H ≥ EDGE_LAT + 2`. `ldelay ≤ H − EDGE_LAT − 2`. |
 | `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample) |
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |

@@ -8,23 +8,23 @@ from dataclasses import replace
 
 import pytest
 
-from emu.analysis import _Step, completion
-from emu.compiler import CompileError, compile_desc
-from emu.image import Profile
+from emu.analysis import _steps, completion
+from emu.compiler import CompileError, compile_desc, lower
 from emu.desc import Description
-from emu.isa import EDGE_LAT, INF, QUANT, Op, Owner, Role
-from emu.model.system import Glitch
+from emu.isa import EDGE_LAT, INF, QUANT, Role
+from emu.model.system import EngineSpec, Glitch, System
 
 from simutil import kinds, run_sys
 
 H = 4
 N = 8
-VALUE = 0xB4  # 1011_0100: MSB first, the wire shows every bit
+VALUE = 0x4B  # 0100_1011: MSB first, bit 0 differs from the data line's idle 1, so every bit shows
 START = 4     # the XFER's start cycle
+XFER_PC = 1   # LI, then the XFER (when there is no head)
 
 
-def spi(cpol=0, cpha=0, data_owner="a", src="r0", dst="r1", n=N, msb=True, check=False, abort=False,
-        lo=H - 1, hi=INF, head=None, h=H, timing=False, ppm=20000):
+def spi_desc(cpol=0, cpha=0, data_owner="a", src="r0", dst="r1", n=N, msb=True, check=False,
+             abort=False, lo=H - 1, hi=INF, head=None, h=H, ppm=20000):
     """P0 (party a) owns the clock; the data line belongs to `data_owner`."""
     d = Description("spi", parties=("a", "b"), tolerance_ppm=ppm)
     sck = d.line("sck", owner="a", idle=cpol)
@@ -38,7 +38,11 @@ def spi(cpol=0, cpha=0, data_owner="a", src="r0", dst="r1", n=N, msb=True, check
     d.xfer(n, lane, owner=data_owner, prof=half, src=src, dst=dst, msb_first=msb, check=check, abort=abort)
     d.label("end")
     d.halt()
-    return compile_desc(d, check_timing=timing)
+    return d
+
+
+def spi(timing=False, **kw):
+    return compile_desc(spi_desc(**kw), check_timing=timing)
 
 
 def bits(v=VALUE, n=N):
@@ -51,40 +55,46 @@ def drive_cycles(wire_edges):
     return [t - 1 for t in wire_edges if t > 1]
 
 
+def data_drives(launch, v=VALUE):
+    """The drive cycles of the data line's edges, for bit k launched at launch[k] (idle 1)."""
+    level, out = 1, []
+    for at, b in zip(launch, bits(v)):
+        if b != level:
+            out.append(at)
+            level = b
+    return out
+
+
 def got(t, i):
     """Engine i's XFER value: dst, the wire value in every role (isa §4.3); None if it timed out."""
     (rec,) = [r for r in t.engines[i].records if r.op == "XFER"]
     return rec.value
 
 
-def clock_drives(tb, cpha, n=N):
+def clock_drives(tb, n=N):
     """isa §4.3: leading edge k at tb + (2k+1)H, trailing at tb + (2k+2)H."""
     return [tb + j * H for j in range(1, 2 * n + 1)]
 
 
-def tb_of(cpha):
+def tb_of(cpha, start=START, tb=0):
     """The clock owner's tb at the start: max(tb, start) for cpha 0, max(tb, start - H) for 1."""
-    return max(0, START) if cpha == 0 else max(0, START - H)
+    return max(tb, start) if cpha == 0 else max(tb, start - H)
 
 
+# ---------------------------------------------------------------- edges, launch, capture
 @pytest.mark.parametrize("cpol", [0, 1])
 @pytest.mark.parametrize("cpha", [0, 1])
 def test_clock_owner_edges_and_data(cpol, cpha):
     """The clock owner (also the data owner) makes 2n edges from its re-based tb; the data
     launches at bit 0 then on the launching edges; every role gets the value; tb ends at
     tb + 2nH in every role."""
-    t = run_sys(spi(cpol, cpha))
+    t = run_sys(spi(cpol=cpol, cpha=cpha))
     tb = tb_of(cpha)
     sck, dat = t.wire_edges
-    assert drive_cycles(sck) == clock_drives(tb, cpha)
+    assert drive_cycles(sck) == clock_drives(tb)
     # launch: cpha 0 bit 0 at tb, bit k on trailing edge k-1; cpha 1 bit k on leading edge k
     launch = [tb + 2 * k * H for k in range(N)] if cpha == 0 else [tb + (2 * k + 1) * H for k in range(N)]
-    level, want = 1, []  # the data line idles at 1
-    for at, b in zip(launch, bits()):
-        if b != level:
-            want.append(at)
-            level = b
-    assert drive_cycles(dat) == want
+    assert drive_cycles(dat) == data_drives(launch)
     for i in range(3):
         et = t.engines[i]
         assert not et.events, (i, et.events)
@@ -110,22 +120,29 @@ def test_data_from_the_clock_follower(cpha):
     assert [s.cycle for s in t.engines[2].samples] == [c + EDGE_LAT for c in capture]
     # P1 launches when it detects the launching edge: cpha 0 bit 0 at its start
     launch = ([START] + [x + EDGE_LAT for x in trail[:-1]]) if cpha == 0 else [x + EDGE_LAT for x in lead]
-    level, want = 1, []
-    for at, b in zip(launch, bits()):
-        if b != level:
-            want.append(at)
-            level = b
-    assert drive_cycles(t.wire_edges[1]) == want
+    assert drive_cycles(t.wire_edges[1]) == data_drives(launch)
+
+
+@pytest.mark.parametrize("cpha", [0, 1])
+@pytest.mark.parametrize("data_owner", ["a", "b"])
+def test_followers_ignore_the_clock_settling_to_cpol(cpha, data_owner):
+    """The idle-0 clock's start-up drive (isa §2) pulls it from the pull-up's 1 to 0. With the
+    clock owner one tick behind, P1 and MON see that edge in their XFER's start cycle. It goes
+    to cpol, so it isn't a leading edge, and a clock follower counts from its first leading edge
+    (isa §4.3)."""
+    t = run_sys(spi(cpha=cpha, data_owner=data_owner), phases={0: 1})
+    assert all(not t.engines[i].events and got(t, i) == VALUE for i in range(3))
 
 
 @pytest.mark.parametrize("cpha", [0, 1])
 @pytest.mark.parametrize("data_owner", ["a", "b"])
 def test_completion_matches_the_compiler(cpha, data_owner):
-    """Each role completes where analysis.completion() says, relative to the step's end tb, so
-    the compiler's L and the model agree (the rule cross-check, verification.md)."""
-    t = run_sys(spi(cpha=cpha, data_owner=data_owner))
-    owner = Owner.P0 if data_owner == "a" else Owner.P1
-    step = _Step(1, Op.XFER, owner, Profile("H", H - 1, H, INF), n=N, clocked=True, clk_owner=Role.P0, cpha=cpha)
+    """Each role completes where analysis.completion() says, relative to the step's end tb, for
+    the step the compiler extracts from the image, so the compiler's L and the model agree (the
+    rule cross-check, verification.md)."""
+    d = spi_desc(cpha=cpha, data_owner=data_owner)
+    step = _steps(lower(d))[XFER_PC]
+    t = run_sys(compile_desc(d, check_timing=False))
     for i, r in enumerate((Role.P0, Role.P1, Role.MON)):
         (rec,) = [x for x in t.engines[i].records if x.op == "XFER"]
         assert rec.cycle - rec.tb == completion(step, r)[0], r
@@ -137,47 +154,71 @@ def test_lsb_first():
     assert t.wire_edges[1] != run_sys(spi(msb=True)).wire_edges[1]
 
 
-def test_late_clock_owner_rebases_and_never_overruns():
-    """isa §4.1: a clock owner that starts late re-bases tb to its start (cpha 0) instead of
-    logging OVERRUN, and the followers follow its edges."""
+@pytest.mark.parametrize("cpha", [0, 1])
+def test_late_clock_owner_rebases_and_never_overruns(cpha):
+    """isa §4.1: a clock owner that starts late re-bases (cpha 0: tb := start; cpha 1:
+    start - H, so its first edge is in its start cycle) instead of logging OVERRUN, and the
+    followers follow its edges."""
     def head(d):
         with d.only("a"):
             d.raw_delay(20)
-    t = run_sys(spi(head=head))
+    t = run_sys(spi(cpha=cpha, head=head))
     start = START + 2 + 20  # ROLE_IF, then RAW DELAY 20
-    assert drive_cycles(t.wire_edges[0]) == clock_drives(start, 0)
+    assert drive_cycles(t.wire_edges[0]) == clock_drives(tb_of(cpha, start))
     assert all(not t.engines[i].events and got(t, i) == VALUE for i in range(3))
 
 
+@pytest.mark.parametrize("cpha", [0, 1])
 @pytest.mark.parametrize("data_owner", ["a", "b"])
-def test_ldelay_delays_the_edge_launches(data_owner):
+def test_clock_owner_rebase_ignores_a_pop_stall(cpha, data_owner):
+    """isa §4.1: a clock owner's clocked XFER re-bases by its own rule, also after a POP stall,
+    whoever owns the data. With cpha 1 the first edge is then in the start cycle."""
+    def head(d):
+        with d.only("a"):
+            d.pop("r7")
+    t = run_sys(spi(cpha=cpha, data_owner=data_owner, head=head), tx={0: [1]}, push_at=30)
+    start = next(now for pc, now in t.engines[0].starts if pc == 3)  # LI, ROLE_IF, POP, XFER
+    assert start > 30 and drive_cycles(t.wire_edges[0]) == clock_drives(tb_of(cpha, start))
+    assert all(not t.engines[i].violations and got(t, i) == VALUE for i in range(3))
+
+
+@pytest.mark.parametrize("cpha", [0, 1])
+@pytest.mark.parametrize("data_owner", ["a", "b"])
+def test_ldelay_delays_the_edge_launches(cpha, data_owner):
     """A launch triggered by an edge waits ldelay: the clock owner's at edge + ldelay, the clock
-    follower's at max(detect, e + ldelay), e = detect - EDGE_LAT = the edge's drive cycle. cpha 0
-    bit 0 has no ldelay. With ldelay 4 the clock follower's bit is still on the wire one cycle
-    before P0's capture sees it."""
-    img = spi(data_owner=data_owner)
+    follower's at max(detect, e + ldelay), e = detect - EDGE_LAT = the edge's drive cycle; with
+    ldelay 4 > EDGE_LAT both are at edge + 4. cpha 0 bit 0 has no ldelay. The bits still reach
+    P0's captures in time."""
+    img = spi(cpha=cpha, data_owner=data_owner)
     img = replace(img, lanes=[replace(img.lanes[0], ldelay=4)])
     t = run_sys(img)
     assert all(not t.engines[i].events and got(t, i) == VALUE for i in range(3))
-    tb = tb_of(0)
-    trail = [tb + (2 * k + 2) * H for k in range(N)]
-    launch = [START] + [x + 4 for x in trail[:-1]]
-    level, want = 1, []
-    for at, b in zip(launch, bits()):
-        if b != level:
-            want.append(at)
-            level = b
-    assert drive_cycles(t.wire_edges[1]) == want
+    tb = tb_of(cpha)
+    if cpha == 0:
+        bit0 = tb if data_owner == "a" else START
+        launch = [bit0] + [tb + 2 * k * H + 4 for k in range(1, N)]
+    else:
+        launch = [tb + (2 * k + 1) * H + 4 for k in range(N)]
+    assert drive_cycles(t.wire_edges[1]) == data_drives(launch)
 
 
+# ---------------------------------------------------------------- CLK_PHASE and TIMEOUT
 def test_clock_follower_clk_phase():
     """CHK: a phase shorter than min - QUANT logs CLK_PHASE; the first edge isn't checked. The
     clock owner runs at half the period, so all 2n - 1 later phases are short."""
     img = spi(check=True, lo=H, hi=H + 2)
-    fast = img.with_profiles({"H": 0.5})
-    t = run_sys(img, images={0: fast})
+    t = run_sys(img, images={0: img.with_profiles({"H": 0.5})})
     assert kinds(t, 1).count("CLK_PHASE") == 2 * N - 1 and kinds(t, 2).count("CLK_PHASE") == 2 * N - 1
     assert "CLK_PHASE" not in kinds(t, 0)  # the clock owner doesn't check its own clock
+
+
+def test_clock_follower_clk_phase_boundary():
+    """A phase of exactly min - QUANT is in the window: the clock owner's half period is 3 and
+    the followers' min is 4."""
+    img = spi(check=True, lo=H, hi=H + 2)
+    fast = replace(img, profiles=[img.profiles[0], replace(img.profiles[1], nom=3)])
+    t = run_sys(img, images={0: fast})
+    assert not any(t.engines[i].events for i in range(3))
 
 
 def test_clock_follower_first_phase_is_not_checked():
@@ -201,13 +242,16 @@ def test_clock_follower_clk_phase_with_abort():
 
 def test_clock_follower_timeout_from_the_step_start():
     """No clock: a bounded follower times out when no edge has come for max + QUANT cycles since
-    its start. Without ABORT: to := 1, tb := now, no dst, and the step ends."""
-    t = run_sys(spi(hi=H + 2), roles=(Role.P1,))
+    its start. Without ABORT: to := 1, tb := now, a re-anchor at now, no dst, and the step
+    ends."""
+    s = System([EngineSpec(spi(hi=H + 2), Role.P1)])
+    t = s.run(1000)
     et = t.engines[0]
     (ev,) = et.events
     assert ev.kind == "TIMEOUT" and ev.cycle == START + (H + 2) + QUANT + 1
     (rec,) = [r for r in et.records if r.op == "XFER"]
     assert rec.tb == ev.cycle and rec.value is None and et.halted
+    assert s.engines[0].anchor == ev.cycle and s.engines[0].acc == (0, 0, 0)
 
 
 def test_clock_follower_timeout_after_an_edge():
@@ -221,19 +265,26 @@ def test_clock_follower_timeout_after_an_edge():
     assert ev.cycle == lead0 + EDGE_LAT + (H + 2) + QUANT + 1
 
 
+def test_clock_follower_edge_wins_over_timeout():
+    """isa §4.1: an edge and a timeout in the same cycle, the edge wins. P1 starts at 4 and sees
+    the first edge at 4 + H + EDGE_LAT = 11, the cycle its max of 5 runs out (11 - 4 > 5 + 1)."""
+    t = run_sys(spi(hi=5))
+    assert not any(t.engines[i].events for i in range(3)) and got(t, 1) == VALUE
+
+
 def test_clock_follower_timeout_with_abort():
     t = run_sys(spi(hi=H + 2, abort=True), roles=(Role.P1,))
     assert kinds(t, 0) == ["TIMEOUT", "ABORT"]
 
 
+# ---------------------------------------------------------------- FIFO
 def test_underrun_sends_ones_and_keeps_the_fifo():
-    """isa §4.3: a data owner that doesn't own the clock, with src = FIFO empty, sends ONES, logs
-    UNDERRUN and consumes nothing."""
-    t = run_sys(spi(data_owner="b", src="fifo"))
-    assert kinds(t, 1) == ["UNDERRUN"] and got(t, 0) == 0xFF
-    assert t.engines[1].tx_left == 0
+    """isa §4.3: a data owner that doesn't own the clock, with src = FIFO empty at its start,
+    sends ONES, logs UNDERRUN and consumes nothing: a word that arrives during the step stays."""
+    t = run_sys(spi(data_owner="b", src="fifo"), tx={1: [VALUE]}, push_at=6)
+    assert kinds(t, 1) == ["UNDERRUN"] and got(t, 0) == 0xFF and t.engines[1].tx_left == 1
     t2 = run_sys(spi(data_owner="b", src="fifo"), tx={1: [VALUE]})
-    assert not t2.engines[1].events and got(t2, 0) == VALUE
+    assert not t2.engines[1].events and got(t2, 0) == VALUE and t2.engines[1].tx_left == 0
 
 
 def test_clock_owner_waits_for_fifo_data():
@@ -241,10 +292,11 @@ def test_clock_owner_waits_for_fifo_data():
     it takes the word (cpha 0: tb := that cycle). Nobody logs anything."""
     t = run_sys(spi(src="fifo"), tx={0: [VALUE]}, push_at=30)
     took = 30  # the host's word is in TX from tick 30, and P0 runs at phase 0
-    assert drive_cycles(t.wire_edges[0]) == clock_drives(took, 0)
+    assert drive_cycles(t.wire_edges[0]) == clock_drives(took)
     assert all(not t.engines[i].events and got(t, i) == VALUE for i in range(3))
 
 
+# ---------------------------------------------------------------- compiler rules
 def test_clk_idle_must_equal_cpol():
     """S-lane (isa §5): the engines tell a leading edge by the level the clock goes to, so a
     clock that idles at the other level would shift every bit."""
@@ -257,6 +309,59 @@ def test_clk_idle_must_equal_cpol():
         compile_desc(d, check_timing=False)
 
 
+@pytest.mark.parametrize("cpha", [0, 1])
+@pytest.mark.parametrize("data_owner", ["a", "b"])
+@pytest.mark.parametrize("bounded", [False, True])
+@pytest.mark.parametrize("slow,phase", [(None, 0), (0, 0), (0, 1), (1, 0), (1, 3)])
+def test_accepted_spi_runs_clean_at_2pct(cpha, data_owner, bounded, slow, phase):
+    """The rule cross-check (verification.md): a clocked XFER the compiler accepts at 2% (T2, T3,
+    T4, T5-watch) runs clean on the model with the clock owner or the others 2% slow and out of
+    phase. Bounded: CHK and max = 12, near T3's first-edge limit."""
+    kw = dict(check=True, lo=6, hi=12) if bounded else dict(lo=7)
+    img = spi(cpha=cpha, data_owner=data_owner, h=8, timing=True, **kw)
+    on = {None: (), 0: (0,), 1: (1, 2)}[slow]
+    t = run_sys(img, clocks={i: (49, 50) for i in on}, phases={i: phase for i in on})
+    for i in range(3):
+        assert not t.engines[i].violations and got(t, i) == VALUE, (i, t.engines[i].events)
+
+
+@pytest.mark.parametrize("cpha", [0, 1])
+def test_t3_rejects_a_follower_that_times_out_before_the_first_edge(cpha):
+    """T3: a bounded clock follower counts from its own start, so the first edge must come within
+    max + QUANT of it. P0 starts 12 cycles late and re-bases; P1 times out on the model, and the
+    compiler rejects the program."""
+    def head(d):
+        with d.only("a"):
+            d.raw_delay(12)
+    kw = dict(cpha=cpha, h=8, lo=6, hi=10, head=head)
+    assert "TIMEOUT" in kinds(run_sys(spi(**kw)), 1)
+    with pytest.raises(CompileError, match="T3"):
+        spi(timing=True, **kw)
+
+
+def test_t3_rejects_a_max_below_the_phase():
+    """A bounded clock follower without CHK still needs every phase within max + QUANT."""
+    with pytest.raises(CompileError, match="T3"):
+        spi(h=8, lo=6, hi=6, timing=True)
+
+
+@pytest.mark.parametrize("h", [2, 4])
+def test_t3_rejects_a_short_half_period(h):
+    """T3: a data owner that isn't the clock owner needs H >= EDGE_LAT + 1 + ldelay + ceil(d*2H),
+    so 5 at 2%. It launches when it sees the launching edge, EDGE_LAT after it, and the clock
+    owner's capture sees the wire 1 cycle after the capture edge. So H >= EDGE_LAT is enough at
+    equal clocks: H = 2 misreads, while H = 4 still reads right with P1 2% slow (T3 keeps a
+    cycle plus the drift as margin)."""
+    with pytest.raises(CompileError, match="T3"):
+        spi(data_owner="b", h=h, lo=h - 1, timing=True)
+    img = spi(data_owner="b", h=h, lo=h - 1)
+    assert (got(run_sys(img), 0) == VALUE) == (h >= EDGE_LAT)
+    if h == 4:
+        for phase in range(4):
+            t = run_sys(img, clocks={1: (49, 50), 2: (49, 50)}, phases={1: phase, 2: phase})
+            assert got(t, 0) == VALUE
+
+
 @pytest.mark.parametrize("what", ["data2", "stretch", "od"])
 def test_part_2_features_fail_loudly(what):
     img = spi()
@@ -267,30 +372,5 @@ def test_part_2_features_fail_loudly(what):
         img = replace(img, lanes=[replace(lane, stretch=1)])
     else:
         img = replace(img, lines=[img.lines[0], replace(img.lines[1], kind="od")])
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="part 2"):
         run_sys(img)
-
-
-@pytest.mark.parametrize("cpha", [0, 1])
-@pytest.mark.parametrize("data_owner", ["a", "b"])
-@pytest.mark.parametrize("clock,phase", [((1, 1), 0), ((49, 50), 0), ((49, 50), 1), ((49, 50), 3)])
-def test_accepted_spi_runs_clean_at_2pct(cpha, data_owner, clock, phase):
-    """The rule cross-check (verification.md): a clocked XFER the compiler accepts at 2% (T3,
-    T4, T5-watch) runs clean on the model with the peers 2% slow and out of phase."""
-    img = spi(cpha=cpha, data_owner=data_owner, h=8, lo=7, timing=True)
-    t = run_sys(img, clocks={1: clock, 2: clock}, phases={1: phase, 2: phase})
-    for i in range(3):
-        assert not t.engines[i].violations and got(t, i) == VALUE, (i, t.engines[i].events)
-
-
-@pytest.mark.parametrize("h", [2, 4])
-def test_t3_rejects_a_short_half_period(h):
-    """T3: a data owner that isn't the clock owner needs H >= EDGE_LAT + 1 + ldelay + ceil(d*2H),
-    so 5 at 2%. It launches when it sees the launching edge, EDGE_LAT after it, and the clock
-    owner's capture sees the wire 1 cycle after the capture edge. So H >= EDGE_LAT is enough at
-    equal clocks: H = 2 misreads, and H = 3 and 4 still read right at 2% (T3 keeps 1 cycle plus
-    the drift as margin)."""
-    with pytest.raises(CompileError, match="T3"):
-        spi(data_owner="b", h=h, lo=h - 1, timing=True)
-    t = run_sys(spi(data_owner="b", h=h, lo=h - 1))
-    assert (got(t, 0) == VALUE) == (h >= EDGE_LAT)
