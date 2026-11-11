@@ -5,10 +5,10 @@
 // Built: NOP, LI, ALU, BR, ROLE_IF, MARK, RAW, HALT, and the timed steps COND
 // FALL/RISE (do, follow, MEAS), HOLD (do, follow), XFER on unclocked lanes
 // (do, follow, CHK, RESYNC, MSB; OD owners read their bits back) and on
-// clocked lanes with one data line (clock owner and follower, CPOL/CPHA,
-// ldelay, CLK_PHASE, TIMEOUT), with ABORT into abort_pc; PUSH/POP and src/dst
-// FIFO. Not built yet, and halting as ILLEGAL until they are: COND START/STOP
-// (bus detector), duplex and stretch lanes, CRC, FZ and PROF.
+// clocked lanes (clock owner and follower, CPOL/CPHA, ldelay, CLK_PHASE,
+// TIMEOUT, duplex, the OD let-go, clock stretching), with ABORT into abort_pc;
+// PUSH/POP and src/dst FIFO. Not built yet, and halting as ILLEGAL until they
+// are: COND START/STOP (bus detector), CRC, FZ and PROF.
 //
 // Fetch and issue (isa §4.0): own cycles are those with ph == E. An
 // instruction starts only on an own cycle, presents its successor's address in
@@ -156,6 +156,13 @@ module engine #(
   // nrzi[14] · b2: ldelay[19:16] (architecture §4)
   wire        lane_ck = lane[6];   // has_clk
   wire [2:0]  lane_cl = lane[5:3];
+  wire [2:0]  lane_d2 = lane[11:9];
+  wire        lane_dx = lane[6] & lane[12];   // duplex: a clocked lane with data2
+  // COND on a line that is a stretch lane's clock (isa §4.3): RISE done there waits for the release
+  wire        cond_sc = (lane_cfg[6] & lane_cfg[13] & (lane_cfg[5:3] == t_line[2:0])) |
+                        (lane_cfg[30] & lane_cfg[37] & (lane_cfg[29:27] == t_line[2:0])) |
+                        (lane_cfg[54] & lane_cfg[61] & (lane_cfg[53:51] == t_line[2:0])) |
+                        (lane_cfg[78] & lane_cfg[85] & (lane_cfg[77:75] == t_line[2:0]));
   // the clock owner: the clk line's owner party; SHARED and MON own no clock (isa §4.3)
   wire        own_ck  = (role != 2'd2) && (line_cfg[{lane_cl, 3'd4} +: 2] == role);
   wire [3:0]  x_n1    = operand[3:0];   // n - 1
@@ -165,11 +172,11 @@ module engine #(
   wire timed   = (op == OP_COND) | (op == OP_HOLD) | (op == OP_XFER);
   // Reserved codes halt as ILLEGAL in the start cycle (isa §3): step owner 3, profile >= 8,
   // line >= 8, lane >= 4, src 4-7, dst 1 and 3-7, ALU sub 10-15, BR 5-15, RAW 6-15.
-  // COND START/STOP, duplex and stretch lanes, and src FZ are defined but not built yet.
+  // COND START/STOP and src FZ are defined but not built yet.
   wire t_ok    = (t_prof[3] == 1'b0) && (t_owner != 2'd3) &&
                  (op == OP_COND ? (t_line[3] == 1'b0 && operand[1] == 1'b0) :
                   op == OP_HOLD ? (t_line[3] == 1'b0) :
-                  (t_line[3:2] == 2'b00 && !(lane_ck && (lane[12] || lane[13])) &&
+                  (t_line[3:2] == 2'b00 &&
                    (x_src == 4'd0 || x_src == 4'd1 || x_src == SRC_FIFO || x_src[3]) &&
                    (x_dst == 4'd0 || x_dst == DST_FIFO || x_dst[3])));
   wire untimed = (op == OP_NOP || op == OP_LI || (op == OP_ALU && sub <= 4'd9) ||
@@ -304,6 +311,8 @@ module engine #(
   reg  [4:0]  s_j;                     // bits sampled (to n = 16 on a clocked lane)
   // clocked lane (isa §4.3): the clock line, its mode, the launch delay, and the step's state
   reg         s_ck, s_own, s_cod, s_cpol, s_cpha, s_lp, s_nodst;
+  reg         s_dx, s_mine2, s_od2, s_str, s_strc, s_wt, s_dv;   // duplex; stretch; waiting; drove
+  reg  [2:0]  s_pin2, s_line2;
   reg  [2:0]  s_cpin, s_sr;            // clock pin; the clock owner's capture -> sample delay
   reg  [3:0]  s_ld, s_lcnt;            // ldelay; a pending launch's countdown
   reg  [5:0]  s_e;                     // clock edges made or seen, from the first leading edge
@@ -358,11 +367,23 @@ module engine #(
   wire [3:0]  c_lcnt  = sel ? 4'd0 : s_lcnt;
   wire [2:0]  c_sr    = sel ? 3'd0 : s_sr;
   wire [5:0]  c_e     = sel ? 6'd0 : s_e;
+  wire        c_dx    = sel ? (op == OP_XFER && lane_dx) : s_dx;
+  wire [2:0]  c_pin2  = sel ? line_cfg[{lane_d2, 3'd0} +: 3] : s_pin2;
+  wire [2:0]  c_line2 = sel ? lane_d2 : s_line2;
+  wire        c_od2   = sel ? line_cfg[{lane_d2, 3'd3}] : s_od2;
+  // data2's own owner (isa §4.3 duplex: each data line has its own owner, from the line config)
+  wire        c_mine2 = sel ? ((role != 2'd2) && (line_cfg[{lane_d2, 3'd4} +: 2] == role)) : s_mine2;
+  wire        c_str   = sel ? lane[13] : s_str;
+  wire        c_strc  = sel ? cond_sc : s_strc;
+  wire        c_wt    = sel ? 1'b0 : s_wt;
+  wire        c_dv    = sel ? 1'b0 : s_dv;
+  // an engine drives the data lines it owns: line 1 by the step owner, data2 by its line owner
+  wire        c_drv   = c_do | (c_dx & c_mine2);
   // An owned src = FIFO XFER (unclocked lane) waits for the word, checking every cycle; one
   // that waited re-bases when it takes it, tb := max(tb, now), and its bit 0 can go out in the
   // same cycle (isa §4.3). A step owned after a POP stall re-bases at its start (isa §4.1).
   wire        c_srcfifo = sel ? (x_src == SRC_FIFO) : s_srcfifo;
-  wire        x_fifo    = c_on & (c_kind == K_XFER) & c_do & c_srcfifo;
+  wire        x_fifo    = c_on & (c_kind == K_XFER) & c_drv & c_srcfifo;
   wire        x_wait    = ~c_ck | c_own;        // a data owner without the clock can't wait (isa §4.3)
   wire        fwait     = x_fifo & (sel | s_fwait) & ~tx_ne & x_wait;
   wire        take      = x_fifo & (sel | s_fwait) & tx_ne;
@@ -392,6 +413,7 @@ module engine #(
 
   wire       inp  = sync_s[c_pin];
   wire       edg  = sync_s[c_pin] ^ sync_p[c_pin];
+  wire       inp2  = sync_s[c_pin2];                       // duplex: data2
   wire       c_lvl = sync_s[c_cpin];                       // the clock line
   wire       c_edg = sync_s[c_cpin] ^ sync_p[c_cpin];
 
@@ -430,6 +452,12 @@ module engine #(
   reg                acc_clr, acc_add;
   reg                k_inc, j_inc, smp;
   reg                ck_en, ck_v;   // the clock owner's drive of the clock pin
+  reg                drv2_en;       // duplex: the drive of data2 (the same bit as data)
+  reg                sample_tr2;    // duplex: a follower sample of data2 (trace)
+  reg                wt_nx, wt_end, dv_nx;
+  reg                lg_reg, lg_now; // register an OD let-go at completion; release it this cycle
+  reg  [3:0]         lg_c0;          // its countdown (cpha 0)
+  reg  [3:0]         n4, p2k, p2j;   // n, and data2's value bit positions (pos + n)
   reg                nodst;         // a clocked timeout: no dst, no push
   reg                ck_ev, lead, launch, lp_nx;
   reg  [3:0]         lcnt_nx, ldly;
@@ -456,19 +484,59 @@ module engine #(
     m = 24'sd0; in_win = 1'b0; rxs = c_rx;
     ck_en = 1'b0; ck_v = 1'b0; nodst = 1'b0; ck_ev = 1'b0; lead = 1'b0; launch = 1'b0;
     lp_nx = c_lp; lcnt_nx = c_lcnt; e_nx = c_e; sr_nx = {c_sr[1:0], 1'b0}; ldly = 4'd0; et = 24'sd0;
+    drv2_en = 1'b0; sample_tr2 = 1'b0; wt_nx = c_wt; wt_end = 1'b0; dv_nx = c_dv;
+    lg_reg = 1'b0; lg_now = 1'b0; lg_c0 = 4'd0;
+    n4 = c_n1 + 4'd1; p2k = pos_k + n4; p2j = pos_j + n4;
 
     if (c_on) begin
       case (c_kind)
         // COND FALL/RISE (isa §4.2)
         K_COND:
           if (c_do) begin
-            if (tbx >= nom) begin            // at max(now, tb + nom)
+            if (c_wt) begin
+              // RISE on a stretch lane's clock: wait to read it 1 at c >= t + E (samp_age = now - t),
+              // then tb := max(t, c - E), which is c - E since c >= t + E: tb's age is E, and
+              // m = tb_age - E. The bound counts from tb, as the followers time the edge.
+              if (samp_age >= EDGE_LAT && inp) begin   // inp: the COND's line, the clock
+                et = tbx - EDGE_LAT;
+                value = c_meas ? clamp16(et) : 16'h0;
+                if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(et); end
+                tb_upd = 1'b1; tb_nx = EDGE_LAT + 24'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 24'sd1;
+                acc_clr = 1'b1;
+                wt_nx = 1'b0; done = 1'b1;
+              end else if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT)) begin
+                ev[TIMEOUT] = 1'b1;
+                if (c_abort) abort_now = 1'b1;
+                else begin
+                  to_set = 1'b1;
+                  tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
+                  value = c_meas ? 16'hFFFF : 16'h0;
+                  if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = 16'hFFFF; end
+                end
+                wt_nx = 1'b0; done = 1'b1;
+              end
+            end else if (tbx >= nom) begin   // at max(now, tb + nom)
               if (bounded && tbx - nom > ((c_nom == 16'h0) ? ISSUE : 24'sd0)) ev[OVERRUN] = 1'b1;
               drv_en = 1'b1; drv_v = c_level;
-              value  = c_meas ? clamp16(tbx) : 16'h0;
-              if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(tbx); end
-              tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
-              done = 1'b1;
+              if (c_strc && c_level) begin   // released a stretch clock: wait until it reads 1
+                wt_nx = 1'b1; samp_nx = 24'sd1;
+                if (bounded && tbx > u16(c_max) + (EDGE_LAT + QUANT)) begin   // already past the bound
+                  ev[TIMEOUT] = 1'b1;
+                  if (c_abort) abort_now = 1'b1;
+                  else begin
+                    to_set = 1'b1;
+                    tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
+                    value = c_meas ? 16'hFFFF : 16'h0;
+                    if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = 16'hFFFF; end
+                  end
+                  wt_nx = 1'b0; done = 1'b1;
+                end
+              end else begin
+                value  = c_meas ? clamp16(tbx) : 16'h0;
+                if (c_meas) begin wr_en = 1'b1; wr_rd = c_rd; wr_val = clamp16(tbx); end
+                tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
+                done = 1'b1;
+              end
             end
           end else begin
             if (edg && inp == c_level) begin   // the edge wins over a timeout
@@ -527,7 +595,9 @@ module engine #(
             // on the launching edges (cpha 0: trailing, bit 0 at max(start, tb); cpha 1:
             // leading) after ldelay (the owner) or max(0, ldelay - E) (others); captures on the
             // others. The clock owner samples E after it drives a capture edge (s_sr), others
-            // in the cycle they detect it.
+            // in the cycle they detect it. Duplex: the engine drives the data lines it owns
+            // with src and samples the others; dst := (v2 << n) | v1, with each line's bits put
+            // into s_rx as they are sent or read (data2's at pos + n).
             if (!fwait) begin
               if (c_own) begin
                 // base = max(tb, start) (cpha 0) or max(tb, start - H) (cpha 1): it never overruns.
@@ -538,6 +608,28 @@ module engine #(
                   if (c_cpha && tbx >= nom) begin ck_ev = 1'b1; slot_nx = 24'sd1 - nom; end
                   else if (c_cpha || tbx <= 24'sd0) slot_nx = tbx_p1 - nom;
                   else slot_nx = 24'sd1 - nom;
+                end else if (c_wt) begin
+                  // Stretch: after a release (an edge to 1) at t, no edge and no sample until the
+                  // clock reads 1 at c >= t + E (samp_age = now - t); the rest of the step then
+                  // shifts by c - E - t (>= 0): the next edge at c - E + H, an age of E - H at c.
+                  // The bound counts from the previous edge, t - H: now - E - (t - H) > max + Q.
+                  slot_nx = slot_age + 24'sd1;
+                  if (samp_age >= EDGE_LAT && c_lvl) begin
+                    wt_end = 1'b1; wt_nx = 1'b0;
+                    slot_nx = (EDGE_LAT + 24'sd1) - nom;
+                    if (c_e == {c_n1, 1'b1} + 6'd1) begin   // after the last edge: tb := its real rise
+                      tb_upd = 1'b1; tb_nx = EDGE_LAT + 24'sd1; anc_upd = 1'b1; anc_nx = EDGE_LAT + 24'sd1;
+                    end
+                  end else if (bounded && samp_age + nom > u16(c_max) + (EDGE_LAT + QUANT)) begin
+                    ev[TIMEOUT] = 1'b1;
+                    if (c_abort) abort_now = 1'b1;
+                    else begin
+                      to_set = 1'b1; nodst = 1'b1;
+                      tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
+                      lg_reg = 1'b1;
+                    end
+                    wt_nx = 1'b0; done = 1'b1;
+                  end
                 end else begin
                   slot_nx = slot_age + 24'sd1;
                   if (c_e != {c_n1, 1'b1} + 6'd1 && slot_age >= 24'sd0) begin
@@ -565,26 +657,28 @@ module engine #(
                   else begin
                     to_set = 1'b1; nodst = 1'b1;
                     tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
+                    lg_reg = 1'b1;
                   end
                   done = 1'b1;
                 end
                 // a data owner without the clock: an empty src = FIFO sends ONES (isa §4.3)
-                if (c_first && c_do && c_srcfifo && !tx_ne) ev[UNDERRUN] = 1'b1;
+                if (c_first && c_drv && c_srcfifo && !tx_ne) ev[UNDERRUN] = 1'b1;
               end
               if (ck_ev) begin
                 e_nx = c_e + 6'd1;
                 lead = e_nx[0];
                 ck_v = c_cpol ^ lead;
                 if (lead == !c_cpha && c_own) sr_nx[0] = 1'b1;
+                if (c_own && c_str && ck_v) begin wt_nx = 1'b1; samp_nx = 24'sd1; end   // a release
                 if (busy && e_nx == {c_n1, 1'b1} + 6'd1) begin   // the n-th trailing edge: tb, the anchor
                   tb_upd = 1'b1; tb_nx = c_own ? 24'sd1 : EDGE_LAT + 24'sd1;
                   anc_upd = 1'b1; anc_nx = tb_nx; acc_clr = 1'b1;
                 end
               end
-              // launches (data owner)
-              if (c_do && !abort_now) begin
+              // launches (the lines it owns)
+              if (c_drv && !abort_now) begin
                 ldly = c_own ? c_ld : (c_ld > 4'd3) ? c_ld - 4'd3 : 4'd0;
-                if (!c_cpha && c_e == 6'd0 && c_k == 4'd0 && tbx >= 24'sd0) launch = 1'b1;   // bit 0
+                if (!c_cpha && c_e == 6'd0 && c_k == 4'd0 && !c_dv && tbx >= 24'sd0) launch = 1'b1;   // bit 0
                 if (c_lp) begin
                   if (c_lcnt == 4'd0) begin launch = 1'b1; lp_nx = 1'b0; end
                   else lcnt_nx = c_lcnt - 4'd1;
@@ -594,20 +688,42 @@ module engine #(
                   if (ldly == 4'd0) launch = 1'b1;
                   else begin lp_nx = 1'b1; lcnt_nx = ldly - 4'd1; end
                 end
-                if (launch) begin drv_en = 1'b1; drv_v = c_v[pos_k]; k_inc = 1'b1; end
+                if (launch) begin
+                  drv_v = c_v[pos_k]; k_inc = 1'b1; dv_nx = 1'b1;
+                  drv_en = c_do; drv2_en = c_dx & c_mine2;
+                  if (c_dx && c_do && !c_od) rxs[pos_k] = c_v[pos_k];       // PP: the wire is src
+                  if (c_dx && c_mine2 && !c_od2) rxs[p2k] = c_v[pos_k];
+                end
               end
-              // samples: a follower, and an OD owner reading its bits back (no tr_sample)
-              smp = c_own ? c_sr[2] : (ck_ev && lead == !c_cpha);
-              if ((!c_do || c_od) && smp && !abort_now) begin
-                rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
-                j_inc = 1'b1; sample_tr = !c_do;
+              // samples: a follower, and an OD owner reading its bits back (no tr_sample). The
+              // clock owner holds a sample due on a release until the wait ends.
+              smp = c_own ? (c_sr[2] && !(c_wt && !wt_end)) : (ck_ev && lead == !c_cpha);
+              if (c_own && c_wt && !wt_end && c_sr[2]) sr_nx = c_sr;
+              if (((!c_do || c_od) || (c_dx && (!c_mine2 || c_od2))) && smp && !abort_now) begin
+                if (!c_do || c_od) rxs[pos_j] = inp;
+                if (c_dx && (!c_mine2 || c_od2)) rxs[p2j] = inp2;
+                // trace: the first followed line on tr_sample; tr_sample2 only when both are
+                j_inc = 1'b1; sample_tr = !c_do | (c_dx & !c_mine2); sample_tr2 = c_dx & !c_mine2 & !c_do;
               end
+              rx_new = rxs;
               // completion needs 2n >= 2 edges, at most one a cycle: never in the start cycle
-              if (busy && !done && (e_nx == {c_n1, 1'b1} + 6'd1) &&
-                  ((c_do && !c_od) || (c_j + {4'd0, j_inc} == {1'b0, c_n1} + 5'd1))) begin
-                value = (c_do && !c_od) ? (c_v & ~(16'hFFFF << {1'b0, c_n1} << 1)) : rxs;
+              if (busy && !done && (e_nx == {c_n1, 1'b1} + 6'd1) && !(wt_nx && !wt_end) &&
+                  (!((!c_do || c_od) || (c_dx && (!c_mine2 || c_od2))) ||
+                   (c_j + {4'd0, j_inc} == {1'b0, c_n1} + 5'd1))) begin
+                value = (!c_dx && c_do && !c_od) ? (c_v & ~(16'hFFFF << {1'b0, c_n1} << 1)) : rxs;
                 done  = 1'b1;
+                lg_reg = 1'b1;
               end
+              // OD let-go (isa §4.3): it keeps an OD line it drove until the lane's next launching
+              // edge (cpha 1, or after a timeout), or releases it ldelay after its last edge (cpha
+              // 0, run to the end): the clock owner at tb + ldelay, others at max(now, e + ldelay)
+              if (lg_reg && !abort_now && (dv_nx || launch) && ((c_do && c_od) || (c_dx && c_mine2 && c_od2))) begin
+                if (!c_cpha && !nodst) begin
+                  lg_c0 = c_own ? ((c_ld > tb_nx[3:0] - 4'd1) ? c_ld - (tb_nx[3:0] - 4'd1) : 4'd0)
+                                : ((c_ld > 4'd3) ? c_ld - 4'd3 : 4'd0);
+                  lg_now = (lg_c0 == 4'd0);
+                end
+              end else lg_reg = 1'b0;
             end
           end else if (c_do) begin
             if (!fwait) begin   // an owner waiting for its src = FIFO word does nothing yet
@@ -666,7 +782,8 @@ module engine #(
             wr_en = 1'b1; wr_rd = c_dst[2:0]; wr_val = value;
           end
           // dst = FIFO pushes in follow mode only (isa §4.3); a full RX FIFO drops it (§4.9)
-          if (done && !abort_now && !nodst && !c_do && c_dst == DST_FIFO) begin
+          // dst = FIFO pushes in every engine that drives fewer than all of the step's data lines
+          if (done && !abort_now && !nodst && (!c_do || (c_ck && c_dx && !c_mine2)) && c_dst == DST_FIFO) begin
             fpush = 1'b1;
             if (rx_full) ev[OVERFLOW] = 1'b1;
           end
@@ -709,6 +826,48 @@ module engine #(
                          (evq_st && (ev_q[LEVEL] || ev_q[EDGE])),
                          (busy && ev[TIMEOUT]) || (evq_st && ev_q[TIMEOUT]), 2'b00};
   wire [5:0]  evt_clr = (start && op == OP_RAW && sub == RAW_EVT) ? operand[5:0] : 6'h0;
+
+  // ---- OD let-go tracker (isa §4.3): one per engine, for the lane of its last clocked XFER ----
+  // It holds up to two OD data lines (data, data2) and, whatever instruction runs, watches that
+  // lane's clock for the next launching edge (lg_L): the clock owner sees its own drive change the
+  // clock to lg_L, others detect the edge. It then releases the lines ldelay after (owner) or at
+  // max(detect, e + ldelay) (others), unless a drive of a line cancels it first. A new let-go
+  // replaces it, releasing at once any line the new one doesn't hold (proposed to verification:
+  // the model keeps one per line, which only differs when two lanes' OD lets-go overlap).
+  reg         lg_v1, lg_v2, lg_L, lg_own, lg_wait;
+  reg  [2:0]  lg_p1, lg_p2, lg_cp;
+  reg  [3:0]  lg_ld, lg_cnt;
+  wire        raw_set = start & (op == OP_RAW) & (sub == RAW_SET);
+  wire        raw_rel = start & (op == OP_RAW) & (sub == RAW_REL);
+  reg         lg_lvl, lg_evt, lg_rel, lg_wait_n;
+  reg  [3:0]  lg_cnt_n, lg_d;
+  always @* begin
+    // the clock's drive level after this cycle (released reads 1), and its level now
+    lg_lvl = ~drv_low[lg_cp];
+    if ((raw_set || raw_rel) && l_pin == lg_cp) lg_lvl = raw_rel | operand[0];
+    if (drv_en && c_pin == lg_cp)               lg_lvl = drv_v;
+    if (drv2_en && c_pin2 == lg_cp)             lg_lvl = drv_v;
+    if (ck_en && c_cpin == lg_cp)               lg_lvl = ck_v;
+    lg_evt = lg_own ? (lg_lvl == lg_L && drv_low[lg_cp] == lg_L)    // ~drv_low = level now != lg_L
+                    : ((sync_s[lg_cp] ^ sync_p[lg_cp]) && sync_s[lg_cp] == lg_L);
+    lg_d = lg_own ? lg_ld : (lg_ld > 4'd3) ? lg_ld - 4'd3 : 4'd0;
+    lg_rel = 1'b0; lg_wait_n = lg_wait; lg_cnt_n = lg_cnt;
+    if (lg_wait) begin
+      if (lg_evt) begin
+        if (lg_d == 4'd0) lg_rel = 1'b1;
+        else begin lg_wait_n = 1'b0; lg_cnt_n = lg_d - 4'd1; end
+      end
+    end else if (lg_cnt == 4'd0) lg_rel = 1'b1;
+    else lg_cnt_n = lg_cnt - 4'd1;
+  end
+  // a drive of a held line this cycle cancels its release
+  wire lg_x1 = (drv_en && c_pin == lg_p1) || (drv2_en && c_pin2 == lg_p1) || ((raw_set || raw_rel) && l_pin == lg_p1);
+  wire lg_x2 = (drv_en && c_pin == lg_p2) || (drv2_en && c_pin2 == lg_p2) || ((raw_set || raw_rel) && l_pin == lg_p2);
+  // a new let-go (lg_reg) holds data and/or data2; the old lines it doesn't hold go at once
+  wire lg_n1 = c_do & c_od, lg_n2 = c_dx & c_mine2 & c_od2;
+  wire lg_new = lg_reg & ~abort_now;
+  wire lg_go1 = lg_v1 & ~lg_x1 & (lg_rel | (lg_new & ~(lg_n1 && c_pin == lg_p1) & ~(lg_n2 && c_pin2 == lg_p1)));
+  wire lg_go2 = lg_v2 & ~lg_x2 & (lg_rel | (lg_new & ~(lg_n1 && c_pin == lg_p2) & ~(lg_n2 && c_pin2 == lg_p2)));
 
   // FIRST_VIOL: the lowest fatal or timing kind (0-6, 10) logged this cycle
   reg [3:0] fv_new;
@@ -768,6 +927,10 @@ module engine #(
       s_k <= 4'd0; s_j <= 5'd0; slot_age <= 24'sd0; samp_age <= 24'sd0;
       s_ck <= 1'b0; s_own <= 1'b0; s_cod <= 1'b0; s_cpol <= 1'b0; s_cpha <= 1'b0; s_lp <= 1'b0;
       s_cpin <= 3'd0; s_sr <= 3'd0; s_ld <= 4'd0; s_lcnt <= 4'd0; s_e <= 6'd0;
+      s_dx <= 1'b0; s_mine2 <= 1'b0; s_od2 <= 1'b0; s_str <= 1'b0; s_strc <= 1'b0; s_wt <= 1'b0;
+      s_dv <= 1'b0; s_pin2 <= 3'd0; s_line2 <= 3'd0;
+      lg_v1 <= 1'b0; lg_v2 <= 1'b0; lg_L <= 1'b0; lg_own <= 1'b0; lg_wait <= 1'b0;
+      lg_p1 <= 3'd0; lg_p2 <= 3'd0; lg_cp <= 3'd0; lg_ld <= 4'd0; lg_cnt <= 4'd0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else if (soft_reset) begin
       started  <= 1'b0;
@@ -799,7 +962,8 @@ module engine #(
       fv_kind  <= 4'd0;
       fv_valid <= 1'b0;
       acc_pend <= 1'b0; acc_clrq <= 1'b0; wq_v <= 1'b0; ev_q <= 11'h0; evq_st <= 1'b0;
-      pop_wait <= 1'b0; stalled <= 1'b0; s_fwait <= 1'b0;
+      pop_wait <= 1'b0; stalled <= 1'b0; s_fwait <= 1'b0; s_wt <= 1'b0;
+      lg_v1 <= 1'b0; lg_v2 <= 1'b0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else begin
       sync_m <= pin_in;
@@ -825,9 +989,13 @@ module engine #(
         abort_pend <= 1'b0;
         pop_wait <= 1'b0;
         s_fwait  <= 1'b0;
+        lg_v1    <= 1'b0;
+        lg_v2    <= 1'b0;
         drv_low  <= 8'h00;
         drv_high <= 8'h00;
       end else if (s0) begin
+        lg_v1    <= 1'b0;
+        lg_v2    <= 1'b0;
         pop_wait <= 1'b0;
         stalled  <= 1'b0;
         s_fwait  <= 1'b0;
@@ -885,16 +1053,41 @@ module engine #(
           s_min <= c_min; s_nom <= c_nom; s_max <= c_max; s_v <= c_v;
           s_ck <= c_ck; s_own <= c_own; s_cpin <= c_cpin; s_cod <= c_cod; s_cpol <= c_cpol;
           s_cpha <= c_cpha; s_ld <= c_ld;
+          s_dx <= c_dx; s_mine2 <= c_mine2; s_od2 <= c_od2; s_pin2 <= c_pin2; s_str <= c_str;
+          s_strc <= c_strc; s_line2 <= c_line2;
           to_flag <= 1'b0;
         end
         if (c_on) begin
           s_k  <= c_k + {3'd0, k_inc};
           s_j  <= c_j + {4'd0, j_inc};
           s_e  <= e_nx; s_sr <= sr_nx; s_lp <= lp_nx; s_lcnt <= lcnt_nx;
+          s_wt <= wt_nx & ~done; s_dv <= dv_nx;
           s_rx <= rx_new;
           busy <= ~done;
         end
         if (to_set) to_flag <= 1'b1;
+        // the let-go tracker: release, step, cancel, or take a new one
+        if (lg_go1) begin drv_low[lg_p1] <= 1'b0; drv_high[lg_p1] <= 1'b0; end
+        if (lg_go2) begin drv_low[lg_p2] <= 1'b0; drv_high[lg_p2] <= 1'b0; end
+        if (lg_rel || lg_x1) lg_v1 <= 1'b0;
+        if (lg_rel || lg_x2) lg_v2 <= 1'b0;
+        lg_wait <= lg_wait_n; lg_cnt <= lg_cnt_n;
+        if (lg_new) begin
+          if (lg_now) begin
+            // released now (cpha 0, ldelay already past): no entry
+            if (lg_n1) begin drv_low[c_pin]  <= 1'b0; drv_high[c_pin]  <= 1'b0; end
+            if (lg_n2) begin drv_low[c_pin2] <= 1'b0; drv_high[c_pin2] <= 1'b0; end
+            lg_v1 <= 1'b0; lg_v2 <= 1'b0;
+          end else begin
+            lg_v1 <= lg_n1; lg_v2 <= lg_n2; lg_p1 <= c_pin; lg_p2 <= c_pin2; lg_cp <= c_cpin;
+            lg_L <= c_cpha ? ~c_cpol : c_cpol; lg_own <= c_own; lg_ld <= c_ld;
+            lg_wait <= c_cpha | nodst; lg_cnt <= lg_c0 - 4'd1;
+          end
+        end
+        if (drv2_en) begin
+          drv_low[c_pin2]  <= ~drv_v;
+          drv_high[c_pin2] <= drv_v & ~c_od2;
+        end
         if (drv_en) begin
           drv_low[c_pin]  <= ~drv_v;
           drv_high[c_pin] <= drv_v & ~c_od;
@@ -918,6 +1111,8 @@ module engine #(
           pf_valid   <= 1'b0;
           drv_low    <= drv_low & ~od_pins;
           drv_high   <= drv_high & ~od_pins;
+          lg_v1      <= 1'b0;
+          lg_v2      <= 1'b0;
         end
         if (abort_fetch) abort_pend <= 1'b0;
 
@@ -950,6 +1145,8 @@ module engine #(
             halted   <= 1'b1;
             drv_low  <= drv_low & ~od_pins;
             drv_high <= drv_high & ~od_pins;
+            lg_v1    <= 1'b0;
+            lg_v2    <= 1'b0;
           end
         end
       end
@@ -1016,7 +1213,10 @@ module engine #(
   wire        tr_br     = start & ~illegal & (((op == OP_BR) & br_cond) | jpin | (op == OP_ROLE_IF));
   wire        tr_taken  = (op == OP_ROLE_IF) ? ~in_role : jpin ? (l_in == operand[11]) : taken;
   wire        tr_sample = c_on & sample_tr;
-  wire [2:0]  tr_line   = c_line;
+  wire [2:0]  tr_line   = (c_kind == K_XFER && c_ck && c_dx && c_do) ? c_line2 : c_line;
+  // duplex: a second sample in the same cycle, on data2 (proposed for architecture §5)
+  wire        tr_sample2 = c_on & sample_tr2;
+  wire [2:0]  tr_line2  = c_line2;
   wire        tr_halted = halted;
 
 endmodule
