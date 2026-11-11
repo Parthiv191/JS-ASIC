@@ -160,7 +160,7 @@ removes them because nothing loads them. All are valid in the clk cycle of their
 | `tr_pc` | 9 | the pc of the instruction executing now | `pc` |
 | `tr_op` | 2 | with `tr_step`: 1 COND, 2 HOLD, 3 XFER | `op` |
 | `tr_do` | 1 | with `tr_step`: 1 = did the step, 0 = followed it | `mode` |
-| `tr_value` | 16 | with `tr_step`: HOLD the level, XFER the wire value (duplex: packed), COND the measurement or 0. With `tr_mark`: the id | `value` (none = 0) |
+| `tr_value` | 16 | with `tr_step`: HOLD the level, XFER the wire value (duplex: packed), COND the value MEAS writes (the clamped measurement; 0xFFFF on a TIMEOUT), 0 without MEAS. With `tr_mark`: the id | `value` (none = 0) |
 | `tr_now` | 24 | the engine's `now` | `cycle` |
 | `tr_tb` | 24 | `tb`; with `tr_step`, its value after the step | `tb` |
 | `tr_evt` | 11 | pulses, one bit per event kind code (isa §7), in the cycle the event is logged | `Event(kind, pc, cycle)` |

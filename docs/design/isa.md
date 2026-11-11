@@ -322,10 +322,15 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     leading edge with `cpha = 1`. With `cpha = 0` it is a trailing edge: for an XFER that ran to
     the end, its own last edge, because the next leading edge captures the next step's bit 0;
   - it releases `D` `ldelay` cycles after that edge (same rule as launch), unless it launches a
-    new bit on `D` then;
+    new bit on `D` then. The let-go is taken the cycle after the XFER completes, so the release
+    is at the later of that cycle and the time above (it matters with `cpha = 0`, whose edge is
+    the step's own last one);
   - any explicit drive of `D` cancels the pending release;
-  - a per-lane tracker watches the clock every cycle, whatever instruction is running, so a
-    release can happen during later HOLD, COND or untimed instructions.
+  - one tracker per engine, for the lane of its last let-go, watches that lane's clock every
+    cycle, whatever instruction is running, so a release can happen during later HOLD, COND or
+    untimed instructions. Taking a new let-go releases at once every line the old one held that
+    the new one doesn't. (Per-line trackers differ only when two lanes' let-gos overlap, which no
+    library protocol does.)
   - With I2C (cpol 1, cpha 1) a release never happens while SCL is high.
 - **Clock stretching (lanes with `stretch`).**
   - After each release of `clk` (an edge it drives to 1) planned at `t`, the clock owner waits

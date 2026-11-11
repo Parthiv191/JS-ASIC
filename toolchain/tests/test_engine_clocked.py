@@ -723,6 +723,52 @@ def test_let_go_before_the_next_owner_bit_0(first, second, cpha):
         assert [r.value for r in xfers(t, i)] == [0xFF, 0, 0xFF], (i, [hex(r.value) for r in xfers(t, i)])
 
 
+
+@pytest.mark.parametrize("sender,role", [("a", 0), ("b", 1)])
+@pytest.mark.parametrize("ld", [0, 9])
+def test_a_cpha0_let_go_releases_after_its_completion_cycle(sender, role, ld):
+    """isa §4.3: a let-go is taken the cycle after its XFER completes (the RTL takes it then, off
+    the completion cycle's deep logic). With cpha 0 the launching edge is the step's own last
+    trailing edge, so the release is at max(done + 1, tb + ldelay), on the wire a cycle later."""
+    d = Description("od", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=0, ldelay=ld)
+    d.xfer(8, lane, owner=sender, prof=d.profile("H", nom=16, min=15, max=INF), src="zero")
+    d.raw_delay(60)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1))
+    (rec,) = xfers(t, role)
+    rise = [x for x in t.wire_edges[1] if x > rec.tb]
+    assert rise and rise[0] == max(rec.cycle + 1, rec.tb + ld) + 1, (rec, rise)
+
+
+@pytest.mark.parametrize("sender,role", [("a", 0), ("b", 1)])
+def test_one_let_go_tracker_per_engine(sender, role):
+    """isa §4.3: one tracker per engine. A new let-go, taken the cycle after its XFER completes,
+    releases at once any line the old one held that it doesn't. Here lane A's let-go (cpha 1)
+    still waits for SCL A's next falling edge when lane B's XFER (cpha 0, ldelay 0) completes:
+    both lines go then. (With one tracker per line, D1 stayed low until HALT, and D2 went in
+    B's completion cycle because another let-go was pending.)"""
+    d = Description("od", parties=("a", "b"))
+    scl_a = d.line("scl_a", owner="a", idle=1)
+    scl_b = d.line("scl_b", owner="a", idle=1)
+    d1 = d.line("d1", "od", owner="shared", idle=1)
+    d2 = d.line("d2", "od", owner="shared", idle=1)
+    lane_a = d.lane("A", d1, clk=scl_a, cpol=1, cpha=1, ldelay=2)
+    lane_b = d.lane("B", d2, clk=scl_b, cpol=1, cpha=0, ldelay=0)
+    h = d.profile("H", nom=16, min=15, max=INF)
+    d.xfer(8, lane_a, owner=sender, prof=h, src="zero")
+    d.xfer(8, lane_b, owner=sender, prof=h, src="zero")
+    d.raw_delay(60)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1))
+    rec_b = xfers(t, role)[1]
+    for wire in (2, 3):
+        rise = [x for x in t.wire_edges[wire] if x > rec_b.tb]
+        assert rise and rise[0] == rec_b.cycle + 2, (wire, rec_b, rise)
+
+
 def test_no_let_go_without_a_drive():
     """A cpha 1 XFER that times out before its first edge drove nothing, so it lets nothing go:
     the slave's earlier HOLD 0 stays on SDA when a leading edge comes later."""
