@@ -36,8 +36,8 @@ SPEC = ProtocolSpec(
     name="uart",
     build=build,
     # At 2% the compiler needs P >= 19 (isa §6 T5-watch: the receiver's BR and ROLE_IF before the
-    # next start edge). 434 is 115200 baud at 50 MHz.
+    # next start edge). 347 is 115200 baud at the 40 MHz sign-off clock.
     defaults=dict(bit_cycles=20, data_bits=8, tolerance_ppm=20000),
-    space=dict(bit_cycles=[19, 20, 32, 434], data_bits=[5, 6, 7, 8], tolerance_ppm=[0, 5000, 20000]),
+    space=dict(bit_cycles=[19, 20, 32, 347], data_bits=[5, 6, 7, 8], tolerance_ppm=[0, 5000, 20000]),
     payload=payload,
 )
