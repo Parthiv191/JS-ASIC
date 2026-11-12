@@ -159,6 +159,12 @@ module tt_um_prot_emu_SAP (
   wire refuse = (any_running & ((hwr & in_table) | (hwr & in_col1) | (ewr & off == 8'h15))) |
                 (e0_tx_push & (e0_tx_count == 3'd4));   // TX full: the word is dropped
 
+  // LANE writes use one constant byte position per address: the gds flow's synthesis built the
+  // variable byte index (lane_all[{off[3:0] - 4'h8, 3'd0} +: 8]) as a bit index, so LANE byte k
+  // landed k bits into the table (gate-level run 43101189092; reproduced with the flow's
+  // synthesis script, which a sized index wire didn't fix)
+  integer lb;
+
   integer k;
   always @(posedge clk or negedge rst_n_sync) begin
     if (!rst_n_sync) begin
@@ -198,7 +204,10 @@ module tt_um_prot_emu_SAP (
       if (hwr && in_table && !any_running) begin
         if (off < 8'h30)                    prof_all[{off[5:0], 3'd0} +: 8] <= hwdata;
         else if (off < 8'h38)               line_cfg[{off[2:0], 3'd0} +: 8] <= hwdata;
-        else if (off < 8'h48)               lane_all[{off[3:0] - 4'h8, 3'd0} +: 8] <= hwdata;
+        else if (off < 8'h48) begin
+          for (lb = 0; lb < 16; lb = lb + 1)
+            if (off[3:0] == lb[3:0] + 4'h8) lane_all[8*lb +: 8] <= hwdata;   // 0x38 + lb
+        end
         else if (off == 8'h4A)              abort_pc[7:0] <= hwdata;
         else if (off == 8'h4B)              abort_pc[8]   <= hwdata[0];
         else if (off == 8'h54)              bus_cfg[1:0]  <= hwdata[1:0];
