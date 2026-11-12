@@ -61,10 +61,10 @@ def test_a_planted_bug_fails_the_campaign_and_shrinks(flipped_followers):
     rep = campaign(seed=5, iters=20)
     assert rep.failures, "the planted bug went unseen"
     case, res = rep.failures[0]
-    assert res.rules == ("agreement",)
+    assert "agreement" in res.rules
     small = shrink(case)
     assert len(small.recipe.frames) == 1 and small.recipe.frames[0].prep == ()
-    assert run_case(small).rules == ("agreement",)
+    assert run_case(small).rules == res.rules
 
 
 @pytest.mark.parametrize("path", sorted(CORPUS.glob("*.json")), ids=lambda p: p.stem)
@@ -77,3 +77,29 @@ def test_the_corpus_stays_fixed(path):
 def test_the_first_finding_is_rejected_by_r2_edge():
     res = run_case(Case.from_json((CORPUS / "r2_edge_clocked_then_start_bit.json").read_text(encoding="utf-8")))
     assert res.verdict == "rejected" and "R2-edge" in res.rules
+
+
+def _alu_writes_0(monkeypatch):
+    def bad(self, ins):
+        self.regs[ins.rd] = 0
+        self.pc += 1
+        yield
+    monkeypatch.setattr(engine.Engine, "_op_alu", bad)
+
+
+def _pop_drops_a_word(monkeypatch):
+    orig = engine.Engine._op_pop
+
+    def bad(self, ins):
+        if len(self.tx) > 1:
+            self.tx.popleft()
+        yield from orig(self, ins)
+    monkeypatch.setattr(engine.Engine, "_op_pop", bad)
+
+
+@pytest.mark.parametrize("plant", [_alu_writes_0, _pop_drops_a_word], ids=["alu writes 0", "pop drops a word"])
+def test_the_value_oracle_catches_bugs_every_role_shares(monkeypatch, plant):
+    """Every role runs the same wrong semantics, so agreement passes; the recipe's own values don't."""
+    plant(monkeypatch)
+    rep = campaign(seed=3, iters=60)
+    assert any("value" in r.rules for _, r in rep.failures), "the shared bug went unseen"

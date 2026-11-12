@@ -11,6 +11,7 @@ tolerance and no glitches, these must hold:
 | `contention` | two drivers fight on a wire |
 | `completion` | an engine doesn't halt, or the run isn't quiescent, by the tick budget |
 | `agreement` | the engines' timed steps (pc, op, XFER value), wire registers r1-r4 or RX words differ |
+| `value` | an XFER's value isn't what the recipe says (`expected_values`: src, host words, prep ops), so wrong semantics that every role shares fail too |
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from ..compiler import CompileError, compile_desc
 from ..isa import Dst, Role, unpack_xfer
 from ..model.engine import VIOLATIONS
 from ..model.system import EngineSpec, System
-from .randdesc import Recipe, build, random_recipe
+from .randdesc import PARTIES, Recipe, build, expected_values, random_recipe
 
 ROLES = (Role.P0, Role.P1, Role.MON)
 HOST_WORDS = 24      # per party: more than any recipe pops
@@ -41,7 +42,10 @@ class Env:
         Every engine starts at tick 0: the timing rules assume the parties start together (from
         reset, instruction 0 starts at now = 2 in every role), so start skew is outside them."""
         lo = 1000 - ppm // 1000
-        clocks = tuple((rng.randint(lo, 1000), 1000) for _ in ROLES)
+        if rng.random() < 0.5:  # the corners, where the rules are tight
+            clocks = tuple((rng.choice((lo, 1000)), 1000) for _ in ROLES)
+        else:
+            clocks = tuple((rng.randint(lo, 1000), 1000) for _ in ROLES)
         phases = tuple(0 for _ in ROLES)
         words = tuple(tuple(rng.randrange(1 << 16) for _ in range(HOST_WORDS)) for _ in range(2))
         return Env(clocks, phases, words)
@@ -120,13 +124,15 @@ def run_case(case: Case) -> Result:
                 and unpack_xfer(instrs[r.pc].operand)[2] == Dst.FIFO]
         if et.rx != want:
             fails.append(("agreement", f"{et.role.name}: rx {et.rx}, but it followed {want} into the FIFO"))
+    want = expected_values(case.recipe, dict(zip(PARTIES, (list(w) for w in env.words))))
+    got = [r.value for r in t.engines[0].records if r.op == "XFER"]
+    if got != want:
+        k = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
+        fails.append(("value", f"XFER {k}: {got[k] if k < len(got) else 'none'}, the recipe says "
+                                 f"{want[k] if k < len(want) else 'none'}"))
     if fails:
         return Result("fail", tuple(sorted({f[0] for f in fails})), "; ".join(f"{o}: {d}" for o, d in fails))
     return Result("ok", ())
-
-
-def nominal(env: Env) -> Env:
-    return replace(env, clocks=tuple((1, 1) for _ in env.clocks), phases=tuple(0 for _ in env.phases))
 
 
 def simplifications(case: Case):
@@ -137,14 +143,14 @@ def simplifications(case: Case):
         yield replace(case, recipe=replace(r, frames=fr[:i] + fr[i + 1:]))
     for i, f in enumerate(fr):
         for g in (replace(f, prep=()), replace(f, skip_on=None), replace(f, n=1), replace(f, src="zero"),
-                  replace(f, dst="discard"), replace(f, msb=False)):
+                  replace(f, dst="discard"), replace(f, msb=False), replace(f, wait=None)):
             if g != f:
                 yield replace(case, recipe=replace(r, frames=fr[:i] + (g,) + fr[i + 1:]))
+    if r.loops > 1:
+        yield replace(case, recipe=replace(r, loops=1))
     for i in range(len(env.clocks)):
         if env.clocks[i] != (1, 1):
             yield replace(case, env=replace(env, clocks=env.clocks[:i] + ((1, 1),) + env.clocks[i + 1:]))
-        if env.phases[i]:
-            yield replace(case, env=replace(env, phases=env.phases[:i] + (0,) + env.phases[i + 1:]))
 
 
 def shrink(case: Case, budget: int = 400) -> Case:
