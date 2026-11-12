@@ -51,16 +51,19 @@ jobs:
           submodules: recursive
 
       - name: Build GDS
-        uses: TinyTapeout/tt-gds-action@ihp-cmos5l
+        uses: TinyTapeout/tt-gds-action@e7a50f8f46f9f8df4b2c9935bfeb1cbc6b6ae4f6  # ttihp27a
         with:
           pdk: ihp-sg13cmos5l
+          tools-ref: 9d13ff3e3e6202090740110438c6a10c1d62ca0f  # tt-support-tools main, 11-05
 
   precheck:
     needs: gds
     runs-on: ubuntu-24.04
     steps:
       - name: Run Tiny Tapeout Precheck
-        uses: TinyTapeout/tt-gds-action/precheck@ihp-cmos5l
+        uses: TinyTapeout/tt-gds-action/precheck@e7a50f8f46f9f8df4b2c9935bfeb1cbc6b6ae4f6  # ttihp27a
+        with:
+          tools-ref: 9d13ff3e3e6202090740110438c6a10c1d62ca0f
 
   gl_test:
     needs: gds
@@ -72,7 +75,7 @@ jobs:
           submodules: recursive
 
       - name: GL test
-        uses: TinyTapeout/tt-gds-action/gl_test@ihp-cmos5l
+        uses: TinyTapeout/tt-gds-action/gl_test@e7a50f8f46f9f8df4b2c9935bfeb1cbc6b6ae4f6  # ttihp27a
 
   viewer:
     needs: gds
@@ -83,4 +86,4 @@ jobs:
       pages: write # to deploy to Pages
       id-token: write # to verify the deployment originates from an appropriate source
     steps:
-      - uses: TinyTapeout/tt-gds-action/viewer@ihp-cmos5l
+      - uses: TinyTapeout/tt-gds-action/viewer@e7a50f8f46f9f8df4b2c9935bfeb1cbc6b6ae4f6  # ttihp27a

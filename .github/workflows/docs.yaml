@@ -26,4 +26,6 @@ jobs:
           for i in 1 2 3 4 5 6; do sudo apt-get update && break; echo "apt-get update failed ($i), retrying"; sleep 30; done
 
       - name: Build docs
-        uses: TinyTapeout/tt-gds-action/docs@ihp-cmos5l
+        uses: TinyTapeout/tt-gds-action/docs@e7a50f8f46f9f8df4b2c9935bfeb1cbc6b6ae4f6  # ttihp27a
+        with:
+          tools-ref: 9d13ff3e3e6202090740110438c6a10c1d62ca0f
