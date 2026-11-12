@@ -233,14 +233,14 @@ removes them because nothing loads them. All are valid in the clk cycle of their
 | uio[7:0] | protocol pins IO0–IO7. OD lines need **external** pull-ups: 2.2–4.7 kΩ for I2C (the Basys 3's internal ones are too weak for 400 kHz), and 1.5 kΩ on D− for USB-LS. |
 
 **Verify against the TT demo-board docs:**
-- the RP2040 drives every pin; the DIP switches are on `ui_in`; `uo_out` drives a 7-segment
-  display;
-- whether the RP2040 sets the straps before releasing `rst_n` and leaves `uio` tristated;
+- the MCU (the RP2350, as the brief says; challenge Q1) drives every pin; the DIP switches are
+  on `ui_in`; `uo_out` drives a 7-segment display;
+- whether the MCU sets the straps before releasing `rst_n` and leaves `uio` tristated;
 - the QSPI Pmod sits on `uio`;
 - 3.3 V pads, any pad pull-ups, and 40 MHz through the IHP mux.
 
-The RP2040 can host (PIO SPI) and act as the protocol peer on `uio`, which makes a
-self-contained bring-up rig.
+The MCU can host (PIO SPI, which the RP2040 and RP2350 both have) and act as the protocol peer
+on `uio`, which makes a self-contained bring-up rig.
 
 ## 9. Physical design plan
 
