@@ -384,7 +384,16 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}
     apc = low.image.abort_pc
     bus_on = int(low.image.bus.kind) != 0
+    # FZ ops that cost more than U on the way to that step: the timing rules don't time the path
+    # from an abort or a bus exit into abort_pc, so its 40-48 cycles could miss the re-sync
+    no_fz = [Instr(Op.NOP) if ins.op == Op.FZ else ins for ins in instrs]
     for r in sorted(aborting):
+        plain = gaps(no_fz, timed, apc, r)
+        for pc, (_, hi) in gaps(instrs, timed, apc, r).items():
+            if hi != plain[pc][1]:
+                diags.add("T5-abort", pc, f"{r.name} can run fz.next or fz.end between abort_pc {apc} and "
+                                          f"this step: the timing rules don't time that path, so it "
+                                          f"could miss the re-sync (isa §6); end the iteration after it")
         for pc in gaps(instrs, timed, apc, r):
             s = steps[pc]
             # it follows the COND, or does a COND START/STOP (on a bus the others exit on it)

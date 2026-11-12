@@ -55,7 +55,7 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `T2-window` | `test_analysis.py`, `test_engine_timed.py` |
 | `T3-latency` | `test_analysis.py` |
 | `T4-profile` | `test_analysis.py` |
-| `T5-abort` | `test_analysis.py`, `test_engine_bus.py`, `test_lead.py` |
+| `T5-abort` | `test_analysis.py`, `test_engine_bus.py`, `test_fz.py`, `test_lead.py` |
 | `T5-overrun` | `test_analysis.py` |
 | `T5-stall` | `test_analysis.py`, `test_engine_clocked.py`, `test_lead.py` |
 | `T5-timeout` | `test_analysis.py` |

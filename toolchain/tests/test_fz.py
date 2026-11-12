@@ -364,25 +364,195 @@ def test_r2_fz_next_taints_its_register():
     assert "R2-branch" in {x.rule for x in e.value.diags}
 
 
-def test_a_duplex_xfer_gives_two_tokens():
-    """The fuzzing peripheral follows a duplex XFER: (MISO << 8) | MOSI gives two tokens, low byte
-    first, as the stage-1 reading has it; the followed START and STOP give one each."""
-    d, lane, half, wait = spi_base()
-    with d.only("per"):
-        d.fz_next("r1")
-        d.mark(ARM_MARK)
+def duplex_pair(fuzzer):
+    """One full-duplex byte under CS. ctl sends 0x5A on MOSI unless it fuzzes; per sends 0x3C on
+    MISO unless it fuzzes. The fuzzing party is engine 0 with the unit; the other is engine 1."""
+    def build(role):
+        d, lane, half, wait = spi_base()
+        with d.only(fuzzer):
+            d.fz_next("r1")
+        with d.only("ctl"):
+            d.li("r3", 0x5A)
+            d.raw_delay(120)  # past the fuzzer's fz.next
+        with d.only("per"):
+            d.li("r3", 0x3C)
+        d.cond("start", owner="ctl", prof=wait)
+        d.xfer(8, lane, owner="ctl", prof=half, src="fz" if role == fuzzer else "r3", dst="r2")
+        d.cond("stop", owner="ctl", prof=wait)
+        with d.only(fuzzer):
+            d.fz_end("r4")
+        d.halt()
+        return compile_desc(d, check_timing=False)
+    u = unit()
+    role = {"ctl": Role.P0, "per": Role.P1}
+    other = "per" if fuzzer == "ctl" else "ctl"
+    t = System([EngineSpec(build(fuzzer), role[fuzzer], engine=0, fuzz=u),
+                EngineSpec(build(other), role[other], engine=1)]).run(20_000)
+    return u, t.engines[0]
+
+
+def test_a_duplex_controller_gets_the_reply_byte():
+    """The controller does the step but samples MISO: the device's reply is its token."""
+    u, et = duplex_pair("ctl")
+    assert et.regs[2] == 0x3C << 8 | u.staged()[0]
+    assert u.tokens == [0x3C]  # it does START and STOP itself: no COND tokens
+
+
+def test_a_duplex_peripheral_gets_the_mosi_byte():
+    """The peripheral follows MOSI and sends MISO: only MOSI is news to it; the followed START and
+    STOP give one token each."""
+    u, et = duplex_pair("per")
+    assert et.regs[2] == u.staged()[0] << 8 | 0x5A
+    assert len(u.tokens) == 3 and u.tokens[1] == 0x5A
+    assert all(0x40 <= x <= 0x4F for x in (u.tokens[0], u.tokens[2]))
+
+
+def test_cond_latency_tokens_stay_in_range_under_drift():
+    """Back-to-back frames from tgt, ctl 2% slow: a followed edge can come before tb, so m < 0. It is
+    clamped to 0, as MEAS is, so every COND token stays in 0x40-0x4F."""
+    d = Description("neg", parties=("ctl", "tgt"))
+    d.line("tx", owner="ctl", idle=1)
+    rx = d.line("rx", owner="tgt", idle=1)
+    s = slack(P, 20000)
+    bit = d.profile("BIT", nom=P, min=P - s, max=P + s)
     with d.only("ctl"):
-        d.raw_delay(120)  # past the peripheral's fz.next
-    d.cond("start", owner="ctl", prof=wait)
-    d.xfer(8, lane, owner="ctl", prof=half, src="fz", dst="r2")
-    d.cond("stop", owner="ctl", prof=wait)
-    with d.only("per"):
+        d.fz_next("r1")
+    with d.only("tgt"):
+        d.li("r2", 0x55)
+        d.raw_delay(100)
+    for _ in range(3):
+        frame(d, rx, "tgt", "r2", "r3", bit)
+    with d.only("ctl"):
         d.fz_end("r4")
     d.halt()
-    img = compile_desc(d, check_timing=False)
+    img = compile_desc(d)
     u = unit()
-    t = System([EngineSpec(img, Role.P1, engine=0, fuzz=u), EngineSpec(img, Role.P0, engine=1)]).run(20_000)
-    assert t.engines[0].regs[2] == u.staged()[0] << 8   # ctl's src = fz read 0: no unit on engine 1
-    want = tokens_of(img, t, 0).tokens
-    assert len(want) == 4 and want[1:3] == (0x00, u.staged()[0])
-    assert tuple(u.tokens) == want
+    System([EngineSpec(img, Role.P0, engine=0, fuzz=u, clock=(49, 50)),
+            EngineSpec(img, Role.P1, engine=1)]).run(20_000)
+    conds = u.tokens[0::2]
+    assert len(u.tokens) == 6 and u.tokens[1::2] == [0x55] * 3
+    assert all(0x40 <= x <= 0x4F for x in conds) and 0x40 in conds[1:]
+
+
+def test_a_timed_out_xfer_gives_no_token():
+    """per follows 8 bits but ctl clocks 4: the XFER times out (no ABORT) with no value, so it gives
+    no data token; its TIMEOUT is in the event mask."""
+    def build(n):
+        d = Description("x", parties=("ctl", "per"))
+        sck = d.line("sck", owner="ctl", idle=0)
+        mosi = d.line("mosi", owner="ctl", idle=1)
+        lane = d.lane("L", mosi, clk=sck, cpol=0, cpha=0)
+        half = d.profile("HALF", nom=10, min=0, max=40)
+        w = d.profile("W", nom=10, min=0, max=INF)
+        with d.only("per"):
+            d.fz_next("r1")
+        with d.only("ctl"):
+            d.raw_delay(120)
+        d.cond("fall", mosi, owner="ctl", prof=w)
+        d.xfer(n, lane, owner="ctl", prof=half, src="ones", dst="r2")
+        with d.only("per"):
+            d.fz_end("r4")
+        d.halt()
+        return compile_desc(d, check_timing=False)
+    u = unit()
+    et = System([EngineSpec(build(8), Role.P1, engine=0, fuzz=u),
+                 EngineSpec(build(4), Role.P0, engine=1)]).run(20_000).engines[0]
+    assert "TIMEOUT" in [e.kind for e in et.events]
+    assert len(u.tokens) == 1 and 0x40 <= u.tokens[0] <= 0x4F  # the COND's only
+    assert u.events & 1 << EVENT_BIT["TIMEOUT"]
+
+
+def i2c_exit(fz):
+    """The I2C target fuzzes (engine 0). Round 1, the controller ends the frame after the ACK from a
+    lead block, so the target's data XFER bus-exits to abort_pc, where it would run fz.end before
+    re-syncing on the next START: 40 cycles the timing rules don't see (review of the FZ PR)."""
+    H, ADDR = 20, 0x5A << 1
+    d = Description("i2c", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+    bit = d.profile("B", nom=H, min=0, max=INF)
+    wait = d.profile("W", nom=H, min=0, max=INF)
+    hold = d.profile("Ho", nom=H)
+    d.abort_to("again")
+    d.li("r1", ADDR)
+    d.li("r5", 1)
+    d.li("r6", 0xA4)
+    if fz:
+        with d.only("t"):
+            d.fz_next("r3")
+        with d.only("c"):
+            d.raw_delay(120)
+    d.label("top")
+    d.cond("start", owner="c", prof=wait)
+    d.xfer(8, lane, owner="c", prof=bit, src="r1", dst="r2", msb_first=True)
+    with d.lead("t"):
+        d.alu("ne", "r3", "r2", ADDR)
+        d.br("nack", cond="nz", reg="r3")
+        d.br("ack")
+        d.label("nack")
+        d.cond("stop", owner="c", prof=wait)
+        d.br("again")
+    d.label("ack")
+    d.xfer(1, lane, owner="t", prof=bit, src="zero", dst="r4", abort=True)
+
+    def stop_seq():
+        d.cond("fall", scl, owner="c", prof=wait)
+        d.hold(sda, 0, owner="c", prof=hold)
+        d.cond("rise", scl, owner="c", prof=wait)
+        d.cond("stop", owner="c", prof=wait)
+    with d.lead("c"):
+        d.br("data", cond="z", reg="r5")
+        d.li("r5", 0)
+        stop_seq()
+        d.br("again")
+    d.label("data")
+    d.xfer(8, lane, owner="c", prof=bit, src="r6", dst="r7", msb_first=True, abort=True)
+    stop_seq()
+    if fz:
+        with d.only("t"):
+            d.fz_end("r0")
+    d.halt()
+    d.label("again")
+    if fz:
+        with d.only("t"):
+            d.fz_end("r0")
+    d.br("top")
+    return d
+
+
+def test_t5_abort_rejects_fz_ops_before_the_resync():
+    compile_desc(i2c_exit(False))
+    with pytest.raises(CompileError) as e:
+        compile_desc(i2c_exit(True))
+    assert "T5-abort" in {x.rule for x in e.value.diags}
+
+
+def test_two_engines_cannot_share_a_fuzz_unit():
+    img = compile_desc(fz_desc())
+    u = unit()
+    with pytest.raises(ValueError):
+        System([EngineSpec(img, Role.P0, fuzz=u), EngineSpec(img, Role.P1, fuzz=u)])
+
+
+def test_r3_fz_src_fz_with_no_fz_op():
+    assert "R3-fz" in r3_fz(lambda d, ln, bit: frame(d, ln, "a", "fz", "r2", bit))
+
+
+def test_src_fz_in_wire_mode_sends_the_length_then_the_bytes_then_0():
+    d = Description("fz", parties=("ctl", "tgt"))
+    tx = d.line("tx", owner="ctl", idle=1)
+    s = slack(P, 20000)
+    bit = d.profile("BIT", nom=P, min=P - s, max=P + s)
+    with d.only("ctl"):
+        d.fz_next("r1")
+    for dst in ("r2", "r3", "r5"):
+        frame(d, tx, "ctl", "fz", dst, bit)
+    with d.only("ctl"):
+        d.fz_end("r4")
+    d.halt()
+    u = unit(length_mode="wire")
+    t = run(compile_desc(d), u)
+    assert t.engines[0].regs[1] == 1 and u.msg_len == 1
+    assert [t.engines[1].regs[i] for i in (2, 3, 5)] == [1, u.staged()[0], 0]

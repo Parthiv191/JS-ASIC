@@ -368,22 +368,40 @@ class Engine:
     def _record(self, ins: Instr, mode: str, value: int | None = None) -> None:
         self._step = None
         self.records.append(StepRecord(self.pc, ins.op.name, mode, value, self.now, self.tb))
-        if mode == "follow" and self.fuzz is not None and self.fuzz.armed:
-            self._auto_tokens(ins, value)
+        if self.fuzz is not None and self.fuzz.armed:
+            self._auto_tokens(ins, mode, value)
 
-    def _auto_tokens(self, ins: Instr, value: int | None) -> None:
-        """A followed step's data tokens (bus-fuzzer.md §3): an XFER's value[7:0], and value[15:8]
-        if n > 8 or the lane is duplex; a COND's 0x40 + bucket(m), m = tb after - tb before, or
-        0xFFFF on a timeout."""
+    def _auto_tokens(self, ins: Instr, mode: str, value: int | None) -> None:
+        """A completed step's data tokens (isa §4.6): what this engine received from another party.
+        An XFER gives the byte(s) of each data line it followed: value[7:0], then value[15:8] if
+        n > 8; on a duplex lane the data line's bits, then data2's (dst = (v2 << n) | v1), so its
+        owner gets the reply and the data2 owner gets the request. None if it has no value (a
+        timeout). A followed COND gives 0x40 + bucket(m), m = tb after - tb before clamped to
+        0..0xFFFF, or 0xFFFF on a timeout."""
         if ins.op == Op.XFER:
-            v = value or 0
-            self.fuzz.tok(v & 0xFF)
-            if unpack_xfer(ins.operand)[0] > 8 or self.image.lanes[ins.line].data2 is not None:
-                self.fuzz.tok(v >> 8 & 0xFF)
-        elif ins.op == Op.COND:
+            if value is None:
+                return
+            n = unpack_xfer(ins.operand)[0]
+            lane = self.image.lanes[ins.line]
+            follows1 = mode == "follow"
+            if lane.data2 is None:
+                if follows1:
+                    self.fuzz.tok(value & 0xFF)
+                    if n > 8:
+                        self.fuzz.tok(value >> 8 & 0xFF)
+                return
+            owner2 = self.lines[lane.data2].owner
+            follows2 = self.role == Role.MON or int(owner2) != int(self.role)
+            mask = (1 << n) - 1
+            if follows1:
+                self.fuzz.tok(value & mask)
+            if follows2:
+                self.fuzz.tok(value >> n & mask)
+        elif ins.op == Op.COND and mode == "follow":
             timeout = any(e.kind == "TIMEOUT" and e.pc == self.pc and e.cycle == self.now
                           for e in self.events[-3:])
-            self.fuzz.tok(0x40 + bucket(MEAS_MAX if timeout else self.tb - self._tb0))
+            m = MEAS_MAX if timeout else min(max(self.tb - self._tb0, 0), MEAS_MAX)
+            self.fuzz.tok(0x40 + bucket(m))
 
     def _reanchor(self, at: int) -> None:
         self.anchor = at

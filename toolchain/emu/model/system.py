@@ -99,6 +99,9 @@ class System:
             num, den = s.clock
             if not 0 < num <= den:
                 raise ValueError(f"clock ratio {num}/{den} must be in (0, 1]")
+        units = [id(s.fuzz) for s in engines if s.fuzz is not None]
+        if len(units) != len(set(units)):
+            raise ValueError("two engines share one fuzz unit: each chip's engine 0 has its own")
         self.specs = list(engines)
         self.lines = engines[0].image.lines
         self.engines = [Engine(s.image, s.role, name=f"E{i}", engine=s.engine, fuzz=s.fuzz)

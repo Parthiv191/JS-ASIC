@@ -388,16 +388,24 @@ program sees.
   XFER (`R3-fz`): as its owner, or as the owner of a duplex lane's data2. Any other sender
   reads 0.
 - **While the unit is armed**, engine 0:
-  - queues a step's tokens when a step it follows completes. A followed XFER gives
-    `value[7:0]`, then `value[15:8]` if `n` > 8 or the lane is duplex. A followed COND gives
-    `0x40 + bucket(m)`, with `m` = `tb` after the step minus `tb` before it, or 0xFFFF on a
-    TIMEOUT. Steps it does give none.
+  - queues a step's tokens when it completes: what the engine received from the other party.
+    - An XFER gives the bits of each data line the engine follows. On one data line that is
+      `value[7:0]`, then `value[15:8]` if `n` > 8, and nothing for the line's owner. On a duplex
+      lane (`dst` = `(v2 << n) | v1`), the data line's `n` bits, then data2's: so the data owner
+      (an SPI controller) gets the reply on data2, and data2's owner gets the request. An XFER
+      that ends with no value (a TIMEOUT without ABORT) gives none.
+    - A followed COND gives `0x40 + bucket(m)`, with `m` = `tb` after the step minus `tb` before
+      it, clamped to 0–0xFFFF as MEAS is (a followed edge can come before `tb` under drift), or
+      0xFFFF on a TIMEOUT. A COND it does gives none.
   - sets the bit of every event kind it logs (§7, bus exits included) in the unit's event mask.
   - on a fatal abort (§4.1): the unit saves staging as a hang and disarms, and the abort takes
     `FZ_HANG_CYCLES` = 12 cycles more. A bus exit is not a hang: the unit stays armed, and the
-    program runs `fz.end` from `abort_pc`.
-- The model never loses a token: a step queues at most 2 and the queue drains one a cycle
-  (`bus-fuzzer.md` §2), so `FZ_STATUS.token_lost` stays 0. The RTL must keep up as well.
+    program ends the iteration later. Not with `fz.next` or `fz.end` between `abort_pc` and the
+    first timed step there (`T5-abort`): the timing rules don't time that path yet (§6).
+- While disarmed (after `fz.end` or a hang), `src = FZ` keeps reading the last staging.
+- The model never loses a token. A step queues at most 2, an XFER that queues 2 takes many
+  cycles, and the queue drains one a cycle (`bus-fuzzer.md` §2), so at most 3 wait at once and
+  `FZ_STATUS.token_lost` stays 0. The RTL must keep up as well.
 
 ### 4.7 The bus: detector and bus events
 - **The detector** runs every engine cycle, in every role except the owner of the bus's
@@ -496,7 +504,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 | `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample). A followed COND START/STOP adds `bus_confirm + 1` to the right side: the detector runs every cycle and its flag is sticky, so the follower only has to be waiting by the confirm. A COND START/STOP right after another (no timed step between) needs `nom − ceil(d·nom) − QUANT ≥ bus_confirm`: an edge inside the previous one's confirm window would replace its candidate (§4.7) |
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
-| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows, or a COND START/STOP it does (on a bus the others exit on it; any other edge of its own could land mid-frame). On a bus it has ABORT only if it is a followed COND START/STOP: a bus exit leaves its flag set, so any other ABORT step there would exit again at once, forever. |
+| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows, or a COND START/STOP it does (on a bus the others exit on it; any other edge of its own could land mid-frame). On a bus it has ABORT only if it is a followed COND START/STOP: a bus exit leaves its flag set, so any other ABORT step there would exit again at once, forever. No `fz.next` or `fz.end` lies between `abort_pc` and that step for a role that can abort or exit: the timing rules don't time the path from an abort or a bus exit into `abort_pc` (open), and their 40–48 cycles could miss the re-sync. |
 | `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block whose successor is one of those for it (the others wait in it). MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
 
 - Completion offsets relative to the step's end `tb`:
