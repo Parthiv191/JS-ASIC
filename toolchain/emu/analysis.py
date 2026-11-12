@@ -512,6 +512,23 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     states = _anchor_states(low, steps, diags)
     timed = set(steps)
 
+    # T5-startup: instruction 0 starts at now = 2, when every engine sees an idle-0 line's start-up 1
+    # (isa §2) as a rise, and a PP one falling back to idle at now = 3: a step there that watches
+    # for that edge takes it as the other party's
+    i0, img = instrs[0], low.image
+    watched = []
+    if i0.op == Op.COND:
+        k = CondKind(unpack_cond(i0.operand)[0])
+        if k == CondKind.RISE or (k == CondKind.FALL and img.lines[i0.line].kind == "pp"):
+            watched.append(i0.line)
+    elif i0.op == Op.XFER and img.lanes[i0.line].clk is not None:
+        watched.append(img.lanes[i0.line].clk)
+    for ln in watched:
+        if img.lines[ln].idle == 0:
+            diags.add("T5-startup", 0, f"instruction 0 watches {img.lines[ln].name}, an idle-0 line: it starts at "
+                                       f"now = 2, when every engine sees the line's start-up 1 (isa §2) as a rise; "
+                                       f"put an untimed instruction first")
+
     for pc, s in steps.items():
         p = s.prof
         tuples = states.get(pc, set())
