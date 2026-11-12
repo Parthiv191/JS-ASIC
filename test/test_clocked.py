@@ -11,6 +11,7 @@ test_timed's docstring). For the clocked lane, with H = nom:
 - tb := base + 2nH (the clock owner) or detect(last trailing edge) - EDGE_LAT (others)."""
 
 import os
+from dataclasses import replace
 import random
 import sys
 from pathlib import Path
@@ -272,7 +273,7 @@ if not GL:
     sys.path.insert(0, str(Path(__file__).resolve().parent / "cosim"))
     from harness import cosim
     from emu.compiler import compile_desc
-    from emu.cosim import replay
+    from emu.cosim import Kind, replay
     from emu.desc import Description
     from emu.isa import Role
     from emu.model.system import EngineSpec, Glitch
@@ -339,6 +340,140 @@ async def test_cosim_clocked_glitch(dut, role):
     await cosim(dut, rep, r)
 
 
+def duplex(cpol=0, cpha=0, od2=False, H=12):
+    """Duplex SPI: sck and mosi owned by a, miso by b; a sends 0xA4, b 0x3C, and every engine
+    gets dst = (miso << 8) | mosi = 0x3CA4 (isa §4.3). H = 12 lets the target's bit 0 be valid
+    by the first capture edge with cpha 0 (T3)."""
+    d = Description("dx", parties=("a", "b"))
+    sck = d.line("sck", owner="a", idle=cpol)
+    mosi = d.line("mosi", owner="a", idle=1)
+    miso = d.line("miso", kind="od" if od2 else "pp", owner="b", idle=1)
+    lane = d.lane("ln", mosi, clk=sck, cpol=cpol, cpha=cpha, data2=miso)
+    bit = d.profile("H", nom=H, min=H, max=0xFFFF)
+    with d.only("a"):
+        d.li("r0", 0xA4)
+    with d.only("b"):
+        d.li("r0", 0x3C)
+    d.xfer(8, lane, owner="a", prof=bit, src="r0", dst="r1")
+    d.mark(9)
+    d.xfer(8, lane, owner="a", prof=bit, src="r0", dst="fifo")
+    d.halt()
+    return compile_desc(d)
+
+
+DUPLEX = {"mode0": dict(), "mode3": dict(cpol=1, cpha=1), "od_miso": dict(od2=True)}
+
+
+@cocotb.test(skip=GL)
+@cocotb.parametrize(case=list(DUPLEX), role=["P0", "P1", "MON"])
+async def test_cosim_duplex(dut, case, role):
+    """Duplex in every role. MON samples both lines in one cycle, and the trace port has one
+    tr_sample: until architecture §5 has the second sample (tr_sample2, tr_line2, proposed in
+    this PR), MON is compared without its data2 sample pulses (registers in full)."""
+    r = Role[role]
+    rep = model(duplex(**DUPLEX[case]), r)
+    assert [et.regs[1] for et in rep.trace.engines] == [0x3CA4] * 3, "duplex packing"
+    if r == Role.MON:
+        miso = 2
+        rep = replace(rep, expected=[p for p in rep.expected if not (p.kind == Kind.SAMPLE and p.fields == (miso,))])
+    await cosim(dut, rep, r)
+
+
+def i2c(ld=3, H=12):
+    """An I2C-like exchange: OD scl (a) and a SHARED OD sda, cpol 1 cpha 1, stretch, ldelay. a
+    sends a byte, b ACKs (one bit), a sends another: each data owner lets sda go at the next
+    falling scl + ldelay (isa §4.3)."""
+    d = Description("i2c", parties=("a", "b"))
+    scl = d.line("scl", kind="od", owner="a", idle=1)
+    sda = d.line("sda", kind="od", owner="shared", idle=1)
+    lane = d.lane("ln", sda, clk=scl, cpol=1, cpha=1, ldelay=ld, stretch=True)
+    bit = d.profile("H", nom=H, min=H, max=0xFFFF)
+    d.li("r0", 0x24)
+    d.xfer(8, lane, owner="a", prof=bit, src="r0", dst="r1")
+    d.xfer(1, lane, owner="b", prof=bit, src="zero", dst="r2")
+    d.xfer(8, lane, owner="a", prof=bit, src="r0", dst="r3")
+    d.halt()
+    return compile_desc(d)
+
+
+@cocotb.test(skip=GL)
+@cocotb.parametrize(role=["P0", "P1", "MON"], stretch=[0, 20, 45])
+async def test_cosim_i2c_stretch(dut, role, stretch):
+    """I2C-like, with scl held low for `stretch` cycles over a release (a target stretching):
+    the clock owner waits, and every later edge and tb shift (isa §4.3)."""
+    r = Role[role]
+    gl = [Glitch(0, 120, stretch, 0)] if stretch else []
+    rep = model(i2c(), r, glitches=gl)
+    if stretch:
+        assert rep.trace.ticks > model(i2c(), r).trace.ticks, "the glitch stretches nothing"
+    await cosim(dut, rep, r)
+
+
+@cocotb.test()
+async def test_od_letgo(dut):
+    """OD let-go (isa §4.3), the clock owner: after an 8-bit OD XFER whose last bit is 0 (0x24,
+    LSB first), with cpha 1 it holds sda low until the next launching (leading, falling) edge,
+    which the next XFER drives at its tb + H, then releases it ldelay later. With cpha 0 it
+    releases ldelay after its own last edge."""
+    H, ld = 12, 3
+    t = list(UNUSED)
+    t[CLK] = line_byte(CLK, od=True, owner=0, idle=1)
+    t[DAT] = line_byte(DAT, od=True, owner=2, idle=1)
+    for cpha in (1, 0):
+        prog = [li(1, 0x24), xfer(8, Owner.P0, Src.R1, Dst.R2), xfer(8, Owner.P1, Src.ZERO, Dst.R3), HALT]
+        await reset(dut)
+        dut.uio_in.value = 1 << CLK | 1 << DAT
+        host = Host(dut)
+        bench = Bench(dut)
+        await write_tables(host, {1: (H, H, 0xFFFF)}, {0: clocked_lane(DAT, CLK, 1, cpha, ld)})
+        await run_program(host, [encode(i) for i in prog], 0, t)
+        await wait_halted(host)
+        clk1, dat1, tb1 = owner_plan(8, H, 1, cpha, ld, 0x24, start=4)
+        if cpha == 1:
+            start2 = nxt(4, tb1 + EDGE_LAT)        # the first XFER reads back: done at its last sample
+            base2 = max(tb1, start2 - H)
+            release = base2 + H + ld                # the next leading edge + ldelay
+        else:
+            release = tb1 + ld                      # its own last edge + ldelay
+        last = dat1[-1][0]                          # bit 7 (0) goes out here
+        for c in range(last + 1, release + 4):
+            out, oe = bench.pin(c, DAT)
+            want = 1 if c <= release else 0         # a drive (or release) at c shows from c + 1
+            assert oe == want, f"cpha {cpha}: sda oe at now {c} is {oe}, want {want} (release at {release})"
+
+
+def cond_rise_stretch():
+    """COND RISE done on a stretch lane's clock (isa §4.3): it waits for the clock to read 1, its
+    tb and MEAS are the real rise, and the wait is bounded by max from tb (60 here). The HOLD
+    after a reading XFER overruns, so timing checks are off."""
+    d = Description("rise", parties=("a", "b"))
+    scl = d.line("scl", kind="od", owner="a", idle=1)
+    sda = d.line("sda", kind="od", owner="shared", idle=1)
+    lane = d.lane("ln", sda, clk=scl, cpol=1, cpha=1, ldelay=3, stretch=True)
+    bit = d.profile("H", nom=12, min=12, max=0xFFFF)
+    lim = d.profile("L", nom=12, min=10, max=60)
+    d.li("r0", 0x24)
+    d.xfer(8, lane, owner="a", prof=bit, src="r0", dst="r1")
+    d.hold(scl, 0, owner="a", prof=bit)
+    d.cond("rise", scl, owner="a", prof=lim, meas="r4")
+    d.halt()
+    return compile_desc(d, check_timing=False)
+
+
+@cocotb.test(skip=GL)
+@cocotb.parametrize(role=["P0", "P1"], hold_low=[0, 30, 100])
+async def test_cosim_cond_rise_stretch(dut, role, hold_low):
+    """scl held low over the COND RISE's release: none (MEAS 12), 30 cycles (MEAS 39, tb the real
+    rise), 100 cycles (TIMEOUT, MEAS 0xFFFF)."""
+    r = Role[role]
+    rep = model(cond_rise_stretch(), r, glitches=[Glitch(0, 214, hold_low, 0)] if hold_low else [])
+    meas = rep.trace.engines[0].regs[4]
+    assert meas == {0: 0xC, 30: 0x27, 100: 0xFFFF}[hold_low]
+    # architecture §5: a COND step's tr_value is its measurement; the model records 0 for every
+    # COND (reported to verification), so the expected pulse takes the model's own MEAS (r4)
+    exp = [replace(p, fields=(p.fields[0], p.fields[1], meas, p.fields[3]))
+           if p.kind == Kind.STEP and p.pc == 3 else p for p in rep.expected]
+    await cosim(dut, replace(rep, expected=exp), r)
 @cocotb.test()
 async def test_clock_owner_lane3(dut):
     """The clock owner on lane 3: its LANE bytes are at 0x0444-0x0446, so every LANE byte position
