@@ -293,7 +293,8 @@ module engine #(
   assign tx_count = tx_n;
   assign rx_count = rx_n;
   assign rx_head  = rxq[rx_rp];
-  assign rx_next  = rxq[rx_rp + 3'd1];
+  wire [2:0]  rx_rp1 = rx_rp + 3'd1;   // a sized wire, not inline index arithmetic (see project.v)
+  assign rx_next  = rxq[rx_rp1];
 
   // ---- the timed step: fields latched at its start (s_*), or straight from pf in the start cycle ----
   reg  [1:0]  s_kind;
@@ -317,7 +318,12 @@ module engine #(
     case (pf_pi[2:0])
       3'd0:    prof = {16'hFFFF, 16'h0000, 16'h0000};   // IDLE = (0, 0, INF)
       3'd7:    prof = p7;
-      default: prof = prof_tab[(t_prof[2:0] - 3'd1) * 48 +: 48];
+      3'd1:    prof = prof_tab[0 +: 48];     // explicit: no inline index arithmetic (see project.v)
+      3'd2:    prof = prof_tab[48 +: 48];
+      3'd3:    prof = prof_tab[96 +: 48];
+      3'd4:    prof = prof_tab[144 +: 48];
+      3'd5:    prof = prof_tab[192 +: 48];
+      default: prof = prof_tab[240 +: 48];   // 6
     endcase
   end
 
