@@ -229,7 +229,7 @@ removes them because nothing loads them. All are valid in the clk cycle of their
 | uo_out[2] | ERR |
 | uo_out[3..5] | flash SCK, CS_N, MOSI |
 | uo_out[6] | REPORT |
-| uo_out[7] | ACT |
+| uo_out[7] | ACT: engine 0's running state through one flop. It runs from `now = 1` through its HALT's start cycle, so ACT reads 1 from `now = 2` through that cycle + 1 |
 | uio[7:0] | protocol pins IO0–IO7. OD lines need **external** pull-ups: 2.2–4.7 kΩ for I2C (the Basys 3's internal ones are too weak for 400 kHz), and 1.5 kΩ on D− for USB-LS. |
 
 **Verify against the TT demo-board docs:**
