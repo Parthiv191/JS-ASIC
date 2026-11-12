@@ -18,6 +18,8 @@ class Monitor:
     def __init__(self, dut, stim: list[int], run_s0: int, gates: bool, eng: int = 0):
         self.dut, self.stim, self.run_s0, self.gates = dut, stim, run_s0, gates
         self.eng = None if gates else getattr(dut.user_project, f"u_eng{eng}")
+        # a duplex MON's data2 sample (architecture §5), on engines that have the clocked lanes
+        self.sample2 = self.eng is not None and hasattr(self.eng, "tr_sample2")
         self.clk = 0                                  # rising edges seen
         self.pins: list[tuple[int, int]] = []         # (uio_oe, uio_out) per edge
         self.act = bytearray()                        # ACT per edge
@@ -70,6 +72,8 @@ class Monitor:
             add(pulse(now, Kind.BR, pc, int(e.tr_taken.value)))
         if int(e.tr_sample.value):
             add(pulse(now, Kind.SAMPLE, pc, int(e.tr_line.value)))
+        if self.sample2 and int(e.tr_sample2.value):
+            add(pulse(now, Kind.SAMPLE, pc, int(e.tr_line2.value)))
         if halted and not self.halted:
             self.halted = True
             add(pulse(now, Kind.HALT, pc))

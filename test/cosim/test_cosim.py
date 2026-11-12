@@ -13,7 +13,7 @@ from harness import GATES, CosimMismatch, cosim
 from emu.compiler import compile_desc
 from emu.cosim import Kind, pulse, replay
 from emu.desc import Description
-from emu.isa import Instr, Op, Role, encode
+from emu.isa import INF, Instr, Op, Role, encode
 from emu.model.system import EngineSpec, Glitch
 from emu.protocols import get, slack
 
@@ -127,6 +127,48 @@ async def test_cond_early(dut):
     """A glitch raises the line 13 cycles before the window opens: EARLY (isa §4.2)."""
     rep = model(window(), Role.P1, glitches=[Glitch(0, 25, 2, 1)])
     assert "EARLY" in kinds(rep)
+    await cosim(dut, rep, Role.P1)
+
+
+def meas(timeout_only=False):
+    """HOLD 1 · COND fall (unbounded), MEAS r2 · HOLD 0 · COND rise (bounded), MEAS r3 · HALT:
+    tb moves before each COND. `timeout_only`: COND fall (bounded), MEAS r2 · HALT."""
+    d = Description("meas", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=16, min=14, max=18)
+    win = d.profile("W", nom=20, min=0, max=40)
+    if timeout_only:
+        d.cond("fall", ln, owner="a", prof=win, meas="r2")
+    else:
+        d.hold(ln, 1, owner="a", prof=bit)
+        d.cond("fall", ln, owner="a", prof=d.profile("U", nom=20, min=0, max=INF), meas="r2")
+        d.hold(ln, 0, owner="a", prof=bit)
+        d.cond("rise", ln, owner="a", prof=win, meas="r3")
+    d.halt()
+    return compile_desc(d)
+
+
+def cond_values(rep):
+    return [r.value for r in rep.trace.engines[0].records if r.op == "COND"]
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], peer_clock=[(1, 1), (49, 50)])
+async def test_cond_meas(dut, role, peer_clock):
+    """A COND's trace value is what MEAS writes (architecture §5), and the registers match: the
+    model had none for every COND, and no co-sim test had MEAS, so that gap passed (#50)."""
+    rep = model(meas(), role, peer_clock=peer_clock)
+    e = rep.trace.engines[0]
+    conds = [r for r in e.records if r.op == "COND"]
+    assert cond_values(rep) == [e.regs[2], e.regs[3]] and all(r.value != r.tb for r in conds)
+    await cosim(dut, rep, role)
+
+
+@cocotb.test()
+async def test_cond_meas_timeout(dut):
+    """No owner: the COND times out (no ABORT), so its value and register are 0xFFFF."""
+    rep = model(meas(timeout_only=True), Role.P1, peers=False)
+    assert "TIMEOUT" in kinds(rep) and cond_values(rep) == [0xFFFF] == [rep.trace.engines[0].regs[2]]
     await cosim(dut, rep, Role.P1)
 
 
