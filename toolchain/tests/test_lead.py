@@ -215,6 +215,7 @@ def test_after_a_pop_a_step_inside_a_lead_block_makes_the_others_wait():
     def pop_then_cond(P):
         P.d.pop("r6")
         P.d.cond("fall", P.scl, owner="c", prof=P.d.profile("Bc", nom=H, min=0, max=3 * H))
+        P.d.cond("rise", P.scl, owner="c", prof=P.wait)  # SCL high again for the STOP sequence (R2-edge)
     def blk_inside(P):
         controller_block(P, body_before_stop=pop_then_cond)
     compile_desc(i2c(after=blk_inside))

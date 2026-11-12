@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
-    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
+    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, BusKind, Dst, Instr, Op, Owner,
     CondKind, FzOp, RawOp, Role, Src, FZ_END_CYCLES, FZ_NEXT_CYCLES, FZ_TOK_CYCLES,
     reg_of, unpack_cond, unpack_role_if, unpack_xfer,
 )
@@ -105,6 +105,193 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
             if new != old:
                 state[s] = new
                 work.append(s)
+    return diags.list()
+
+
+# ----------------------------------------------------------------------------- R2-edge
+_LG, _SHUT = "LG", "SHUT"   # a pending OD let-go (low until the lane's next clock edge); a shut gate
+_PARTIES = (Role.P0, Role.P1)
+
+
+def check_levels(desc, low: Lowered) -> list[Diagnostic]:
+    """R2-edge (isa §5). A COND its owner does drives the post-edge level (isa §4.2): if the wire is
+    already there, there is no edge and the others wait for one that never comes. So on every path
+    the owner can take, the wire is at the pre-edge level before the COND.
+
+    The walk, once per party r along r's paths, tracks every party's drive on every line:
+    - a PP line is its owner's drive. It is the idle level from reset, unless the line is gated;
+    - an OD line is the wired-AND of every party's drive. It starts released (1), whatever its idle;
+    - a drive comes from a HOLD, a COND's post-edge level, an XFER from ZERO or ONES (a PP data line
+      keeps its last bit; a clocked OD one holds it until the lane's next clock edge, the let-go),
+      a lane's clock at its idle level after a clocked XFER, or RAW SET/REL;
+    - a gated line is released while its gate is shut: at RUN and after a SELECT STOP. RAW SET does
+      nothing then (isa §2);
+    - a role block r skips leaves unknown whatever its parties may drive in it;
+    - anything else, and paths that disagree, leave a drive unknown.
+
+    COND START/STOP are the edges on `bus_a` (START = FALL, STOP = RISE); on I2C, SCL must be high
+    too. The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
+    instrs = low.instrs
+    diags = _Diags(desc, low)
+    img = low.image
+    if not instrs:
+        return []
+    lines, lanes = img.lines, img.lanes
+    kind = img.bus.kind
+    bus_a = img.bus.a if kind in (BusKind.I2C, BusKind.SELECT) else None
+    scl = img.bus.b if kind == BusKind.I2C else None
+    span_at = {pc: sp for sp in low.spans for pc in range(sp.start, sp.end)}
+    block_at = {sp.role_if_pc: sp for sp in low.spans}
+
+    def runs(pc: int) -> tuple:
+        sp = span_at.get(pc)
+        return _PARTIES if sp is None else tuple(q for q in _PARTIES if q in sp.roles)
+
+    def does(owner, q) -> bool:
+        return owner == Owner.SHARED or int(owner) == int(q)
+
+    def edge_line(ins: Instr):
+        """(kind, line) of a COND: START/STOP are on bus_a."""
+        k = CondKind(unpack_cond(ins.operand)[0])
+        return k, (bus_a if k in (CondKind.START, CondKind.STOP) else ins.line)
+
+    def drives(pc: int) -> list[tuple[Role, int]]:
+        """(party, line) pairs the instruction at pc may drive."""
+        ins, ex = instrs[pc], runs(pc)
+        out: list[tuple[Role, int]] = []
+        if ins.op in (Op.COND, Op.HOLD):
+            line = edge_line(ins)[1] if ins.op == Op.COND else ins.line
+            if line is not None:
+                out += [(q, line) for q in ex if does(ins.owner, q)]
+        elif ins.op == Op.XFER:
+            la = lanes[ins.line]
+            out += [(q, la.data) for q in ex if does(ins.owner, q)]
+            for ln in (la.data2, la.clk):
+                if ln is not None:
+                    out += [(q, ln) for q in ex if does(lines[ln].owner, q)]
+        elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
+            out += [(q, ins.ra) for q in ex]
+        return out
+
+    touched = {sp.role_if_pc: {(q, ln) for pc in range(sp.start, sp.end) for q, ln in drives(pc)}
+               for sp in low.spans}
+
+    def wire(st, i):
+        ln = lines[i]
+        if ln.kind == "pp":
+            v = st[int(ln.owner)][i]
+            return 1 if v == _SHUT else v
+        vals = [st[int(q)][i] for q in _PARTIES]
+        if any(v in (0, _LG) for v in vals):
+            return 0
+        return None if any(v is None for v in vals) else 1
+
+    def edge_on(st, clk: int) -> None:
+        """An edge on a lane's clock: that lane's let-go is taken (isa §4.3)."""
+        for la in lanes:
+            if la.clk == clk:
+                for dl in (la.data, la.data2):
+                    if dl is not None:
+                        for q in _PARTIES:
+                            if st[int(q)][dl] == _LG:
+                                st[int(q)][dl] = 1
+
+    def check(st, pc: int, ins: Instr, r: Role) -> None:
+        k, line = edge_line(ins)
+        if line is None:
+            return
+        name = lines[line].name
+        if k in (CondKind.FALL, CondKind.START):
+            ok, why = wire(st, line) == 1, f"{name} may not be high here"
+        elif lines[line].kind == "pp":
+            ok, why = wire(st, line) == 0, f"{name} may not be low here"
+        else:  # an OD RISE: the doers' release lets it up only if nobody else holds it low
+            mine = [st[int(q)][line] for q in _PARTIES if does(ins.owner, q)]
+            others = [st[int(q)][line] for q in _PARTIES if not does(ins.owner, q)]
+            ok = any(v in (0, _LG) for v in mine) and all(v == 1 for v in others)
+            why = f"{name} may not be low by the doer's drive alone here"
+        if scl is not None and k in (CondKind.START, CondKind.STOP) and wire(st, scl) != 1:
+            ok, why = False, f"SCL ({lines[scl].name}) may not be high here"
+        if not ok:
+            diags.add("R2-edge", pc, f"COND {k.name} by {r.name}: {why}, so its drive makes no edge "
+                                     f"and the others wait for one (isa §4.2)")
+
+    def step(st, pc: int) -> None:
+        ins, ex = instrs[pc], runs(pc)
+        if ins.op in (Op.COND, Op.HOLD):
+            if ins.op == Op.COND:
+                k, line = edge_line(ins)
+                level = 0 if k in (CondKind.FALL, CondKind.START) else 1
+            else:
+                k, line, level = None, ins.line, ins.operand & 1
+            if line is None:
+                return
+            for q in ex:
+                if does(ins.owner, q):
+                    st[int(q)][line] = level
+            edge_on(st, line)
+            if k == CondKind.STOP and kind == BusKind.SELECT:
+                for i, ln in enumerate(lines):
+                    if ln.gated:
+                        st[int(ln.owner)][i] = _SHUT
+        elif ins.op == Op.XFER:
+            la = lanes[ins.line]
+            if la.clk is not None:
+                edge_on(st, la.clk)
+            const = {Src.ZERO: 0, Src.ONES: 1}.get(unpack_xfer(ins.operand)[1])
+            for q, dl in drives(pc):
+                if dl == la.clk:
+                    st[int(q)][dl] = la.cpol
+                elif lines[dl].kind == "pp" or const == 1:
+                    st[int(q)][dl] = const
+                else:
+                    st[int(q)][dl] = _LG if la.clk is not None and const == 0 else None
+        elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
+            od = lines[ins.ra].kind == "od"
+            for q in ex:
+                cur = st[int(q)][ins.ra]
+                if cur == _SHUT:
+                    continue  # a shut gate ignores RAW (isa §2)
+                if lines[ins.ra].gated and cur is None:
+                    st[int(q)][ins.ra] = None
+                elif ins.sub == RawOp.SET:
+                    st[int(q)][ins.ra] = ins.operand & 1
+                else:
+                    st[int(q)][ins.ra] = 1 if od else None
+
+    init = []
+    for q in _PARTIES:
+        row = []
+        for ln in lines:
+            if ln.kind == "od":
+                row.append(1)
+            elif ln.gated:
+                row.append(_SHUT if int(ln.owner) == int(q) else 1)
+            else:
+                row.append(ln.idle)
+        init.append(tuple(row))
+    for r in _PARTIES:
+        state: dict[int, tuple] = {0: tuple(init)}
+        work = [0]
+        while work:
+            pc = work.pop()
+            st = [list(row) for row in state[pc]]
+            ins = instrs[pc]
+            if ins.op == Op.COND and r in runs(pc) and does(ins.owner, r):
+                check(st, pc, ins, r)
+            step(st, pc)
+            sp = block_at.get(pc)
+            if sp is not None and r not in sp.roles:  # r skips it: what its parties drive there is unknown
+                for q, ln in touched[pc]:
+                    st[int(q)][ln] = None
+            out = tuple(tuple(row) for row in st)
+            for s in successors(instrs, pc, r):
+                old = state.get(s)
+                new = out if old is None else tuple(tuple(x if x == y else None for x, y in zip(o, n))
+                                                    for o, n in zip(old, out))
+                if new != old:
+                    state[s] = new
+                    work.append(s)
     return diags.list()
 
 
