@@ -103,3 +103,38 @@ def test_the_value_oracle_catches_bugs_every_role_shares(monkeypatch, plant):
     plant(monkeypatch)
     rep = campaign(seed=3, iters=60)
     assert any("value" in r.rules for _, r in rep.failures), "the shared bug went unseen"
+
+
+def test_a_late_host_stalls_pops_and_every_oracle_holds():
+    """The host writes one word at a time, late: POPs stall, and T5-stall must keep the others waiting."""
+    import random
+    from dataclasses import replace
+    from emu.gen.check import underrun_free
+    rng = random.Random(3)
+    checked = 0
+    for s in range(200):
+        r = random_recipe(s)
+        if compile_recipe(r)[1] is not None or not underrun_free(r):
+            continue
+        if not any(p[0] == "pop" for f in r.frames for p in f.prep):
+            continue
+        env = Env.draw(rng, r.ppm)
+        assert run_case(Case(r, replace(env, late=(rng.randint(0, 1500), rng.randint(50, 300))))).verdict == "ok"
+        checked += 1
+    assert checked >= 20
+
+
+def test_a_pop_that_doesnt_wait_fails_only_with_a_late_host(monkeypatch):
+    """A planted bug: POP on an empty TX FIFO reads 0 instead of stalling. The early host never lets
+    TX run dry, so only the late host shows it."""
+    import emu.gen.check as check
+    orig = engine.Engine._op_pop
+
+    def bad(self, ins):
+        if not self.tx:
+            self.tx.append(0)
+        yield from orig(self, ins)
+    monkeypatch.setattr(engine.Engine, "_op_pop", bad)
+    assert any("value" in r.rules for _, r in campaign(seed=5, iters=120, envs=3).failures)
+    monkeypatch.setattr(check, "underrun_free", lambda r: False)  # no late host
+    assert campaign(seed=5, iters=120, envs=3).failures == []
