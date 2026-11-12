@@ -44,9 +44,9 @@ def run_roles(desc: Description, perm, payload: dict[str, list[int]], clocks=Non
     return s.run(max_ticks)
 
 
-from . import uart  # noqa: E402  (registers after the helpers it uses)
+from . import i2c, spi, uart  # noqa: E402  (registers after the helpers it uses)
 
-PROTOCOLS: dict[str, ProtocolSpec] = {p.name: p for p in (uart.SPEC,)}
+PROTOCOLS: dict[str, ProtocolSpec] = {p.name: p for p in (uart.SPEC, spi.SPEC, i2c.SPEC)}
 
 
 def get(name: str) -> ProtocolSpec:

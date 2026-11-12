@@ -380,10 +380,11 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     for r in sorted(aborting):
         for pc in gaps(instrs, timed, apc, r):
             s = steps[pc]
-            if not (s.op == Op.COND and not s.prof.bounded and not s.does(r)):
+            # it follows the COND, or does a COND START/STOP (on a bus the others exit on it)
+            if not (s.op == Op.COND and not s.prof.bounded and (not s.does(r) or s.bus_wait)):
                 diags.add("T5-abort", pc, f"{r.name} can abort and restart at pc {apc}; the first timed "
-                                          f"step it reaches there must be an unbounded COND it follows, "
-                                          f"so it waits for the other party's next event")
+                                          f"step it reaches there must be an unbounded COND it follows, or "
+                                          f"a COND START/STOP it does, so the two parties meet again")
             elif bus_on and s.abort and not s.bus_wait:
                 # a bus exit leaves its flag set, so this step's ABORT would exit again at once
                 diags.add("T5-abort", pc, f"on a bus the first step at abort_pc may have ABORT only if "
@@ -394,8 +395,12 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
 
     # pairwise checks: predecessor timed step (or reset) -> next timed step
     preds: list[tuple[_Step | None, int]] = [(None, 0)] + [(s, pc + 1) for pc, s in steps.items()]
+    starts = [0] + ([apc] if apc else [])
+    runs = {r: _reach(instrs, starts, r) for r in ROLES}
     for prev, start in preds:
-        per_role = {r: gaps(instrs, timed, start, r) for r in ROLES}
+        # only the roles that can run prev (a step in a lead block is the leader's alone)
+        per_role = {r: gaps(instrs, timed, start, r) if prev is None or prev.pc in runs[r] else {}
+                    for r in ROLES}
         for nxt_pc in set().union(*per_role.values()):
             s = steps[nxt_pc]
             if (prev is not None and prev.op == Op.COND and prev.prof.bounded and not prev.abort
@@ -404,6 +409,14 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 diags.add("T5-timeout", prev.pc, f"a follower that times out here finishes up to {late} "
                                                  f"cycles late, off the owner's timeline; the next timed "
                                                  f"step (pc {nxt_pc}) must be an unbounded COND, or add abort")
+            if prev is not None and prev.bus_wait and s.bus_wait:
+                # a bus edge inside the previous one's confirm window replaces its candidate
+                # (isa §4.7): that START or STOP is never confirmed, and its followers hang
+                confirm = s.bus_wait - 1
+                if s.prof.nom - drift(ppm, s.prof.nom) - Q < confirm:
+                    diags.add("T5-watch", nxt_pc, f"this bus edge comes {s.prof.nom} after the previous "
+                                                  f"one: it needs nom - drift - QUANT >= bus_confirm "
+                                                  f"{confirm}, or it replaces that one's candidate")
             if s.owner_role is None:
                 continue  # SHARED steps: Phase 4 (ARB)
             st = {}
@@ -437,9 +450,17 @@ def _reach(instrs: list[Instr], starts: list[int], role: Role) -> set[int]:
     return seen
 
 
-def _makes_others_wait(s: _Step, r: Role) -> bool:
+def _makes_others_wait(s: _Step, r: Role, low: Lowered | None = None,
+                       steps: dict[int, _Step] | None = None) -> bool:
     """An unbounded COND that r does, or an unbounded clocked XFER r clocks (whoever owns its
-    data): the others wait for r however long it stalled. A bounded one times them out."""
+    data): the others wait for r however long it stalled. A bounded one times them out. A step
+    in a lead block r leads, if the block's successor makes the others wait for r: they are in
+    it while r decides (R3-lead)."""
+    if low is not None and steps is not None:
+        for sp in low.spans:
+            if sp.lead and r in sp.roles and sp.start <= s.pc < sp.end:
+                succ = steps.get(sp.end)
+                return succ is not None and _makes_others_wait(succ, r)
     if s.prof.bounded:
         return False
     if s.op == Op.COND:
@@ -459,7 +480,7 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
             ins = instrs[pc]
             if ins.op == Op.POP:
                 for nxt in sorted(gaps(instrs, timed, pc + 1, r)):
-                    if not _makes_others_wait(steps[nxt], r):
+                    if not _makes_others_wait(steps[nxt], r, low, steps):
                         diags.add("T5-stall", nxt, f"{r.name} can stall at the POP at pc {pc}; its next "
                                                    f"timed step must be one it owns that makes the others "
                                                    f"wait (an unbounded COND it does, or an unbounded "
@@ -467,7 +488,7 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
             elif (ins.op == Op.XFER and (steps[pc].does(r) or r == steps[pc].d2_owner)
                   and unpack_xfer(ins.operand)[1] == Src.FIFO):  # it drives a data line from TX
                 s = steps[pc]
-                if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r):
+                if (not s.clocked or s.is_clk_owner(r)) and not _makes_others_wait(s, r, low, steps):
                     diags.add("T5-stall", pc, f"{r.name} owns this src = FIFO XFER and waits here while "
                                               f"TX is empty, so its followers lose the timeline; only an "
                                               f"unbounded clocked XFER its owner clocks may take src = "
@@ -486,10 +507,13 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             diags.add("T5-overrun", pc, f"owner starts at {o_hi}, after the planned action at {offset}")
         event = max(p.nom, o_lo)
         dr = drift(ppm, amax + p.nom)
+        # a followed START/STOP needs its follower waiting only by the confirm: the detector runs
+        # every cycle and the flag is sticky (isa §4.7), so bus_wait = bus_confirm + 1 more
+        seen_by = event + E + s.bus_wait
         for r in followers:
-            if st[r][1] + dr > event + E:
+            if st[r][1] + dr > seen_by:
                 diags.add("T5-watch", pc, f"{r.name} starts watching at {st[r][1]} but the event is "
-                                          f"visible at {event + E} (drift {dr})")
+                                          f"visible at {seen_by} (drift {dr})")
         if p.bounded or p.min > 0:
             late = max(p.nom, o_hi)
             m_lo, m_hi = event - dr - Q, late + dr + Q

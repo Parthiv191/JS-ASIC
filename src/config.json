@@ -19,13 +19,13 @@
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
-  "CLOCK_PERIOD": 20,
+  "CLOCK_PERIOD": 25,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
-  "//": "Hold margins 0.05 / 0.02 ns (template 0.1 / 0.05): hold padding was ~31K um2 of delay cells",
-  "//": "on short flop-to-flop paths. Final hold WS stays positive in every corner (aBC: +0.06 ns).",
-  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.05,
-  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.02,
+  "//": "Hold margins 0.1 / 0.05 ns, the template's: at 0.05 / 0.02 (to save ~31K um2 of hold padding)",
+  "//": "a host SPI path failed hold by 0.009 ns at the fast corner (#51).",
+  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
+  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
 
   "//": "RUN_LINTER, LINTER_INCLUDE_PDK_MODELS - Disabling the linter is not recommended!",
   "RUN_LINTER": 1,
@@ -56,8 +56,8 @@
       "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x32_c2_bm_bist.lef"],
       "vh": ["dir::../flow/blackbox-RM_IHPSG13_1P_512x32_c2_bm_bist.v"],
       "instances": {
-        "u_col1.u_pm.u_sram": {"location": [405.92, 483.84], "orientation": "N"},
-        "u_col2.u_pm.u_sram": {"location": [855.52, 483.84], "orientation": "N"}
+        "u_col1.u_pm.u_sram": {"location": [810.56, 483.84], "orientation": "N"},
+        "u_col2.u_pm.u_sram": {"location": [1260.16, 483.84], "orientation": "N"}
       },
       "lib": {
         "*typ*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_typ_1p20V_25C.lib"],
@@ -111,6 +111,12 @@
   "//": "cap still fail the flow in every corner (below); local run aBC: 0 of either.",
   "DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
   "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
+  "//": "capacitance repair margins 20/10 -> 50%: the SRAM's A_DOUT pins (limit 0.064 pF) came out up to 9% over after routing at 25% (#48)",
+  "DESIGN_REPAIR_MAX_CAP_PCT": 50,
+  "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 50,
+  "//": "slew repair margins 20/10 -> 40%: the SRAM's A_DIN[4:5] came out 15% over (25% after GRT wasn't enough), then a nor4_1 driving 6 loads 3% over (#51)",
+  "DESIGN_REPAIR_MAX_SLEW_PCT": 40,
+  "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 40,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
   "MAX_CAP_VIOLATION_CORNERS": ["*"],
 
