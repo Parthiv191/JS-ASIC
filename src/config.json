@@ -114,8 +114,9 @@
   "//": "capacitance repair margins 20/10 -> 50%: the SRAM's A_DOUT pins (limit 0.064 pF) came out up to 9% over after routing at 25% (#48)",
   "DESIGN_REPAIR_MAX_CAP_PCT": 50,
   "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 50,
-  "//": "post-GRT slew margin 10 -> 25%: the SRAM's A_DIN[4:5] came out 15% over their slew limit after routing (#51)",
-  "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 25,
+  "//": "slew repair margins 20/10 -> 40%: the SRAM's A_DIN[4:5] came out 15% over (25% after GRT wasn't enough), then a nor4_1 driving 6 loads 3% over (#51)",
+  "DESIGN_REPAIR_MAX_SLEW_PCT": 40,
+  "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 40,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
   "MAX_CAP_VIOLATION_CORNERS": ["*"],
 
