@@ -474,3 +474,21 @@ async def test_cosim_cond_rise_stretch(dut, role, hold_low):
     exp = [replace(p, fields=(p.fields[0], p.fields[1], meas, p.fields[3]))
            if p.kind == Kind.STEP and p.pc == 3 else p for p in rep.expected]
     await cosim(dut, replace(rep, expected=exp), r)
+@cocotb.test()
+async def test_clock_owner_lane3(dut):
+    """The clock owner on lane 3: its LANE bytes are at 0x0444-0x0446, so every LANE byte position
+    is written and read (the gds flow once built LANE byte k at bit k, which lane 0's first byte
+    alone can't show). Mode 3 with ldelay 3."""
+    H, n, v, cpol, cpha, ld = 5, 8, 0x5C, 1, 1, 3
+    prog = [li(1, v), xfer(n, Owner.P0, Src.R1, Dst.R2, lane=3), HALT]
+    await reset(dut)
+    dut.uio_in.value = cpol | 1 << DAT
+    host = Host(dut)
+    bench = Bench(dut)
+    await write_tables(host, {1: (H, H, H)}, {3: clocked_lane(DAT, CLK, cpol, cpha, ld)})
+    await run_program(host, [encode(i) for i in prog], 0, lines(cpol))
+    await wait_halted(host)
+    clk, dat, tb = owner_plan(n, H, cpol, cpha, ld, v, start=4)
+    check_wave(bench, CLK, clk, cpol, 1, tb + 4, "lane 3")
+    check_wave(bench, DAT, dat, 1, 1, tb + 4, "lane 3")
+    assert await get_reg(host, 2) == v
