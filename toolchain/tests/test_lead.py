@@ -217,9 +217,10 @@ def test_after_a_pop_a_step_inside_a_lead_block_makes_the_others_wait():
         P.d.cond("fall", P.scl, owner="c", prof=P.d.profile("Bc", nom=H, min=0, max=3 * H))
     def blk_inside(P):
         controller_block(P, body_before_stop=pop_then_cond)
-    compile_desc(i2c(after=blk_inside))
+    # check_levels off: this description falls SCL twice (the COND, then the STOP sequence's)
+    compile_desc(i2c(after=blk_inside), check_levels=False)
     with pytest.raises(CompileError, match="T5-stall"):
-        compile_desc(i2c(after=lambda P: (pop_then_cond(P), stop_and_halt(P))))
+        compile_desc(i2c(after=lambda P: (pop_then_cond(P), stop_and_halt(P))), check_levels=False)
 
 
 # ---------------------------------------------------------------- on the model, both parties

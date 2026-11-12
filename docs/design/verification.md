@@ -38,6 +38,7 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `R1-owner` | `test_compiler.py`, `test_engine_clocked.py` |
 | `R1-shared` | `test_compiler.py` |
 | `R2-branch` | `test_analysis.py`, `test_engine_bus.py`, `test_engine_clocked.py`, `test_fz.py` |
+| `R2-edge` | `test_edge_rule.py`, `test_gen.py` |
 | `R3-escape` | `test_compiler.py`, `test_lead.py` |
 | `R3-fz` | `test_fz.py` |
 | `R3-lead` | `test_lead.py` |

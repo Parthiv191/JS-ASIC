@@ -8,8 +8,8 @@ from descs import spi_like, uart_like  # noqa: F401
 
 
 def diag_rules(desc, check_timing=True):
-    try:
-        compile_desc(desc, check_timing=check_timing)
+    try:  # R2-edge has its own tests (test_edge_rule.py); these loops fall on a low line
+        compile_desc(desc, check_timing=check_timing, check_levels=False)
     except CompileError as e:
         return {d.rule for d in e.diags}
     return set()

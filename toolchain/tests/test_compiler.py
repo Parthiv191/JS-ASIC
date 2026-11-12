@@ -27,7 +27,7 @@ def test_lowering_role_if_count_and_labels():
         d.alu("add", "r0", "r0", 1)
     d.cond("fall", pp, owner="a")
     d.br("top")
-    img = compile_desc(d, check_timing=False)
+    img = compile_desc(d, check_timing=False, check_levels=False)  # lowering only: it falls twice
     ins = img.instrs()
     assert [i.op for i in ins] == [Op.ROLE_IF, Op.LI, Op.ALU, Op.COND, Op.BR]
     assert unpack_role_if(ins[0].operand) == (0b101, 2)

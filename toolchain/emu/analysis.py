@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
-    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
+    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, BusKind, Dst, Instr, Op, Owner,
     CondKind, FzOp, RawOp, Role, Src, FZ_END_CYCLES, FZ_NEXT_CYCLES, FZ_TOK_CYCLES,
     reg_of, unpack_cond, unpack_role_if, unpack_xfer,
 )
@@ -105,6 +105,69 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
             if new != old:
                 state[s] = new
                 work.append(s)
+    return diags.list()
+
+
+# ----------------------------------------------------------------------------- R2-edge
+def check_levels(desc, low: Lowered) -> list[Diagnostic]:
+    """R2-edge (isa §5). A COND its owner does drives the post-edge level (isa §4.2): if the owner
+    left the line at that level already, there is no edge and the others wait for one that never
+    comes. So on every path the owner can take, the line is at the pre-edge level before the COND.
+
+    Per party, the walk tracks the level it leaves on each line: the idle level from reset; a HOLD's
+    level; a COND's post-edge level; an XFER from ZERO or ONES on a PP data line (it keeps the last
+    bit); a lane's clock at its idle level after a clocked XFER. Anything else (a register or FIFO
+    source, an OD data line's let-go, RAW REL on a PP line) leaves it unknown, and paths that
+    disagree meet as unknown. COND START/STOP are the edges on `bus_a` (START = FALL, STOP =
+    RISE). The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
+    instrs = low.instrs
+    diags = _Diags(desc, low)
+    img = low.image
+    if not instrs:
+        return []
+    lines = img.lines
+    bus_a = img.bus.a if img.bus.kind in (BusKind.I2C, BusKind.SELECT) else None
+    for r in (Role.P0, Role.P1):
+        def mine(owner) -> bool:
+            return int(owner) == int(r)
+        state: dict[int, tuple] = {0: tuple(ln.idle for ln in lines)}
+        work = [0]
+        while work:
+            pc = work.pop()
+            lv = list(state[pc])
+            ins = instrs[pc]
+            if ins.op == Op.COND and mine(ins.owner):
+                kind = CondKind(unpack_cond(ins.operand)[0])
+                line = ins.line if kind in (CondKind.FALL, CondKind.RISE) else bus_a
+                if line is not None:
+                    pre = 1 if kind in (CondKind.FALL, CondKind.START) else 0
+                    if lv[line] != pre:
+                        have = "an unknown level" if lv[line] is None else f"{lv[line]}"
+                        diags.add("R2-edge", pc, f"COND {kind.name} on {lines[line].name}: {r.name} may leave "
+                                                 f"the line at {have} here, so its drive makes no edge and "
+                                                 f"the others wait for one (isa §4.2)")
+                    lv[line] = 1 - pre
+            elif ins.op == Op.HOLD and mine(ins.owner):
+                lv[ins.line] = ins.operand & 1
+            elif ins.op == Op.XFER:
+                la = img.lanes[ins.line]
+                src = unpack_xfer(ins.operand)[1]
+                const = {Src.ZERO: 0, Src.ONES: 1}.get(src)
+                for data, sends in ((la.data, mine(ins.owner)),
+                                    (la.data2, la.data2 is not None and mine(lines[la.data2].owner))):
+                    if data is not None and sends:
+                        lv[data] = const if lines[data].kind == "pp" or const == 1 else None
+                if la.clk is not None and mine(lines[la.clk].owner):
+                    lv[la.clk] = la.cpol
+            elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL) and mine(lines[ins.ra].owner):
+                lv[ins.ra] = (ins.operand & 1) if ins.sub == RawOp.SET else (1 if lines[ins.ra].kind == "od" else None)
+            edges = [(s, tuple(lv)) for s in successors(instrs, pc, r)]
+            for s, o in edges:
+                old = state.get(s)
+                new = o if old is None else tuple(x if x == y else None for x, y in zip(old, o))
+                if new != old:
+                    state[s] = new
+                    work.append(s)
     return diags.list()
 
 
