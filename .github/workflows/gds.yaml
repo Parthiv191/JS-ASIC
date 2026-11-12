@@ -77,6 +77,61 @@ jobs:
       - name: GL test
         uses: TinyTapeout/tt-gds-action/gl_test@e7a50f8f46f9f8df4b2c9935bfeb1cbc6b6ae4f6  # ttihp27a
 
+  # co-sim on the gate-level netlist (test/cosim/README.md §5), set up as gl_test sets up its run
+  cosim_gl:
+    needs: gds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+
+      - name: Download the netlist
+        uses: actions/download-artifact@v7
+        with:
+          name: tt_submission
+
+      - name: PDK version
+        shell: bash
+        run: echo "PDK_VERSION=$(jq -r .PDK_VERSION tt_submission/pdk.json)" >> $GITHUB_ENV
+
+      - name: Install the PDK
+        uses: TinyTapeout/ciel-action@7ac3e42cf2e1a080f1fc6d7b56d732a2ad17d9f6  # v1
+        with:
+          pdk_name: ihp-sg13cmos5l
+          pdk_version: ${{ env.PDK_VERSION }}
+          pdk_root: /home/runner/pdk
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Python packages
+        run: pip install -r test/requirements.txt
+
+      # Icarus 12 leaves every IHP flop at X (test/cosim/README.md): TT's Icarus 13, as gl_test
+      - name: Install iverilog
+        shell: bash
+        run: |
+          wget -q https://github.com/TinyTapeout/iverilog/releases/download/v13.0/iverilog_13.0-1_amd64.deb
+          sudo apt-get update -y
+          sudo apt-get install -y ./iverilog_13.0-1_amd64.deb
+
+      - name: Co-sim at gate level
+        shell: bash
+        run: |
+          cd test/cosim
+          make GATES=yes PDK_ROOT=/home/runner/pdk GL_NETLIST=$(ls $GITHUB_WORKSPACE/tt_submission/*.v)
+          python -m cocotb_tools.check_results results.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cosim_gl_results
+          path: test/cosim/results.xml
+
   viewer:
     needs: gds
     # branch runs must not overwrite the page built from main
