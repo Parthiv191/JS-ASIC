@@ -164,6 +164,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     # ---- pass 2: rules + instructions ----
     instrs: list[Instr] = []
     pc = 0
+    od_lane: int | None = None  # R1-od-lane: the one clocked lane with an OD data line
     for kind, obj, extra in layout:
         if kind == "role_if":
             mask = role_mask(_role(desc, r) for r in obj)
@@ -175,6 +176,16 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
         s: Step = obj
         a = s.args
         _check_rules(desc, s, lines, lanes, err)
+        if s.kind == "xfer" and isinstance(a["lane"], LaneRef):
+            la = desc.lanes[a["lane"].index]
+            if la.clk is not None and any(x is not None and lines[x.index].kind == "od"
+                                          for x in (la.data, la.data2)):
+                if od_lane is None:
+                    od_lane = a["lane"].index
+                elif od_lane != a["lane"].index:
+                    err("R1-od-lane", s, f"lane {la.name!r} is a second clocked lane with an OD data "
+                                         f"line (after {desc.lanes[od_lane].name!r}); the engine has one "
+                                         f"OD let-go tracker (isa §4.3)")
         try:
             ins = _instr(desc, s, a, lambda n: target(s, n), lambda r: lane_index(s, r))
         except ValueError as e:

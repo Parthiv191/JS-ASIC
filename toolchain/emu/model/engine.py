@@ -140,7 +140,8 @@ class Engine:
         self.starts: list[tuple[int, int]] = []  # (pc, now) per instruction start: the tr_issue trace
         self._abort_at: int | None = None        # decision cycle of an abort, until abort_pc starts
         self._stalled = False                    # POP waited since the last timed step (isa §4.1)
-        # OD let-go (isa §4.3): OD data line -> (lane, owns the clock, ldelay, release cycle or None)
+        # OD let-go (isa §4.3), one tracker per engine: OD data line -> (lane, owns the clock,
+        # ldelay, release cycle or None, the cycle its XFER armed it)
         self._letgo: dict[int, tuple] = {}
         self.halted = False
         self.halt_cycle: int | None = None
@@ -172,7 +173,7 @@ class Engine:
                 next(self._proc)
             except _BusExit:  # at the step's start
                 self._bus_exit()
-        if pre is not None:  # a let-go registered this cycle waits for a later edge
+        if pre is not None:  # a let-go armed this cycle is taken the next one
             self._track_letgo(pre)
         if self._detects and (self._detect() or self._cand is not None):
             self.idle = False  # a candidate being confirmed, or a flag just set, keeps the run going
@@ -251,10 +252,15 @@ class Engine:
         launch time, edge + ldelay or max(detect, e + ldelay). The launching edge is the leading
         one with cpha 1 and the trailing one with cpha 0 (whose next leading edge captures the
         next step's bit 0). Any drive of D cancels it (drive()), and it runs whatever instruction
-        is running."""
+        is running. One tracker per engine: a let-go is taken the cycle after its XFER completes,
+        so it releases no earlier than that, and taking it releases at once every line the old one
+        held that it doesn't."""
         def level(v: int | None) -> int:
             return 1 if v is None else v
-        for d, (lane, own, ld, at) in list(self._letgo.items()):
+        new = {d for d, v in self._letgo.items() if v[4] == self.now}
+        for d, (lane, own, ld, at, armed) in list(self._letgo.items()):
+            if armed == self.now:
+                continue  # taken next cycle
             if at is None:
                 clk = lane.clk
                 launching = 1 - lane.cpol if lane.cpha == 1 else lane.cpol  # the level it goes to
@@ -264,11 +270,15 @@ class Engine:
                 elif self.edge(clk) and self.inp[clk] == launching:
                     at = max(self.now, self.now - EDGE_LAT + ld)
                 if at is None:
+                    if new:  # replaced: it goes when the new let-go is taken
+                        self._letgo[d] = (lane, own, ld, self.now + 1, armed)
                     continue
-                self._letgo[d] = (lane, own, ld, at)
+                self._letgo[d] = (lane, own, ld, at, armed)
             if self.now >= at:
                 self.drv[d] = None
                 del self._letgo[d]
+            elif new:
+                self._letgo[d] = (lane, own, ld, min(at, self.now + 1), armed)
 
     # ------------------------------------------------------------------ helpers
     def _close_gates(self) -> None:
@@ -334,7 +344,7 @@ class Engine:
                 return None
             yield
 
-    def _stretch_timeout(self, ins: Instr) -> Gen:
+    def _stretch_timeout(self, ins: Instr, value: int | None = None) -> Gen:
         """A stretch wait timed out: abort with ABORT, else to := 1, tb := now and the step ends."""
         if ins.flags & F_ABORT:
             self._abort()
@@ -343,7 +353,7 @@ class Engine:
         self.to = True
         self.tb = self.now
         self._reanchor(self.now)
-        self._record(ins, "do")
+        self._record(ins, "do", value)
         self.pc += 1
         yield
 
@@ -540,13 +550,15 @@ class Engine:
         line = self._bus_a if bus else ins.line   # START = FALL on bus_a, STOP = RISE (isa §4.2)
         level = 1 if kind in (CondKind.RISE, CondKind.STOP) else 0
 
+        mv: list[int | None] = [None]   # the step's trace value (architecture §5): what MEAS wrote
+
         def measure(m: int) -> None:  # isa §4.2: rd := min(max(m, 0), 0xFFFF)
             if meas:
-                self.regs[rd] = min(max(m, 0), 0xFFFF)
+                mv[0] = self.regs[rd] = min(max(m, 0), 0xFFFF)
 
         self._step_start(ins)
         if bus and not self.does(ins):
-            yield from self._follow_bus(ins, p, kind, measure)
+            yield from self._follow_bus(ins, p, kind, measure, mv)
             return
         if self.does(ins):
             planned = self.tb + p.nom
@@ -561,13 +573,13 @@ class Engine:
                 if e is None:
                     if not ins.flags & F_ABORT:
                         measure(0xFFFF)  # a TIMEOUT writes 0xFFFF (isa §4.2)
-                    yield from self._stretch_timeout(ins)
+                    yield from self._stretch_timeout(ins, mv[0])
                     return
                 act = max(act, e)  # the edge is when the clock really rose
             measure(act - self.tb)
             self.tb = act
             self._reanchor(act)
-            self._record(ins, "do")
+            self._record(ins, "do", mv[0])
             self.pc += 1
             yield
             return
@@ -594,11 +606,11 @@ class Engine:
                 break
             self.idle = not p.bounded  # waiting forever on the other party
             yield
-        self._record(ins, "follow")
+        self._record(ins, "follow", mv[0])
         self.pc += 1
         yield
 
-    def _follow_bus(self, ins: Instr, p, kind: CondKind, measure) -> Gen:
+    def _follow_bus(self, ins: Instr, p, kind: CondKind, measure, mv: list) -> Gen:
         """A followed COND START/STOP (isa §4.2): completes when its flag is set, also before the
         step. m = start_e - tb (or stop_e), the EARLY check, then tb := that anchor. START and STOP
         each clear both flags. The timeout check uses now - EDGE_LAT - bus_confirm. A followed
@@ -631,7 +643,7 @@ class Engine:
                 break
             self.idle = not p.bounded
             yield
-        self._record(ins, "follow")
+        self._record(ins, "follow", mv[0])
         self.pc += 1
         yield
 
@@ -864,7 +876,7 @@ class Engine:
                             return
                         for i in readback:
                             if drove[i]:
-                                self._letgo[dl[i]] = (lane, own_clk, ld, None)
+                                self._letgo[dl[i]] = (lane, own_clk, ld, None, self.now)
                         self.to = True
                         self.tb = self.now
                         self._reanchor(self.now)
@@ -931,7 +943,7 @@ class Engine:
                     # no dst, no push; the step ends here, and what it drove is let go as usual
                     for i in readback:
                         if drove[i]:
-                            self._letgo[dl[i]] = (lane, own_clk, ld, None)
+                            self._letgo[dl[i]] = (lane, own_clk, ld, None, self.now)
                     self.to = True
                     self.tb = self.now
                     self._reanchor(self.now)
@@ -952,7 +964,7 @@ class Engine:
         at = None if cpha == 1 else (self.tb + ld if own_clk else max(self.now, self.now - EDGE_LAT + ld))
         for i in readback:
             if drove[i]:
-                self._letgo[dl[i]] = (lane, own_clk, ld, at)
+                self._letgo[dl[i]] = (lane, own_clk, ld, at, self.now)
         if follows and dst == Dst.FIFO:  # it drives fewer than all of the step's data lines
             self._push_rx(v)
         if dst >= Dst.R0:

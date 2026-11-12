@@ -723,6 +723,100 @@ def test_let_go_before_the_next_owner_bit_0(first, second, cpha):
         assert [r.value for r in xfers(t, i)] == [0xFF, 0, 0xFF], (i, [hex(r.value) for r in xfers(t, i)])
 
 
+
+@pytest.mark.parametrize("sender,role", [("a", 0), ("b", 1)])
+@pytest.mark.parametrize("ld", [0, 9])
+def test_a_cpha0_let_go_releases_after_its_completion_cycle(sender, role, ld):
+    """isa §4.3: a let-go is taken the cycle after its XFER completes (the RTL takes it then, off
+    the completion cycle's deep logic). With cpha 0 the launching edge is the step's own last
+    trailing edge, so the release is at max(done + 1, tb + ldelay), on the wire a cycle later."""
+    d = Description("od", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=0, ldelay=ld)
+    d.xfer(8, lane, owner=sender, prof=d.profile("H", nom=16, min=15, max=INF), src="zero")
+    d.raw_delay(60)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1))
+    (rec,) = xfers(t, role)
+    rise = [x for x in t.wire_edges[1] if x > rec.tb]
+    assert rise and rise[0] == max(rec.cycle + 1, rec.tb + ld) + 1, (rec, rise)
+
+
+@pytest.mark.parametrize("sender,role", [("a", 0), ("b", 1)])
+def test_one_let_go_tracker_per_engine(sender, role):
+    """isa §4.3: one tracker per engine. A new let-go, taken the cycle after its XFER completes,
+    releases at once any line the old one held that it doesn't. Here lane A's let-go (cpha 1)
+    still waits for SCL A's next falling edge when lane B's XFER (cpha 0, ldelay 0) completes:
+    both lines go then. (With one tracker per line, D1 stayed low until HALT, and D2 went in
+    B's completion cycle because another let-go was pending.) R1-od-lane rejects two clocked
+    lanes with OD data, so this is a hand-built image (lower() without the rules)."""
+    d = Description("od", parties=("a", "b"))
+    scl_a = d.line("scl_a", owner="a", idle=1)
+    scl_b = d.line("scl_b", owner="a", idle=1)
+    d1 = d.line("d1", "od", owner="shared", idle=1)
+    d2 = d.line("d2", "od", owner="shared", idle=1)
+    lane_a = d.lane("A", d1, clk=scl_a, cpol=1, cpha=1, ldelay=2)
+    lane_b = d.lane("B", d2, clk=scl_b, cpol=1, cpha=0, ldelay=0)
+    h = d.profile("H", nom=16, min=15, max=INF)
+    d.xfer(8, lane_a, owner=sender, prof=h, src="zero")
+    d.xfer(8, lane_b, owner=sender, prof=h, src="zero")
+    d.raw_delay(60)
+    d.halt()
+    assert {x.rule for x in lower(d).diags} == {"R1-od-lane"}
+    t = run_sys(lower(d).image, roles=(Role.P0, Role.P1))
+    rec_b = xfers(t, role)[1]
+    for wire in (2, 3):
+        rise = [x for x in t.wire_edges[wire] if x > rec_b.tb]
+        assert rise and rise[0] == rec_b.cycle + 2, (wire, rec_b, rise)
+
+
+
+@pytest.mark.parametrize("ld", [0, 3])
+def test_a_launching_edge_in_the_take_cycle_counts(ld):
+    """The let-go is taken the cycle after its XFER completes, and the tracker sees an edge in
+    that cycle too. Compiled with every timing rule on: the clock owner's COND FALL (the next
+    leading edge, cpha 1) lands in the take cycle, so the release is ldelay after it. (Found by
+    #25's pin check on devOps's #50: its tracker waited for a later edge and held SDA.)"""
+    d = Description("od", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=ld)
+    d.li("r0", 0)
+    d.xfer(8, lane, owner="a", prof=d.profile("H", nom=12, min=11, max=INF), src="r0")
+    d.cond("fall", scl, owner="a", prof=d.profile("C", nom=4, min=0, max=INF))
+    d.raw_delay(40)
+    d.halt()
+    t = run_sys(compile_desc(d), roles=(Role.P0,))
+    x, c = [r for r in t.engines[0].records if r.op in ("XFER", "COND")]
+    assert c.tb == x.cycle + 1                       # the edge is in the take cycle
+    rise = [e for e in t.wire_edges[1] if e > x.tb]
+    assert rise and rise[0] == c.tb + ld + 1, (x, c, rise)
+
+
+
+def test_a_replaced_let_go_counting_down_goes_when_the_new_one_is_taken():
+    """The old let-go (lane A, cpha 0, ldelay 15) is counting down its ldelay when lane B's
+    XFER (cpha 0, ldelay 0) completes: taking the new one releases D1 then, before its own
+    release time. Hand-built (R1-od-lane)."""
+    d = Description("od", parties=("a", "b"))
+    scl_a = d.line("scl_a", owner="a", idle=1)
+    scl_b = d.line("scl_b", owner="a", idle=1)
+    d1 = d.line("d1", "od", owner="shared", idle=1)
+    d2 = d.line("d2", "od", owner="shared", idle=1)
+    lane_a = d.lane("A", d1, clk=scl_a, cpol=1, cpha=0, ldelay=15)
+    lane_b = d.lane("B", d2, clk=scl_b, cpol=1, cpha=0, ldelay=0)
+    d.xfer(1, lane_a, owner="a", prof=d.profile("HA", nom=16, min=15, max=INF), src="zero")
+    d.xfer(1, lane_b, owner="a", prof=d.profile("HB", nom=3, min=2, max=INF), src="zero")
+    d.raw_delay(60)
+    d.halt()
+    t = run_sys(lower(d).image, roles=(Role.P0, Role.P1))
+    xa, xb = xfers(t, 0)
+    assert xb.cycle + 1 < xa.tb + 15                 # D1's own release would come later
+    d1_rise = [x for x in t.wire_edges[2] if x > xa.tb]
+    assert d1_rise and d1_rise[0] == xb.cycle + 2, (xa, xb, d1_rise)
+
+
 def test_no_let_go_without_a_drive():
     """A cpha 1 XFER that times out before its first edge drove nothing, so it lets nothing go:
     the slave's earlier HOLD 0 stays on SDA when a leading edge comes later."""
@@ -876,6 +970,27 @@ def test_cond_rise_on_a_stretch_clock_waits_too():
     assert t.wire_edges[0][1:3] == [x + K for x in p_edges[1:3]]
     tbs = {tuple(r.tb for r in t.engines[i].records) for i in range(3)}
     assert len(tbs) == 1 and not any(t.engines[i].events for i in range(3))
+
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_a_stretched_cond_rise_records_its_measurement(timeout):
+    """The value of a COND RISE on a stretch clock is MEAS's: the real rise - tb (stretched by
+    K), or 0xFFFF on a TIMEOUT without ABORT (the owner's stretch-timeout path), in every role."""
+    K = 60 if timeout else 9
+
+    def body(d, scl, sda, lane, prof):
+        d.cond("fall", scl, owner="a", prof=prof)
+        d.cond("rise", scl, owner="a", prof=prof, meas="r4")
+    img = stretch_img(body=body, hi=HS + 4) if timeout else stretch_img(body=body)
+    plain = run_sys(img)
+    at = drive_cycles(plain.wire_edges[0])[1] + 1 if timeout else plain.wire_edges[0][1]
+    t = run_sys(img, glitches=[Glitch(0, at, K, 0)])
+    for i in range(3):
+        fall, rise = t.engines[i].records[:2]
+        want = 0xFFFF if timeout else rise.tb - fall.tb
+        assert rise.value == want and (timeout or want > HS), (i, fall, rise)
+    assert ("TIMEOUT" in kinds(t, 0)) == timeout
 
 
 def test_hold_1_on_a_stretch_clock_is_rejected():

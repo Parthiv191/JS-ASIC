@@ -15,9 +15,15 @@ class Monitor:
     edge with the engine's `run` input high (it ends s0), and the first running cycle whose
     `tr_now` isn't its tick. The gate-level netlist has no trace port: `gates` skips all three."""
 
-    def __init__(self, dut, stim: list[int], run_s0: int, gates: bool, eng: int = 0):
+    def __init__(self, dut, stim: list[int], run_s0: int, gates: bool, eng: int = 0,
+                 sample2: bool = False):
         self.dut, self.stim, self.run_s0, self.gates = dut, stim, run_s0, gates
         self.eng = None if gates else getattr(dut.user_project, f"u_eng{eng}")
+        # a duplex MON's data2 sample (architecture §5): opt-in while tests in test/ still drop
+        # those pulses from the expected trace (README §2)
+        self.sample2 = sample2 and self.eng is not None
+        if self.sample2 and not hasattr(self.eng, "tr_sample2"):
+            raise RuntimeError("sample2: this engine has no tr_sample2 (architecture §5)")
         self.clk = 0                                  # rising edges seen
         self.pins: list[tuple[int, int]] = []         # (uio_oe, uio_out) per edge
         self.act = bytearray()                        # ACT per edge
@@ -70,6 +76,8 @@ class Monitor:
             add(pulse(now, Kind.BR, pc, int(e.tr_taken.value)))
         if int(e.tr_sample.value):
             add(pulse(now, Kind.SAMPLE, pc, int(e.tr_line.value)))
+        if self.sample2 and int(e.tr_sample2.value):
+            add(pulse(now, Kind.SAMPLE, pc, int(e.tr_line2.value)))
         if halted and not self.halted:
             self.halted = True
             add(pulse(now, Kind.HALT, pc))

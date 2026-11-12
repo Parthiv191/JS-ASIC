@@ -203,6 +203,75 @@ def test_cond_meas_timeout_writes_ffff():
     assert "TIMEOUT" in kinds(t, 0) and t.engines[0].rx == [0xFFFF]
 
 
+
+def cond_values(t, i):
+    return [r.value for r in t.engines[i].records if r.op == "COND"]
+
+
+def test_a_cond_records_its_measurement_as_the_trace_value():
+    """architecture §5 tr_value: a COND step carries the value MEAS writes (the RTL's `value`),
+    0 (none) without MEAS. Found by devOps's co-sim (#50): the model recorded none for every COND."""
+    t = run_sys(meas_desc(INF))
+    assert [cond_values(t, i) for i in range(3)] == [[NOM]] * 3
+    t = run_sys(meas_desc(20), roles=(Role.P1,))
+    assert cond_values(t, 0) == [0xFFFF]                 # a TIMEOUT without ABORT
+    d = Description("m", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=NOM, min=0, max=INF))
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False))
+    assert [cond_values(t, i) for i in range(3)] == [[None]] * 3
+
+
+def test_a_followed_start_records_its_measurement():
+    def body(d, sda, scl, p):
+        with d.only("a"):
+            d.raw_delay(20)
+        d.cond("start", owner="a", prof=p, meas="r2")
+    t = run_sys(i2c(body), roles=(Role.P0, Role.P1))
+    act = conds(t, 0)[0].cycle
+    assert cond_values(t, 0)[0] == act and cond_values(t, 1)[0] == act
+
+
+
+def test_a_cond_value_is_the_measurement_not_tb():
+    """With a step before it, a COND's measurement (tb to the edge) differs from tb after it."""
+    d = Description("m", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.hold(ln, 1, owner="a", prof=d.profile("H", nom=10, min=10, max=10))
+    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=NOM, min=0, max=INF), meas="r3")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False))
+    for i in range(3):
+        rec = [r for r in t.engines[i].records if r.op == "COND"][0]
+        assert (rec.value, rec.tb) == (NOM, 10 + NOM), (i, rec)
+
+
+def test_a_cond_measurement_clamps_at_ffff():
+    """MEAS clamps to 0xFFFF (isa §4.2), and so does the trace value: the owner acts about
+    72000 cycles after tb (late), and every role measures that."""
+    d = Description("m", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    with d.only("a"):
+        for _ in range(18):
+            d.raw_delay(4000)
+    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=NOM, min=0, max=INF), meas="r3")
+    d.push("r3")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), max_ticks=300_000)
+    assert [cond_values(t, i) for i in range(3)] == [[0xFFFF]] * 3
+    assert [t.engines[i].rx for i in range(3)] == [[0xFFFF]] * 3
+
+
+def test_a_followed_start_timeout_records_ffff():
+    def body(d, sda, scl, p):
+        d.cond("start", owner="a", prof=d.profile("S", nom=NOM, min=0, max=30), meas="r2")
+        d.push("r2")
+    t = run_sys(i2c(body), roles=(Role.P1,))
+    assert "TIMEOUT" in kinds(t, 0)
+    assert cond_values(t, 0) == [0xFFFF] and t.engines[0].rx == [0xFFFF]
+
+
 # ---------------------------------------------------------------- compiler rules
 def test_start_is_owned_by_the_master_line_owner():
     with pytest.raises(CompileError, match="R1-bus"):

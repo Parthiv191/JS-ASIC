@@ -13,7 +13,7 @@ from harness import GATES, CosimMismatch, cosim
 from emu.compiler import compile_desc
 from emu.cosim import Kind, pulse, replay
 from emu.desc import Description
-from emu.isa import Instr, Op, Role, encode
+from emu.isa import INF, Instr, Op, Role, encode
 from emu.model.system import EngineSpec, Glitch
 from emu.protocols import get, slack
 
@@ -130,6 +130,48 @@ async def test_cond_early(dut):
     await cosim(dut, rep, Role.P1)
 
 
+def meas(timeout_only=False):
+    """HOLD 1 · COND fall (unbounded), MEAS r2 · HOLD 0 · COND rise (bounded), MEAS r3 · HALT:
+    tb moves before each COND. `timeout_only`: COND fall (bounded), MEAS r2 · HALT."""
+    d = Description("meas", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=16, min=14, max=18)
+    win = d.profile("W", nom=20, min=0, max=40)
+    if timeout_only:
+        d.cond("fall", ln, owner="a", prof=win, meas="r2")
+    else:
+        d.hold(ln, 1, owner="a", prof=bit)
+        d.cond("fall", ln, owner="a", prof=d.profile("U", nom=20, min=0, max=INF), meas="r2")
+        d.hold(ln, 0, owner="a", prof=bit)
+        d.cond("rise", ln, owner="a", prof=win, meas="r3")
+    d.halt()
+    return compile_desc(d)
+
+
+def cond_values(rep):
+    return [r.value for r in rep.trace.engines[0].records if r.op == "COND"]
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], peer_clock=[(1, 1), (49, 50)])
+async def test_cond_meas(dut, role, peer_clock):
+    """A COND's trace value is what MEAS writes (architecture §5), and the registers match: the
+    model had none for every COND, and no co-sim test had MEAS, so that gap passed (#50)."""
+    rep = model(meas(), role, peer_clock=peer_clock)
+    e = rep.trace.engines[0]
+    conds = [r for r in e.records if r.op == "COND"]
+    assert cond_values(rep) == [e.regs[2], e.regs[3]] and all(r.value != r.tb for r in conds)
+    await cosim(dut, rep, role)
+
+
+@cocotb.test()
+async def test_cond_meas_timeout(dut):
+    """No owner: the COND times out (no ABORT), so its value and register are 0xFFFF."""
+    rep = model(meas(timeout_only=True), Role.P1, peers=False)
+    assert "TIMEOUT" in kinds(rep) and cond_values(rep) == [0xFFFF] == [rep.trace.engines[0].regs[2]]
+    await cosim(dut, rep, Role.P1)
+
+
 def frame(msb=False, check=True, resync=False, kind="pp"):
     """A UART frame with register src/dst: LI r0 · COND fall · HOLD 0 · XFER 8 · HOLD 1 · MARK · HALT."""
     d = Description("frame", parties=("a", "b"))
@@ -190,6 +232,27 @@ async def test_uart_protocol(dut, role, peer_clock):
     assert et.rx == ([] if role == Role.P0 else UART_WORDS) and et.tx_left == 0 and not et.events
     assert rep.tx == (UART_WORDS if role == Role.P0 else [])
     await cosim(dut, rep, role)
+
+
+SPI_CTL = [0, 0xA4, 0x3C]  # the frame token, then the frame's two bytes
+SPI_PER = [0x5A, 0xC3]
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], mode=[(0, 0), (0, 1), (1, 0), (1, 1)])
+async def test_spi_protocol(dut, role, mode):
+    """The library SPI (emu/protocols/spi.py), one 2-byte frame in each mode, as ctl, per and mon
+    against peers 2% slow: the SELECT bus, the gated MISO and duplex XFERs from and to the FIFOs.
+    Every role pushes (MISO << 8) | MOSI. MON samples both data lines, the second on tr_sample2."""
+    img = compile_desc(get("spi").build(cpol=mode[0], cpha=mode[1], words=2))
+    rep = model(img, role, (49, 50), host={Role.P0: SPI_CTL, Role.P1: SPI_PER})
+    et = rep.trace.engines[0]
+    assert et.rx == [0x5AA4, 0xC33C] and et.tx_left == 0 and not et.events
+    names = [ln.name for ln in img.lines]
+    mosi, miso = names.index("mosi"), names.index("miso")
+    sampled = {p.fields[0] for p in rep.expected if p.kind == Kind.SAMPLE}
+    assert sampled == {Role.P0: {miso}, Role.P1: {mosi}, Role.MON: {mosi, miso}}[role]
+    await cosim(dut, rep, role, sample2=True)
 
 
 GLITCHES = {  # on the receiver, perfect clocks; tick 72 is the middle of data bit 2 on the wire
