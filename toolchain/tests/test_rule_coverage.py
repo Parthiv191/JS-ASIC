@@ -15,8 +15,7 @@ PLAN = ROOT / "docs/design/verification.md"
 TESTS = Path(__file__).resolve().parent
 CODE = [ROOT / "toolchain/emu/compiler.py", ROOT / "toolchain/emu/analysis.py"]
 
-GAPS = {  # id: why it has no test, or no code
-    "R3-fz": "FZ ops reach the compiler with plan step 6 (Dec 6)",
+GAPS: dict[str, str] = {  # id: why it has no test, or no code
 }
 
 

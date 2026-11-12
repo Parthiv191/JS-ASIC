@@ -146,7 +146,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - The successor starts on the first own cycle ≥ max(predecessor completion + 1, word arrival).
 - **Costs that follow:**
   - **Untimed instructions, taken branches included:** exactly `U` cycles, except FZ ops, which
-    have fixed totals (`bus-fuzzer.md` §3). `ROLE_IF` costs `U`
+    have fixed totals (§4.6). `ROLE_IF` costs `U`
     whether or not it skips; a skip continues at `pc + 1 + count`, and the skipped words take no
     time. Role blocks don't nest.
   - **`RAW DELAY n`:** `n` cycles, rounded up to a multiple of `U`.
@@ -367,9 +367,37 @@ Logs `MARK(id)`. With IRQ it logs `IRQ(id)` instead, latches `id` and raises the
 host clears it.
 
 ### 4.6 `FZ` and `src = FZ`
-- Costs and semantics: `bus-fuzzer.md`. `FZ` is legal only in a single-party role block
-  (`R3-fz`), and only on engine 0.
-- `src = FZ` sends the next staged byte (0 when exhausted).
+The fuzz unit is attached to engine 0. Its algorithm is in `bus-fuzzer.md` §2–3; this is what a
+program sees.
+
+| Op | Effect | Cycles (total, `U` included) |
+|---|---|---|
+| `fz.next rd` | pick and mutate a seed into staging, rewind the read pointer, arm; `rd :=` the length (1–32) | 48 |
+| `fz.tok ra` | queue `ra[7:0]` as a token; nothing while disarmed | 2 |
+| `fz.end rd` | finish the fingerprint; `rd := 1` if it is new, else 0; disarm. While disarmed: `rd := 0` | 40 |
+
+- The cycles are fixed whatever the outcome, and the compiler counts them as untimed cycles (§6).
+- `FZ` is legal only in a role block for one party, the same party everywhere (`R3-fz`). On
+  engine 1 it is ILLEGAL. On engine 0 with the unit not enabled (`MEM2_MODE` ≠ 0, or
+  `FZ_STATUS.ready` 0), each op takes its cycles and does nothing else, and `rd := 0`, so a
+  `fz.next` length of 0 means the unit is off.
+- `src = FZ` sends the next staged byte, one per XFER, taken when the step takes its source:
+  an XFER with `n` < 8 sends its low `n` bits, and one with `n` > 8 sends the byte
+  zero-extended. In wire mode the length comes first. It reads 0 once the message is exhausted,
+  and always 0 without a unit (engine 1 included). The fuzzing party sends in every `src = FZ`
+  XFER (`R3-fz`): as its owner, or as the owner of a duplex lane's data2. Any other sender
+  reads 0.
+- **While the unit is armed**, engine 0:
+  - queues a step's tokens when a step it follows completes. A followed XFER gives
+    `value[7:0]`, then `value[15:8]` if `n` > 8 or the lane is duplex. A followed COND gives
+    `0x40 + bucket(m)`, with `m` = `tb` after the step minus `tb` before it, or 0xFFFF on a
+    TIMEOUT. Steps it does give none.
+  - sets the bit of every event kind it logs (§7, bus exits included) in the unit's event mask.
+  - on a fatal abort (§4.1): the unit saves staging as a hang and disarms, and the abort takes
+    `FZ_HANG_CYCLES` = 12 cycles more. A bus exit is not a hang: the unit stays armed, and the
+    program runs `fz.end` from `abort_pc`.
+- The model never loses a token: a step queues at most 2 and the queue drains one a cycle
+  (`bus-fuzzer.md` §2), so `FZ_STATUS.token_lost` stays 0. The RTL must keep up as well.
 
 ### 4.7 The bus: detector and bus events
 - **The detector** runs every engine cycle, in every role except the owner of the bus's
@@ -443,7 +471,7 @@ host clears it.
 | `R3-lead` | `lead(party)`: one party. Every timed step in it is owned by that party, or uses a lane whose clock that party owns; a bus COND START/STOP, owned by the master line's owner (`R1-bus`), is also allowed. It leaves either by its fall-through exit (the leader carries on with the next step; no timed step may lie on that path) or by a path that runs a bus COND START/STOP and then branches to `abort_pc`; no path halts. The block's CFG fall-through successor S is a timed step with ABORT, which the other roles follow speculatively. It may not have CHK, and its profile `max` must be INF. When S's events come from the leader (it clocks S, or owns S), the others wait in S for the exit's bus COND, so no exit path may complete S first: before its bus COND the leader makes fewer edges on S's clock than S needs (2n), or none on a COND S's line (which may not be `bus_a`); a COND START S needs a STOP exit, and from `abort_pc` the leader reaches S before any other START. Such an S is not a COND STOP, HOLD or unclocked XFER, which would complete without the leader. Nothing timed lies between the exit's bus COND and its branch to `abort_pc`. |
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit, or from a lead block to `abort_pc` (the `abort_to` target, under `R3-lead`). `abort_pc` is not inside a block body. |
-| `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
+| `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere; that party sends in every `XFER src = FZ` (its owner, or a duplex lane's data2 owner) |
 | `S-*` | Names resolve (`S-label`); fields in range and program ≤ 512 (`S-range`); tables fit the chip's sizes (`S-table`); `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines with idle 1, and not on a line the SELECT master owns (`S-line`) |
 | `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 

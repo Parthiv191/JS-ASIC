@@ -11,7 +11,7 @@ from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
     EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
-    CondKind, RawOp, Role, Src,
+    CondKind, FzOp, RawOp, Role, Src, FZ_END_CYCLES, FZ_NEXT_CYCLES, FZ_TOK_CYCLES,
     reg_of, unpack_cond, unpack_role_if, unpack_xfer,
 )
 
@@ -130,6 +130,8 @@ def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int
         return t
     if ins.op == Op.RAW and ins.sub in (RawOp.GET, RawOp.EVT):
         return put(ins.rd, True)
+    if ins.op == Op.FZ and ins.sub in (FzOp.NEXT, FzOp.END):  # the fuzzing party's alone
+        return put(ins.rd, True)
     if ins.op == Op.XFER:
         dst = unpack_xfer(ins.operand)[2]
         if dst >= Dst.R0:
@@ -240,11 +242,16 @@ def completion(s: _Step, r: Role) -> tuple[int, int]:
     return E, E
 
 
+FZ_CYCLES = {FzOp.NEXT: FZ_NEXT_CYCLES, FzOp.TOK: FZ_TOK_CYCLES, FzOp.END: FZ_END_CYCLES}
+
+
 def _cost(ins: Instr) -> int:
-    """Cycles an untimed instruction adds to `L` (isa §4.0, §6): U, and RAW DELAY n rounded up to a
-    multiple of U. POP counts U; a stall is T5-stall's job."""
+    """Cycles an untimed instruction adds to `L` (isa §4.0, §6): U, RAW DELAY n rounded up to a
+    multiple of U, and an FZ op's fixed total (isa §4.6). POP counts U; a stall is T5-stall's job."""
     if ins.op == Op.RAW and ins.sub == RawOp.DELAY:
         return -(-max(1, ins.operand) // U) * U
+    if ins.op == Op.FZ:
+        return FZ_CYCLES.get(ins.sub, U)
     return U
 
 

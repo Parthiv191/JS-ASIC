@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from ..image import Image, LineCfg
+from ..fuzz.unit import FuzzUnit
 from ..isa import SYNC_LAT, TX_DEPTH, Role
 from .bus import resolve
 from .engine import Branch, Engine, Event, Sample, StepRecord
@@ -22,6 +23,14 @@ class EngineSpec:
     role: Role
     clock: tuple[int, int] = (1, 1)   # engine cycles per tick = num/den, num <= den
     phase: int = 0                    # ticks before the engine's first cycle
+    engine: int = 0                   # the chip's engine 0 or 1: FZ on engine 1 is ILLEGAL (isa §4.6)
+    fuzz: FuzzUnit | None = None      # engine 0's fuzz unit, set up and enabled; None: none
+
+    def __post_init__(self):
+        if self.engine not in (0, 1):
+            raise ValueError(f"engine {self.engine}: a chip has engines 0 and 1")
+        if self.fuzz is not None and self.engine != 0:
+            raise ValueError("the fuzz unit is attached to engine 0 (bus-fuzzer.md §2)")
 
 
 @dataclass(frozen=True)
@@ -92,7 +101,8 @@ class System:
                 raise ValueError(f"clock ratio {num}/{den} must be in (0, 1]")
         self.specs = list(engines)
         self.lines = engines[0].image.lines
-        self.engines = [Engine(s.image, s.role, name=f"E{i}") for i, s in enumerate(engines)]
+        self.engines = [Engine(s.image, s.role, name=f"E{i}", engine=s.engine, fuzz=s.fuzz)
+                        for i, s in enumerate(engines)]
         self.glitches = list(glitches)
         self._pushes: list[tuple[int, int, list[int]]] = []
         self._backlog: list[deque[int]] = [deque() for _ in engines]  # host words waiting for room

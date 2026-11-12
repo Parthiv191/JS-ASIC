@@ -10,12 +10,13 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Iterator
 
+from ..fuzz.unit import FuzzUnit, bucket
 from ..image import Image
 from ..isa import (
     EDGE_LAT, F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, ISSUE, MEAS_MAX, NUM_REGS, QUANT, REG_MASK, RX_DEPTH,
-    SYNC_LAT,
+    SYNC_LAT, FZ_END_CYCLES, FZ_HANG_CYCLES, FZ_NEXT_CYCLES, FZ_TOK_CYCLES,
     TIME_CLAMP, U, AluOp,
-    BrCond, BusKind, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved,
+    BrCond, BusKind, CondKind, Dst, FzOp, Instr, Op, Owner, RawOp, Role, Src, decode, li_imm, reg_of, reserved,
     unpack_cond,
     unpack_role_if, unpack_xfer,
 )
@@ -26,6 +27,7 @@ SATURATING = frozenset({"OVERRUN", "EARLY", "TIMEOUT", "EDGE", "CLK_PHASE"})  # 
 EVT_BIT = {"TIMEOUT": 1 << 2, "LEVEL": 1 << 3, "EDGE": 1 << 3, "CLK_PHASE": 1 << 3,
            "OVERFLOW": 1 << 4, "UNDERRUN": 1 << 5}
 EVT_MASK = 0x3F
+FZ_COST = {FzOp.NEXT: FZ_NEXT_CYCLES, FzOp.TOK: FZ_TOK_CYCLES, FzOp.END: FZ_END_CYCLES}  # isa §4.6
 BIG = 1 << 40  # upper edge of an accumulated window that contains an unbounded step
 START_BIT, STOP_BIT = 1 << 0, 1 << 1
 
@@ -87,8 +89,12 @@ def _decode(w: int) -> Instr | None:
 
 class Engine:
     def __init__(self, image: Image, role: Role, name: str = "", regs: list[int] | None = None,
-                 evt: int = 0):
+                 evt: int = 0, engine: int = 0, fuzz: FuzzUnit | None = None):
         self.image = image
+        self.engine = engine  # FZ ops are ILLEGAL on engine 1 (isa §4.6)
+        self.fuzz = fuzz      # engine 0's fuzz unit (bus-fuzzer.md), None if not enabled
+        self._hang = False    # a fatal abort while the unit was armed adds FZ_HANG_CYCLES
+        self._tb0 = 0         # tb when the instruction started: a followed COND's m for its token
         self.role = Role(role)
         self.name = name or self.role.name
         self.instrs: list[Instr | None] = [_decode(w) for w in image.words]  # None: a free opcode
@@ -326,6 +332,8 @@ class Engine:
             measured = min(measured, MEAS_MAX)
         self.evt |= EVT_BIT.get(kind, 0)
         self.events.append(Event(kind, self.pc, self.now, measured, lo, hi))
+        if self.fuzz is not None:
+            self.fuzz.event(kind)  # the event mask, while armed (bus-fuzzer.md §3)
 
     def wait_until(self, t: int) -> Gen:
         while self.now < t:
@@ -360,6 +368,22 @@ class Engine:
     def _record(self, ins: Instr, mode: str, value: int | None = None) -> None:
         self._step = None
         self.records.append(StepRecord(self.pc, ins.op.name, mode, value, self.now, self.tb))
+        if mode == "follow" and self.fuzz is not None and self.fuzz.armed:
+            self._auto_tokens(ins, value)
+
+    def _auto_tokens(self, ins: Instr, value: int | None) -> None:
+        """A followed step's data tokens (bus-fuzzer.md §3): an XFER's value[7:0], and value[15:8]
+        if n > 8 or the lane is duplex; a COND's 0x40 + bucket(m), m = tb after - tb before, or
+        0xFFFF on a timeout."""
+        if ins.op == Op.XFER:
+            v = value or 0
+            self.fuzz.tok(v & 0xFF)
+            if unpack_xfer(ins.operand)[0] > 8 or self.image.lanes[ins.line].data2 is not None:
+                self.fuzz.tok(v >> 8 & 0xFF)
+        elif ins.op == Op.COND:
+            timeout = any(e.kind == "TIMEOUT" and e.pc == self.pc and e.cycle == self.now
+                          for e in self.events[-3:])
+            self.fuzz.tok(0x40 + bucket(MEAS_MAX if timeout else self.tb - self._tb0))
 
     def _reanchor(self, at: int) -> None:
         self.anchor = at
@@ -381,6 +405,9 @@ class Engine:
         """Fatal follow failure on a step with ABORT: log, release OD lines, restart the
         timeline at `now`, jump to the abort vector. The step still ends in this cycle."""
         self.log("ABORT", measured=self.pc)
+        if self.fuzz is not None and self.fuzz.armed:  # a hang (bus-fuzzer.md §3)
+            self.fuzz.abort()
+            self._hang = True
         self._step = None
         self._letgo.clear()
         for i, ln in enumerate(self.lines):
@@ -418,6 +445,7 @@ class Engine:
                 yield from self._halt()
             ins = self.instrs[self.pc]
             start = self.now
+            self._tb0 = self.tb
             self.starts.append((self.pc, start))
             if ins is None or reserved(ins):  # isa §3: halts in its start cycle, as HALT does
                 self.log("ILLEGAL")
@@ -429,7 +457,8 @@ class Engine:
             if self._abort_at is not None:
                 # abort_pc is fetched on the first own cycle >= t + 1 and starts 2 later (isa §4.0)
                 t, self._abort_at = self._abort_at, None
-                yield from self.wait_until(t + 1 + ((t + 1) & 1) + 2)
+                hang, self._hang = self._hang, False
+                yield from self.wait_until(t + 1 + ((t + 1) & 1) + 2 + (FZ_HANG_CYCLES if hang else 0))
             else:
                 yield from self.wait_until(self._next_start(start, self.now - 1))
 
@@ -494,6 +523,29 @@ class Engine:
         self.branches.append(Branch(self.pc, skip, self.now))
         self.pc += 1 + count if skip else 1
         yield
+
+    def _fz_byte(self) -> int:
+        """src = FZ: the next staged byte, one per XFER (isa §4.6); 0 without a fuzz unit."""
+        return self.fuzz.read_byte() if self.fuzz is not None else 0
+
+    def _op_fz(self, ins: Instr) -> Gen:
+        """fz.next, fz.tok, fz.end (isa §4.6, bus-fuzzer.md §3): fixed totals whatever the outcome.
+        ILLEGAL on engine 1. On engine 0 with no fuzz unit enabled, the cost and rd := 0 only."""
+        if self.engine != 0:
+            self.log("ILLEGAL")
+            yield from self._halt()
+        op = FzOp(ins.sub)
+        u = self.fuzz
+        if op == FzOp.NEXT:
+            self.regs[ins.rd] = u.next() if u is not None else 0
+        elif op == FzOp.TOK:
+            if u is not None:
+                u.tok(self.regs[ins.ra])
+        else:
+            self.regs[ins.rd] = u.end() if u is not None else 0
+        self.pc += 1
+        for _ in range(FZ_COST[op]):
+            yield
 
     def _op_push(self, ins: Instr) -> Gen:
         self._push_rx(self.regs[ins.ra])
@@ -686,8 +738,6 @@ class Engine:
         lane = self.image.lanes[ins.line]
         n, src, dst = unpack_xfer(ins.operand)
         msb = bool(ins.flags & F_MSB)
-        if src == Src.FZ:
-            raise NotImplementedError(f"XFER src=FZ lands in Task 20 (pc {self.pc})")
         if lane.clk is not None:
             yield from self._xfer_clocked(ins, p, lane, n, src, dst, msb)
             return
@@ -709,6 +759,8 @@ class Engine:
                 v = 0
             elif src == Src.ONES:
                 v = mask
+            elif src == Src.FZ:
+                v = self._fz_byte()
             else:
                 v = self.regs[reg_of(src)]
             v &= mask
@@ -824,6 +876,8 @@ class Engine:
                     v = mask
             elif src == Src.ONES:
                 v = mask
+            elif src == Src.FZ:
+                v = self._fz_byte()
             elif src != Src.ZERO:
                 v = self.regs[reg_of(src)]
             v &= mask
