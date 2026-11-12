@@ -22,8 +22,8 @@
   "CLOCK_PERIOD": 25,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
-  "//": "Hold margins 0.05 / 0.02 ns (template 0.1 / 0.05): hold padding was ~31K um2 of delay cells",
-  "//": "on short flop-to-flop paths. Final hold WS stays positive in every corner (aBC: +0.06 ns).",
+  "//": "Hold margins 0.1 / 0.05 ns, the template's: at 0.05 / 0.02 (to save ~31K um2 of hold padding)",
+  "//": "a host SPI path failed hold by 0.009 ns at the fast corner (#51).",
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
 
