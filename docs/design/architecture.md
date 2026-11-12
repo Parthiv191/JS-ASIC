@@ -46,12 +46,13 @@ target. Tier tags (Core/Plus/…) as in chip-spec §4.
 
 ## 3. Memory
 
-| Column | Macro | x, y (µm, from the 6x4 trial) | Clients |
+| Column | Macro | x, y (µm, 8x4) | Clients |
 |---|---|---|---|
-| 1 | `RM_IHPSG13_1P_512x32_c2_bm_bist` | 405.92, 483.84 | engine 0 when `ph = 0`, engine 1 when `ph = 1` (`isa.md` §4.0); the host only while both are stopped or halted |
-| 2 | same | 855.52, 483.84 | **one at a time** (`MEM2_MODE`): 0 = the fuzz unit · 1 = the capture writer + REPORT reader · host access when idle |
+| 1 | `RM_IHPSG13_1P_512x32_c2_bm_bist` | 810.56, 483.84 | engine 0 when `ph = 0`, engine 1 when `ph = 1` (`isa.md` §4.0); the host only while both are stopped or halted |
+| 2 | same | 1260.16, 483.84 | **one at a time** (`MEM2_MODE`): 0 = the fuzz unit · 1 = the capture writer + REPORT reader · host access when idle |
 
-- This layout passed precheck and the GL test on 6x4 (run 41994812789). Re-check it on 8x4.
+- Both macros sit at the right end of the die: in the middle they blocked the logic's routing
+  (§9). This layout passed precheck and the GL test on 8x4 with one engine (#51, run 43191126646).
 - `A_DOUT` drives only flops (both prefetch registers and the host read register), which
   respects its ≤ 64 fF limit.
 - **Column 2 in capture mode** is a record FIFO. The writer appends; REPORT drains behind it in
@@ -289,6 +290,6 @@ the gate. Levers, in order, if it comes in over:
 |---|---|
 | Engine area: the timed engine is ≈ 220K µm² after place and route (#14), ~2× §9's estimate, projecting ~65% of the core against the 60% target. Scope cuts wait for devOps's engine area pass. | engine 1's harden (devOps) |
 | Congestion and IR drop with full logic | first full harden |
-| The macro positions and §9 rules, which come from 6x4 | first 8x4 harden (devOps) |
+| The macro positions with both engines: local runs route with no overflow (§9), CI has not hardened two engines yet | engine 1's harden (devOps) |
 | TT demo-board facts | §8 |
 | Sign-off clock: **40 MHz, decided 11-11.** One engine missed 50 MHz by 2.76 ns at the slow corner (#36); two engines with FIFOs pass 40 MHz with ~0.5 ns to spare. The clock comes from the board, so this changes no silicon and no cycle counts; protocol rates scale by 0.8 (chip-spec §5). | decided |
