@@ -35,9 +35,10 @@ class Env:
     clocks: tuple[tuple[int, int], ...]   # per engine, in ROLES order
     phases: tuple[int, ...]
     words: tuple[tuple[int, ...], ...]    # host words for P0 and P1
+    late: tuple[int, int] | None = None   # (first tick, gap): the host writes one word at a time
 
     @staticmethod
-    def draw(rng: random.Random, ppm: int) -> "Env":
+    def draw(rng: random.Random, ppm: int, late_ok: bool = False) -> "Env":
         """Clocks within the tolerance: rates num/1000 with the slowest no more than ppm below 1.
         Every engine starts at tick 0: the timing rules assume the parties start together (from
         reset, instruction 0 starts at now = 2 in every role), so start skew is outside them."""
@@ -48,7 +49,8 @@ class Env:
             clocks = tuple((rng.randint(lo, 1000), 1000) for _ in ROLES)
         phases = tuple(0 for _ in ROLES)
         words = tuple(tuple(rng.randrange(1 << 16) for _ in range(HOST_WORDS)) for _ in range(2))
-        return Env(clocks, phases, words)
+        late = (rng.randint(0, 1500), rng.randint(1, 300)) if late_ok and rng.random() < 0.4 else None
+        return Env(clocks, phases, words, late)
 
 
 
@@ -64,7 +66,8 @@ class Case:
     def from_json(text: str) -> "Case":
         d = json.loads(text)
         e = d["env"]
-        env = Env(tuple(tuple(c) for c in e["clocks"]), tuple(e["phases"]), tuple(tuple(w) for w in e["words"]))
+        env = Env(tuple(tuple(c) for c in e["clocks"]), tuple(e["phases"]), tuple(tuple(w) for w in e["words"]),
+                  tuple(e["late"]) if e.get("late") else None)
         return Case(Recipe.from_json(d["recipe"]), env)
 
 
@@ -94,7 +97,11 @@ def run_case(case: Case) -> Result:
     specs = [EngineSpec(img, r, clock=c, phase=p) for r, c, p in zip(ROLES, env.clocks, env.phases)]
     s = System(specs)
     for i in (0, 1):
-        s.host_push(i, list(env.words[i]))
+        if env.late is None:
+            s.host_push(i, list(env.words[i]))
+        else:  # a slow host: POPs stall, and T5-stall must keep the others waiting
+            for k, w in enumerate(env.words[i]):
+                s.host_push(i, [w], at_tick=env.late[0] + k * env.late[1])
     t = s.run(MAX_TICKS)
     fails: list[tuple[str, str]] = []
     if t.contention:
@@ -148,6 +155,8 @@ def simplifications(case: Case):
                 yield replace(case, recipe=replace(r, frames=fr[:i] + (g,) + fr[i + 1:]))
     if r.loops > 1:
         yield replace(case, recipe=replace(r, loops=1))
+    if env.late is not None:
+        yield replace(case, env=replace(env, late=None))
     for i in range(len(env.clocks)):
         if env.clocks[i] != (1, 1):
             yield replace(case, env=replace(env, clocks=env.clocks[:i] + ((1, 1),) + env.clocks[i + 1:]))
@@ -185,6 +194,13 @@ class Report:
         self.failures = self.failures or []
 
 
+def underrun_free(r: Recipe) -> bool:
+    """No XFER that sends from the FIFO without owning the clock: with a late host such a step sends
+    ONES and logs UNDERRUN, as specified (isa §4.3), which the value oracle can't predict."""
+    return not any(f.kind == "clocked" and f.src == "fifo" and r.lines[r.lane.clk].owner != f.owner
+                   for f in r.frames)
+
+
 def campaign(seed: int, iters: int, envs: int = 2) -> Report:
     """`iters` random recipes from `seed`, each accepted one in `envs` random environments."""
     rng = random.Random(seed)
@@ -200,7 +216,7 @@ def campaign(seed: int, iters: int, envs: int = 2) -> Report:
             continue
         rep.accepted += 1
         for _ in range(envs):
-            case = Case(r, Env.draw(rng, r.ppm))
+            case = Case(r, Env.draw(rng, r.ppm, late_ok=underrun_free(r)))
             rep.runs += 1
             res = run_case(case)
             if res.verdict == "fail":
