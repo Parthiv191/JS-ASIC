@@ -22,14 +22,14 @@ P = 20        # bit cycles: UART at 2% needs P >= 19 (isa §6)
 DATA = 0xA4   # reads 0x25 reversed, so the bit order shows on the wire (0xA5 and 0x5A read the same)
 
 
-def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=(), host=None):
+def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=(), host=None, max_ticks=50_000):
     """The RTL plays `role`; the model also runs every other role (unless `peers` is False).
     `host` maps a party role to its host's TX words (the RTL's are written before RUN)."""
     specs = [EngineSpec(img, role)]
     if peers:
         specs += [EngineSpec(img, r, clock=peer_clock, phase=peer_phase) for r in Role if r != role]
     tx = {i: (host or {}).get(s.role, []) for i, s in enumerate(specs) if s.role != Role.MON}
-    return replay(specs, 0, glitches=glitches, tx=tx)
+    return replay(specs, 0, glitches=glitches, tx=tx, max_ticks=max_ticks)
 
 
 def kinds(rep):
@@ -425,6 +425,47 @@ async def test_role_branches(dut):
     rep = model(compile_desc(d), Role.P0, peers=False)
     assert [p.pc for p in rep.expected if p.kind == Kind.BR] == [0, 1]   # ROLE_IF, then RAW JPIN
     await cosim(dut, rep, Role.P0)
+
+
+# ---------------------------------------------------------------- random programs (emu/gen)
+RANDOM_RUNS = int(os.environ.get("COSIM_RANDOM", "24"))
+
+
+def random_case(k: int):
+    """The k-th random program for co-sim: the first recipe from seed 1000 + 100 k that the
+    compiler accepts and whose RTL party needs at most 4 host words (all the harness writes before
+    RUN), the RTL in role k mod 3, the peers at a tolerance corner (slow on odd k)."""
+    from emu.gen.check import compile_recipe
+    from emu.gen.randdesc import random_recipe
+    role = (Role.P0, Role.P1, Role.MON)[k % 3]
+    party = {Role.P0: "a", Role.P1: "b"}.get(role)
+
+    def words_needed(r) -> int:  # an upper bound: every frame runs, every loop
+        return r.loops * sum(sum(p[0] == "pop" for p in f.prep) + (f.src == "fifo")
+                             for f in r.frames if f.owner == party)
+    seed = 1000 + 100 * k
+    while True:
+        r = random_recipe(seed)
+        img, rejected = compile_recipe(r)
+        if rejected is None and words_needed(r) <= 4:
+            break
+        seed += 1
+    lo = 1000 - r.ppm // 1000
+    peer = (lo, 1000) if k % 2 else (1, 1)
+    words = {p: [(seed * 7919 + 31 * i) & 0xFFFF for i in range(4 if p == role else 24)] for p in (Role.P0, Role.P1)}
+    return r, model(img, role, peer, host=words, max_ticks=400_000), role
+
+
+@cocotb.test()
+@cocotb.parametrize(k=list(range(RANDOM_RUNS)))
+async def test_random_program(dut, k):
+    """A random program from the compiler (verification.md layer 4) in one role against the model's
+    peers: what the oracles on the model can't see, such as a latency every model role shares, shows
+    here. COSIM_RANDOM sets the count."""
+    r, rep, role = random_case(k)
+    assert rep.expected, f"recipe {r.seed}: nothing to compare"
+    assert not rep.trace.contention, f"recipe {r.seed}: contention on the model"
+    await cosim(dut, rep, role)
 
 
 # ---------------------------------------------------------------- known gaps (README §3): none open

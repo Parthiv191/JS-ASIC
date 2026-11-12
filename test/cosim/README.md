@@ -165,13 +165,14 @@ An OD line driven high for its 1s also fails, in the OD readback test, through t
 | spi protocol | ctl, per, mon | the library SPI (`emu/protocols/spi.py`), a 2-byte frame in all four modes against peers 2% slow: the SELECT bus, the gated MISO, duplex XFERs from TXDATA to RXDATA; MON's MISO samples on `tr_sample2` (`sample2=True`) |
 | i2c protocol | ctl, tgt, mon | the library I2C write (`emu/protocols/i2c.py`) with two data bytes, against peers up to 2% slow: COND START and STOP, the OD lane and its lets-go, the lead blocks. ack: the target and MON push the bytes. nack: the controller pushes 1, and MON's speculative data byte ends in a bus exit |
 | i2c short ldelay | ctl, tgt | `ldelay` 1 and 4: the let-go counts down from the owner's edge, or `ldelay` − 3 from a detected one, down to 0 |
+| random program | ctl, per, mon (k mod 3) | `COSIM_RANDOM` (24) random programs from `emu/gen`, each the first accepted recipe from its seed whose RTL party needs at most 4 host words, against peers at a tolerance corner. 60 pass; a model whose followers see edges a cycle early (EDGE_LAT − 1), which passes every oracle on the model, fails 10 of 12 |
 
 Every test compares the pins and ACT, at gate level too. There, illegal and role branches check
 only ACT: an ILLEGAL halts 2 cycles before the HALT behind it would.
 
 **Later**, each its own PR:
 1. Engine 1: both engines on-chip with LOOPBACK, against a two-engine model.
-2. Random programs from the compiler, with the shrinker (verification.md layer 4).
+2. Random programs with aborts, the bus, duplex and more host words than TX holds (emu/gen's next slice).
 3. The other `uo_out` pins against the model: IRQ, and ERR (any VIOL bit).
 4. Host words during the run (more than 4 for the RTL's engine), timed as the model pushes them.
 
