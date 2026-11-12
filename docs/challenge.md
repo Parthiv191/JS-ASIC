@@ -52,11 +52,11 @@ Brief: https://blog.janestreet.com/protocol-emulator-asic-competition/ (posted S
 | `info.yaml` fields: title, author, description, language, `clock_hz`, `top_module` (`tt_um_` prefix), `source_files`, pinout | `info.yaml` | Met: description and pinout per architecture §8 (#26); `clock_hz` see the timing row |
 | Datasheet `docs/info.md`: how it works, how to test, external hardware; images < 512 KB each, < 1 MB in all | `docs/info.md` | Met (#26); updated as features land |
 | Pins: 8 in, 8 out, 8 bidirectional, plus clock and reset; no analog pads | architecture §8 | Met (#26) |
-| Pad speed (TT Discord, 11-10): ~60 MHz out, ~75 MHz in | the fastest pin toggles at clk/2 = 25 MHz at 50 MHz; host SPI and flash SCK at ≤ clk/8 | Met |
+| Pad speed (TT Discord, 11-10): ~60 MHz out, ~75 MHz in | the fastest pin toggles at clk/2 = 20 MHz at 40 MHz; host SPI and flash SCK at ≤ clk/8 | Met |
 | Demo board I/O is 3.3 V; external parts go on a Pmod | architecture §8 | Open (to check: architecture §8 "Verify against the TT demo-board docs") |
 | IHP SRAM macros allowed, several, if they fit and pass precheck | 2 × `RM_IHPSG13_1P_512x32` (architecture §3) | Met on the harness (#10 re-checks at 8x4) |
 | Precheck clean | CI `gds.yaml` | Met on every passing gds run |
-| Timing at `clock_hz` (50 MHz) | slow corner on `main` after #14: −2.90 ns at 20 ns, +2.10 ns at 25 ns; #36 −2.76 ns | **Not met at 50 MHz**; met at 40 MHz. The sign-off clock is decided at D9 (decision 11-10); `clock_hz` changes then if needed |
+| Timing at `clock_hz` (40 MHz) | sign-off clock 40 MHz (verification, 11-11, #45); slow corner on `main` (one engine) +2.24 ns at 25 ns; devOps's local two-engine run about +0.5 ns | Met on `main`; the two-engine margin is thin (plan risk 2) |
 | Open-source license | `LICENSE`, Apache 2.0 | Met |
 
 ## 4. Open questions
