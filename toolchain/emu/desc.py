@@ -74,6 +74,7 @@ class Step:
     loc: str
     index: int
     labels: list[str] = field(default_factory=list)
+    lead: bool = False  # in a lead block (isa §5 R3-lead): `block` is its one party
 
 
 def _caller_loc() -> str:
@@ -102,6 +103,7 @@ class Description:
         self._pending_labels: list[str] = []
         self._labels: set[str] = set()
         self._block: frozenset[str] | None = None
+        self._lead = False
 
     # ---- declarations ---------------------------------------------------------------
     def line(self, name: str, kind: str = "pp", *, owner: str, idle: int = 1, gated: bool = False) -> LineRef:
@@ -157,6 +159,19 @@ class Description:
             yield
         finally:
             self._block = None
+
+    @contextmanager
+    def lead(self, party: str) -> Iterator[None]:
+        """A lead block (isa §5 R3-lead): a role block for one party that may hold timed steps.
+        The others skip it and follow its fall-through successor speculatively."""
+        if party not in self.parties:
+            raise ValueError(f"lead() takes one party, got {party!r}")
+        with self.only(party):
+            self._lead = True
+            try:
+                yield
+            finally:
+                self._lead = False
 
     # ---- timed steps ----------------------------------------------------------------
     def cond(self, kind: str, line: LineRef | None = None, owner: str | None = None,
@@ -255,7 +270,8 @@ class Description:
     def _add(self, _step_kind: str, owner: str | None, **args: Any) -> None:
         if owner is not None and owner not in self.parties + (SHARED,):
             raise ValueError(f"unknown step owner {owner!r}")
-        step = Step(_step_kind, args, owner, self._block, _caller_loc(), len(self.steps), self._pending_labels)
+        step = Step(_step_kind, args, owner, self._block, _caller_loc(), len(self.steps), self._pending_labels,
+                    lead=self._lead)
         self._pending_labels = []
         self.steps.append(step)
 

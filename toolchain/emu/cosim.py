@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 from .image import Image
+from .isa import TX_DEPTH
 from .model.bus import resolve
 from .model.system import EngineSpec, Glitch, System, Trace
 
@@ -102,7 +103,7 @@ def stimulus(trace: Trace, e: int) -> list[int]:
     """Per tick, the `uio_in` byte the RTL must see while it plays engine `e`: the wire of every
     other engine (undriven reads 1), with the run's glitches, line i on pin LINE[i].pin."""
     others = [et.drives for i, et in enumerate(trace.engines) if i != e]
-    pins = [i if ln.pin is None else ln.pin for i, ln in enumerate(trace.lines)]
+    pins = _pin_map(trace)
     out = []
     for t in range(trace.ticks):
         wire, _ = resolve(trace.lines, [d[t] for d in others])
@@ -117,6 +118,72 @@ def stimulus(trace: Trace, e: int) -> list[int]:
     return out
 
 
+def _pin_map(trace: Trace) -> list[int]:
+    return [i if ln.pin is None else ln.pin for i, ln in enumerate(trace.lines)]
+
+
+def pins(trace: Trace, e: int, ticks: range) -> list[tuple[int, int]]:
+    """Per tick, the (uio_oe, uio_out) bytes model engine `e` puts on the pins: a driven line
+    sets its pin's oe bit and its out bit to the level; out is 0 where oe is 0 (it never reaches
+    the wire). Before RUN (tick < 0) every pin is an input; past the run the last drive holds.
+    Equal entries share one tuple, so a run of millions of ticks stays small."""
+    drives, pin = trace.engines[e].drives, _pin_map(trace)
+    seen: dict[tuple[int | None, ...], tuple[int, int]] = {}
+
+    def byte(d: tuple[int | None, ...]) -> tuple[int, int]:
+        if d not in seen:
+            oe = lvl = 0
+            for i, v in enumerate(d):
+                if v is not None:
+                    oe |= 1 << pin[i]
+                    lvl |= (v & 1) << pin[i]
+            seen[d] = (oe, lvl)
+        return seen[d]
+
+    return [(0, 0) if t < 0 else byte(drives[min(t, len(drives) - 1)]) for t in ticks]
+
+
+ACT_FROM = 2  # ACT first reads 1 in the cycle with now = 2 (architecture §8)
+
+
+def act(trace: Trace, e: int, ticks: range) -> list[int]:
+    """Per tick, the ACT pin (uo_out[7]) for model engine `e`: its running state through one
+    flop (architecture §8). It runs from now = 1 through its HALT's start cycle, so ACT reads 1
+    from now = 2 through that cycle + 1, and stays 1 if it never halts."""
+    h = trace.engines[e].halt_cycle
+    last = None if h is None else h + 1
+    return [int(t >= ACT_FROM and (last is None or t <= last)) for t in ticks]
+
+
+def _pin_state(oe: int, out: int, p: int) -> str:
+    return f"driven {out >> p & 1}" if oe >> p & 1 else "released"
+
+
+@dataclass
+class PinMismatch:
+    tick: int
+    pins: list[int]               # the pins that differ
+    expected: tuple[int, int]     # (uio_oe, uio_out)
+    observed: tuple[int, int]
+
+    def __str__(self) -> str:
+        lines = [f"pin mismatch at tick {self.tick}:"]
+        lines += [f"  pin {p}: expected {_pin_state(*self.expected, p)}, observed {_pin_state(*self.observed, p)}"
+                  for p in self.pins]
+        return "\n".join(lines)
+
+
+def compare_pins(expected: list[tuple[int, int]], observed: list[tuple[int, int]],
+                 first: int) -> PinMismatch | None:
+    """The first tick where the pins differ, or None. Entry k of both lists is tick `first` + k.
+    A pin differs when its oe differs, or when both drive it to different levels."""
+    for k, ((eo, ev), (oo, ov)) in enumerate(zip(expected, observed, strict=True)):
+        bad = (eo ^ oo) | (eo & oo & (ev ^ ov))
+        if bad:
+            return PinMismatch(first + k, [p for p in range(8) if bad >> p & 1], (eo, ev), (oo, ov))
+    return None
+
+
 @dataclass
 class Replay:
     """One model run, ready to replay into the RTL playing engine `engine`."""
@@ -125,6 +192,7 @@ class Replay:
     engine: int
     expected: list[Pulse]
     stimulus: list[int]  # uio_in per tick
+    tx: list[int] = field(default_factory=list)  # the RTL engine's host words, written before RUN
 
 
 def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple = (),
@@ -136,8 +204,10 @@ def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple 
         raise ValueError(f"the RTL's engine must run at clock (1, 1) and phase 0, not {me.clock}, {me.phase}")
     if any(s.image != me.image for s in specs):
         raise ValueError("every engine must run the same image")
-    if (tx or {}).get(engine):
-        raise ValueError("no host words for the RTL's engine until the RTL has FIFOs")
+    mine = list((tx or {}).get(engine, []))
+    if len(mine) > TX_DEPTH:
+        raise ValueError(f"the harness writes the RTL's host words before RUN: at most TX_DEPTH = {TX_DEPTH}, "
+                         f"got {len(mine)}")
     s = System(list(specs), glitches=glitches, host_reads_rx=False)  # the harness reads RX after the run
     for i, words in (tx or {}).items():
         s.host_push(i, words)
@@ -152,4 +222,4 @@ def replay(specs: list[EngineSpec], engine: int, glitches: list[Glitch] | tuple 
         for t in range(g.start, min(g.start + g.length, trace.ticks)):
             if own[t][g.wire] is not None and not od_pull:
                 raise ValueError(f"glitch on line {g.wire} at tick {t} is over the RTL's own drive")
-    return Replay(me.image, trace, engine, expected(trace, engine), stimulus(trace, engine))
+    return Replay(me.image, trace, engine, expected(trace, engine), stimulus(trace, engine), mine)

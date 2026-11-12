@@ -918,22 +918,39 @@ module engine #(
   reg         lg_v1, lg_v2, lg_L, lg_own, lg_wait;
   reg  [2:0]  lg_p1, lg_p2, lg_cp;
   reg  [3:0]  lg_ld, lg_cnt;
+  // A let-go is taken the cycle after its XFER completes (lg_rq), from the latched s_*, which no
+  // new step has overwritten yet: off the completion cycle's deep logic. In that cycle the tracker
+  // already watches the new entry's clock (t_*), so a launching edge then counts (the model tracks
+  // from completion + 1). Count mode releases at completion + c0: c0 = ldelay (clock owner;
+  // ldelay - E after a stretched last edge) or max(0, ldelay - E) (others); c0 <= 1 releases at
+  // completion + 1 (the model's cycle for c0 = 0; isa reads "at completion": flagged).
+  reg         lg_rq, lg_cmq, lg_a3q;
+  wire [3:0]  lg_ldm3 = (s_ld > 4'd3) ? s_ld - 4'd3 : 4'd0;
+  wire [3:0]  lg_c0q  = (s_own && !lg_a3q) ? s_ld : lg_ldm3;
+  wire        lg_nowq = lg_cmq && (lg_c0q <= 4'd1);
+  wire [2:0]  t_cp  = lg_rq ? s_cpin : lg_cp;
+  wire        t_L   = lg_rq ? (s_cpha ? ~s_cpol : s_cpol) : lg_L;
+  wire        t_own = lg_rq ? s_own : lg_own;
+  wire [3:0]  t_ld  = lg_rq ? s_ld : lg_ld;
   wire        raw_set = start & (op == OP_RAW) & (sub == RAW_SET);
   wire        raw_rel = start & (op == OP_RAW) & (sub == RAW_REL);
   reg         lg_lvl, lg_evt, lg_rel, lg_wait_n;
   reg  [3:0]  lg_cnt_n, lg_d;
   always @* begin
     // the clock's drive level after this cycle (released reads 1), and its level now
-    lg_lvl = ~drv_low[lg_cp];
-    if ((raw_set || raw_rel) && l_pin == lg_cp) lg_lvl = raw_rel | operand[0];
-    if (drv_en && c_pin == lg_cp)               lg_lvl = drv_v;
-    if (drv2_en && c_pin2 == lg_cp)             lg_lvl = drv_v;
-    if (ck_en && c_cpin == lg_cp)               lg_lvl = ck_v;
-    lg_evt = lg_own ? (lg_lvl == lg_L && drv_low[lg_cp] == lg_L)    // ~drv_low = level now != lg_L
-                    : ((sync_s[lg_cp] ^ sync_p[lg_cp]) && sync_s[lg_cp] == lg_L);
-    lg_d = lg_own ? lg_ld : (lg_ld > 4'd3) ? lg_ld - 4'd3 : 4'd0;
+    lg_lvl = ~drv_low[t_cp];
+    if ((raw_set || raw_rel) && l_pin == t_cp) lg_lvl = raw_rel | operand[0];
+    if (drv_en && c_pin == t_cp)               lg_lvl = drv_v;
+    if (drv2_en && c_pin2 == t_cp)             lg_lvl = drv_v;
+    if (ck_en && c_cpin == t_cp)               lg_lvl = ck_v;
+    lg_evt = t_own ? (lg_lvl == t_L && drv_low[t_cp] == t_L)    // ~drv_low = level now != t_L
+                   : ((sync_s[t_cp] ^ sync_p[t_cp]) && sync_s[t_cp] == t_L);
+    lg_d = t_own ? t_ld : (t_ld > 4'd3) ? t_ld - 4'd3 : 4'd0;
     lg_rel = 1'b0; lg_wait_n = lg_wait; lg_cnt_n = lg_cnt;
-    if (lg_wait) begin
+    if (lg_rq && lg_cmq) begin          // a new count-mode entry
+      lg_rel = lg_nowq; lg_wait_n = 1'b0; lg_cnt_n = lg_c0q - 4'd2;
+    end else if (lg_rq || lg_wait) begin   // waiting for the launching edge (a new entry too)
+      lg_wait_n = 1'b1;
       if (lg_evt) begin
         if (lg_d == 4'd0) lg_rel = 1'b1;
         else begin lg_wait_n = 1'b0; lg_cnt_n = lg_d - 4'd1; end
@@ -945,17 +962,8 @@ module engine #(
   wire lg_x1 = (drv_en && c_pin == lg_p1) || (drv2_en && c_pin2 == lg_p1) || ((raw_set || raw_rel) && l_pin == lg_p1);
   wire lg_x2 = (drv_en && c_pin == lg_p2) || (drv2_en && c_pin2 == lg_p2) || ((raw_set || raw_rel) && l_pin == lg_p2);
   // a new let-go (lg_reg) holds data and/or data2; the old lines it doesn't hold go at once
-  // A let-go is taken the cycle after its XFER completes (lg_rq), from the latched s_*, which no
-  // new step has overwritten yet: off the completion cycle's deep logic. Count mode releases at
-  // completion + c0: c0 = ldelay (clock owner; ldelay - E after a stretched last edge) or
-  // max(0, ldelay - E) (others); c0 <= 1 releases now, at completion + 1 (the model's cycle for
-  // c0 = 0; isa reads "at completion": flagged to verification).
-  reg         lg_rq, lg_cmq, lg_a3q;
   wire        lg_n1 = lg_rq & s_do & s_od, lg_n2 = lg_rq & s_dx & s_mine2 & s_od2;
   wire        lg_new = lg_rq;
-  wire [3:0]  lg_ldm3 = (s_ld > 4'd3) ? s_ld - 4'd3 : 4'd0;
-  wire [3:0]  lg_c0q  = (s_own && !lg_a3q) ? s_ld : lg_ldm3;
-  wire        lg_nowq = lg_cmq && (lg_c0q <= 4'd1);
   wire        lg_xn1 = (drv_en && c_pin == s_pin) || (drv2_en && c_pin2 == s_pin) || ((raw_set || raw_rel) && l_pin == s_pin);
   wire        lg_xn2 = (drv_en && c_pin == s_pin2) || (drv2_en && c_pin2 == s_pin2) || ((raw_set || raw_rel) && l_pin == s_pin2);
   wire lg_go1 = lg_v1 & ~lg_x1 & (lg_rel | (lg_new & ~(lg_n1 && s_pin == lg_p1) & ~(lg_n2 && s_pin2 == lg_p1)));
@@ -1181,8 +1189,8 @@ module engine #(
         lg_wait <= lg_wait_n; lg_cnt <= lg_cnt_n;
         lg_rq <= lg_reg & ~abort_now; lg_cmq <= lg_now; lg_a3q <= lg_c0[0];
         if (lg_new) begin
-          if (lg_nowq) begin
-            // released now (cpha 0, ldelay already past); a drive this cycle wins
+          if (lg_rel) begin
+            // released now (an edge this cycle with no delay, or cpha 0 past ldelay); a drive wins
             if (lg_n1 && !lg_xn1) begin drv_low[s_pin]  <= 1'b0; drv_high[s_pin]  <= 1'b0; end
             if (lg_n2 && !lg_xn2) begin drv_low[s_pin2] <= 1'b0; drv_high[s_pin2] <= 1'b0; end
             lg_v1 <= 1'b0; lg_v2 <= 1'b0;
@@ -1190,7 +1198,6 @@ module engine #(
             lg_v1 <= lg_n1 & ~lg_xn1; lg_v2 <= lg_n2 & ~lg_xn2;
             lg_p1 <= s_pin; lg_p2 <= s_pin2; lg_cp <= s_cpin;
             lg_L <= s_cpha ? ~s_cpol : s_cpol; lg_own <= s_own; lg_ld <= s_ld;
-            lg_wait <= ~lg_cmq; lg_cnt <= lg_c0q - 4'd2;
           end
         end
         if (drv2_en && gok_c2) begin

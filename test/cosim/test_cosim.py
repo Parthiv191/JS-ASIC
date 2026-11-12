@@ -8,27 +8,28 @@ from dataclasses import replace
 
 import cocotb
 
-from harness import CosimMismatch, cosim
+from harness import GATES, CosimMismatch, cosim
 
 from emu.compiler import compile_desc
 from emu.cosim import Kind, pulse, replay
 from emu.desc import Description
 from emu.isa import Instr, Op, Role, encode
 from emu.model.system import EngineSpec, Glitch
-from emu.protocols import slack
+from emu.protocols import get, slack
 
 ALU_OPS = ("add", "sub", "and", "or", "xor", "shl", "shr", "eq", "ne", "lt")
 P = 20        # bit cycles: UART at 2% needs P >= 19 (isa §6)
 DATA = 0xA4   # reads 0x25 reversed, so the bit order shows on the wire (0xA5 and 0x5A read the same)
-# Programs avoid ROLE_IF and RAW JPIN: devOps's tr_br doesn't pulse for them yet (test_role_branches).
 
 
-def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=()):
-    """The RTL plays `role`; the model also runs every other role (unless `peers` is False)."""
+def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=(), host=None):
+    """The RTL plays `role`; the model also runs every other role (unless `peers` is False).
+    `host` maps a party role to its host's TX words (the RTL's are written before RUN)."""
     specs = [EngineSpec(img, role)]
     if peers:
         specs += [EngineSpec(img, r, clock=peer_clock, phase=peer_phase) for r in Role if r != role]
-    return replay(specs, 0, glitches=glitches)
+    tx = {i: (host or {}).get(s.role, []) for i, s in enumerate(specs) if s.role != Role.MON}
+    return replay(specs, 0, glitches=glitches, tx=tx)
 
 
 def kinds(rep):
@@ -157,8 +158,9 @@ def follower(**flags):
 @cocotb.test()
 @cocotb.parametrize(msb=[False, True], check=[False, True], resync=[False, True])
 async def test_xfer_follower(dut, msb, check, resync):
-    """Unclocked XFER follower with each combination of MSB, CHK and RESYNC (isa §4.3). The
-    owner's bit order shows only on its pins, which co-sim doesn't compare yet (README §4)."""
+    """Unclocked XFER follower with each combination of MSB, CHK and RESYNC (isa §4.3). As the
+    owner, the RTL's bit order shows only on its pins: `uart frame` in role tx checks it, LSB
+    first only."""
     flags = dict(msb=msb, check=check, resync=resync)
     rep = follower(**flags)
     for f in FLAGS:
@@ -172,6 +174,22 @@ async def test_xfer_follower(dut, msb, check, resync):
 async def test_uart_frame(dut, role, peer_clock, peer_phase):
     """A UART frame as tx (P0), rx (P1) and mon, against peers up to 2% slow and out of phase."""
     await cosim(dut, model(frame(), role, peer_clock, peer_phase), role)
+
+
+UART_WORDS = [0xA4, 0x3C, 0x00, 0xFF]  # 4: the TX FIFO's depth, all written before RUN
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], peer_clock=[(1, 1), (49, 50)])
+async def test_uart_protocol(dut, role, peer_clock):
+    """The library UART (emu/protocols/uart.py) from the FIFOs, as tx, rx and mon, against peers up
+    to 2% slow: tx takes its host's words by POP (the RTL from TXDATA), rx and mon push what they
+    receive into RX (the RTL's read back over RXDATA). Plan step 4's M1 target."""
+    rep = model(compile_desc(get("uart").build(bit_cycles=P)), role, peer_clock, host={Role.P0: UART_WORDS})
+    et = rep.trace.engines[0]
+    assert et.rx == ([] if role == Role.P0 else UART_WORDS) and et.tx_left == 0 and not et.events
+    assert rep.tx == (UART_WORDS if role == Role.P0 else [])
+    await cosim(dut, rep, role)
 
 
 GLITCHES = {  # on the receiver, perfect clocks; tick 72 is the middle of data bit 2 on the wire
@@ -221,6 +239,38 @@ async def test_od_readback(dut, role):
     rep = model(frame(kind="od"), role, glitches=[Glitch(0, 74, 4, 0)])
     assert [et.regs[1] for et in rep.trace.engines] == [0xA0] * 3
     await cosim(dut, rep, role)
+
+
+@cocotb.test()
+@cocotb.parametrize(case=["halt", "abort"])
+async def test_od_release(dut, case):
+    """isa §4.1: HALT and an abort release the OD lines and keep the PP drives. P1 pulls OD line
+    `o` low and drives PP line `q` 0, then follows P0's fall with ABORT: P0 makes it (HALT) or no
+    one does (the COND times out and aborts). The lines sit on pins 5, 2 and 6, so the line-to-pin
+    map shows too. Only the pins show any of this."""
+    d = Description("release", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    o = d.line("o", "od", owner="b", idle=1)
+    q = d.line("q", owner="b", idle=1)
+    h = d.profile("H", nom=8)
+    win = d.profile("W", nom=20, min=16, max=24)
+    d.abort_to("end")
+    d.hold(o, 0, owner="b", prof=h)
+    d.hold(q, 0, owner="b", prof=h)
+    d.cond("fall", ln, owner="a", prof=win, abort=True)
+    d.mark(7)
+    d.label("end")
+    d.halt()
+    img = compile_desc(d, check_timing=False)
+    img = replace(img, lines=[replace(x, pin=p) for x, p in zip(img.lines, (5, 2, 6), strict=True)])
+    rep = model(img, Role.P1, peers=case == "halt")
+    et = rep.trace.engines[0]
+    drv, h = et.drives, et.halt_cycle
+    # the release lands the cycle after the HALT starts, or after the abort and before the HALT
+    end = h if case == "halt" else next(ev.cycle for ev in et.events if ev.kind == "ABORT")
+    assert ("ABORT" in kinds(rep)) == (case == "abort") == (end < h)
+    assert drv[end] == (None, 0, 0) and drv[end + 1] == (None, None, 0) and drv[-1] == (None, None, 0)
+    await cosim(dut, rep, Role.P1)
 
 
 CLAMP = 1 << 22
