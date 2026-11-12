@@ -132,12 +132,20 @@ PROF, LANE_T, ABORT_PC = 0x0400, 0x0438, 0x044A
 ACT = 1 << 7
 
 
+def clocked_lane(data, clk, cpol=0, cpha=0, ldelay=0, data2=None, stretch=False):
+    """LANE[i] bytes: b0 data[2:0] clk[5:3] has_clk cpol · b1 cpha data2[3:1] has_d2 stretch ·
+    b2 ldelay[3:0] (architecture §4)."""
+    d2 = 0 if data2 is None else (data2 & 7) << 1 | 1 << 4
+    return [data | clk << 3 | 1 << 6 | cpol << 7, cpha | d2 | int(stretch) << 5, ldelay, 0]
+
+
 async def write_tables(host, profs=None, lanes=None, abort_pc=None):
-    """profs: {i: (min, nom, max)}; lanes: {i: data line} (unclocked); abort_pc: a word address."""
+    """profs: {i: (min, nom, max)}; lanes: {i: data line (unclocked) or clocked_lane(...)};
+    abort_pc: a word address."""
     for i, (lo, nom, hi) in (profs or {}).items():
         await host.write(PROF + 6 * i, [lo & 0xFF, lo >> 8, nom & 0xFF, nom >> 8, hi & 0xFF, hi >> 8])
     for i, data in (lanes or {}).items():
-        await host.write(LANE_T + 4 * i, [data & 7, 0, 0, 0])
+        await host.write(LANE_T + 4 * i, [data & 7, 0, 0, 0] if isinstance(data, int) else list(data))
     if abort_pc is not None:
         await host.write(ABORT_PC, [abort_pc & 0xFF, abort_pc >> 8])
 
