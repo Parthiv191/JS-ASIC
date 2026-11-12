@@ -30,6 +30,11 @@ MEAS_MAX = 0xFFFF  # OVERRUN values and m saturate here (isa §4.1)
 INF = 0xFFFF       # profile max = INF: no timeout
 REG_MASK = 0xFFFF
 MAX_XFER_BITS = 16
+# FZ ops' fixed totals in engine cycles, their own U included (isa §4.6, bus-fuzzer.md §3)
+FZ_NEXT_CYCLES = 48
+FZ_TOK_CYCLES = 2
+FZ_END_CYCLES = 40
+FZ_HANG_CYCLES = 12  # added to a fatal abort while the fuzz unit is armed
 
 
 class Op(IntEnum):
