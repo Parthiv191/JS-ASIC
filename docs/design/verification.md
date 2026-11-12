@@ -9,7 +9,7 @@ different kind of bug; a new layer earns its place by catching what the others m
 | Layer | Catches | Status (11-09) | Where |
 |---|---|---|---|
 | Model tests, and cross-role tests where the two engines play opposite roles (pytest) | the model misreading the spec | Running in CI on Python 3.11 and 3.12. Encoding and image (#5), fetch and issue timing (isa §4.0), reserved codes, `BR ROLE` and registers across RUN at v1; clocked XFER (one data line or duplex, push-pull or OD with the let-go, with clock stretching) in every role, both phases, with CLK_PHASE, TIMEOUT and UNDERRUN, cross-checked against the compiler's completion offsets and T3 at 2% (`test_engine_clocked.py`); the bus detector, COND START/STOP, bus exits, MEAS and gated lines in `test_engine_bus.py`; lead blocks, with an I2C target's conditional ACK and a controller ending a frame early run on the model, in `test_lead.py`; the library SPI (any mode, duplex, gated MISO, CS as a SELECT bus) and I2C (a controller write with the target's conditional ACK) in every role permutation, at 2% drift and at the shortest period that compiles (the rule cross-check), in `test_spi.py` and `test_i2c.py` | `toolchain/tests/`; cross-role: `test_system.py`, `test_protocols.py` |
-| Rule coverage: every isa.md rule, failure kind, COND and XFER case mapped to a test | spec corners nobody tested | Checked by a test (11-11): every rule and event kind isa.md names has a test, and the rules the code raises match the ones isa.md names. One gap: R3-fz (FZ, step 6) | §2, `toolchain/tests/test_rule_coverage.py` |
+| Rule coverage: every isa.md rule, failure kind, COND and XFER case mapped to a test | spec corners nobody tested | Checked by a test (11-11): every rule and event kind isa.md names has a test, and the rules the code raises match the ones isa.md names. No gaps since the FZ ops reached the compiler (11-12) | §2, `toolchain/tests/test_rule_coverage.py` |
 | Co-sim: one image on the model and the RTL, every trace-port pulse and the pins every cycle compared (directed tests, then the protocol programs) | the RTL misreading the spec | Harness built (11-10): the model's peers are replayed into engine 0. Directed tests pass for untimed ops, HOLD, COND and unclocked XFER, and UART frames in every role with peers up to 2% slow and glitches. Registers are read back after each run, and `uio_oe`/`uio_out` are compared every cycle; the pin check found an image-format bug (#24). On main's engine (#13, #14) every test passes, including ILLEGAL and the ROLE_IF/RAW JPIN branches. With the FIFOs (#38) the library UART co-sims in every role, from TXDATA to RXDATA: M1's target (11-11). The library SPI and I2C co-sim in every role (11-12): SPI in all four modes, MON's duplex samples included; I2C ACKed and NACKed, with short `ldelay`s. Next: engine 1, and random programs | `test/cosim/` (design in its README) |
 | Constrained-random programs from the compiler (legal by its rules), with a shrinker that cuts a failure to its smallest program | cases nobody thought to write | Not started; designs in the old plan, Tasks 11–18 | `toolchain/` |
 | Rule cross-check: no program the compiler accepts breaks a timing rule on the model | wrong timing rules (isa §6, T1–T5) | Directed: each re-derived boundary runs on both the compiler and the model, e.g. the shortest accepted UART (P = 19) in all role assignments, at ±2% drift and on chip. The random version comes with the generator | `toolchain/tests/test_analysis.py` |
@@ -37,9 +37,9 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `R1-od-lane` | `test_compiler.py`, `test_engine_clocked.py` |
 | `R1-owner` | `test_compiler.py`, `test_engine_clocked.py` |
 | `R1-shared` | `test_compiler.py` |
-| `R2-branch` | `test_analysis.py`, `test_engine_bus.py`, `test_engine_clocked.py` |
+| `R2-branch` | `test_analysis.py`, `test_engine_bus.py`, `test_engine_clocked.py`, `test_fz.py` |
 | `R3-escape` | `test_compiler.py`, `test_lead.py` |
-| `R3-fz` | gap: FZ ops reach the compiler with plan step 6 (Dec 6) |
+| `R3-fz` | `test_fz.py` |
 | `R3-lead` | `test_lead.py` |
 | `R3-raw-drive` | `test_compiler.py` |
 | `R3-timed-in-role` | `test_compiler.py`, `test_lead.py` |
@@ -55,22 +55,22 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `T2-window` | `test_analysis.py`, `test_engine_timed.py` |
 | `T3-latency` | `test_analysis.py` |
 | `T4-profile` | `test_analysis.py` |
-| `T5-abort` | `test_analysis.py`, `test_engine_bus.py`, `test_lead.py` |
+| `T5-abort` | `test_analysis.py`, `test_engine_bus.py`, `test_fz.py`, `test_lead.py` |
 | `T5-overrun` | `test_analysis.py` |
 | `T5-stall` | `test_analysis.py`, `test_engine_clocked.py`, `test_lead.py` |
 | `T5-timeout` | `test_analysis.py` |
-| `T5-watch` | `test_analysis.py`, `test_engine_bus.py` |
+| `T5-watch` | `test_analysis.py`, `test_engine_bus.py`, `test_fz.py` |
 | `OVERRUN` | `test_analysis.py`, `test_engine_timed.py` |
 | `EARLY` | `test_engine_bus.py`, `test_engine_timed.py`, `test_fuzz_unit.py` |
-| `TIMEOUT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fuzz_unit.py` |
+| `TIMEOUT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fuzz_unit.py`, `test_fz.py` |
 | `LEVEL` | `test_engine_timed.py`, `test_protocols.py` |
 | `EDGE` | `test_engine_timed.py` |
 | `CLK_PHASE` | `test_engine_clocked.py` |
-| `ABORT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_protocols.py` |
+| `ABORT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fz.py`, `test_protocols.py` |
 | `OVERFLOW` | `test_cosim.py`, `test_engine_core.py`, `test_system.py` |
 | `UNDERRUN` | `test_engine_clocked.py`, `test_spi.py` |
-| `BUS` | `test_engine_bus.py`, `test_i2c.py`, `test_lead.py`, `test_spi.py` |
-| `ILLEGAL` | `test_engine_core.py` |
+| `BUS` | `test_engine_bus.py`, `test_fz.py`, `test_i2c.py`, `test_lead.py`, `test_spi.py` |
+| `ILLEGAL` | `test_engine_core.py`, `test_fz.py` |
 
 ## 3. Rules
 

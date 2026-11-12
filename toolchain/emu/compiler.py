@@ -11,12 +11,13 @@ from .desc import MON, SHARED, Description, LaneRef, LineRef, Step
 from .image import IDLE, BusCfg, Image, LaneCfg, LineCfg
 from .isa import (
     F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, NUM_LANES, NUM_LINES, NUM_PROFILES, PROG_DEPTH, TIMED_OPS,
-    AluOp, BrCond, BusKind, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
+    AluOp, BrCond, BusKind, CondKind, Dst, FzOp, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
     role_if_operand, role_mask, unpack_cond, unpack_xfer, xfer_operand,
 )
 
 TIMED = ("cond", "hold", "xfer")
 BRANCHES = ("br", "raw_jpin")
+FZ_KINDS = ("fz_next", "fz_tok", "fz_end")
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,8 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     instrs: list[Instr] = []
     pc = 0
     od_lane: int | None = None  # R1-od-lane: the one clocked lane with an OD data line
+    fz_party: str | None = None  # R3-fz: the one party whose role blocks hold the FZ ops
+    fz_sends: list[Step] = []    # XFERs with src = fz: the fuzzing party must send in each
     for kind, obj, extra in layout:
         if kind == "role_if":
             mask = role_mask(_role(desc, r) for r in obj)
@@ -186,6 +189,16 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                     err("R1-od-lane", s, f"lane {la.name!r} is a second clocked lane with an OD data "
                                          f"line (after {desc.lanes[od_lane].name!r}); the engine has one "
                                          f"OD let-go tracker (isa §4.3)")
+        if s.kind in FZ_KINDS:
+            party = next(iter(s.block)) if s.block is not None and len(s.block) == 1 else None
+            if party not in desc.parties:
+                err("R3-fz", s, "an FZ op belongs in a role block for exactly one party (isa §5)")
+            elif fz_party is None:
+                fz_party = party
+            elif party != fz_party:
+                err("R3-fz", s, f"FZ ops for {party!r} and {fz_party!r}: one party fuzzes (isa §5)")
+        if s.kind == "xfer" and a["src"] == "fz":
+            fz_sends.append(s)
         try:
             ins = _instr(desc, s, a, lambda n: target(s, n), lambda r: lane_index(s, r))
         except ValueError as e:
@@ -206,6 +219,16 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                 err("R3-escape", s, "branch between role blocks")
         instrs.append(ins)
         pc += 1
+
+    for s in fz_sends:
+        senders = {s.owner}
+        if isinstance(s.args["lane"], LaneRef) and desc.lanes[s.args["lane"].index].data2 is not None:
+            senders.add(desc.lines[desc.lanes[s.args["lane"].index].data2.index].owner)
+        if fz_party is None:
+            err("R3-fz", s, "src = fz with no FZ op: no party fuzzes")
+        elif fz_party not in senders:
+            err("R3-fz", s, f"src = fz sent by {', '.join(sorted(senders))}, not the fuzzing party "
+                            f"{fz_party!r} (isa §5)")
 
     if len(profiles) > NUM_PROFILES or len(lanes) > NUM_LANES or len(lines) > NUM_LINES:
         anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
@@ -548,6 +571,10 @@ def _instr(desc, s: Step, a: dict, target, lane_index) -> Instr:
         return Instr(Op.POP, rd=reg(a["rd"]))
     if k == "mark":
         return Instr(Op.MARK, operand=_imm(a["id"]))
+    if k in ("fz_next", "fz_end"):
+        return Instr(Op.FZ, rd=reg(a["rd"]), sub=int(FzOp.NEXT if k == "fz_next" else FzOp.END))
+    if k == "fz_tok":
+        return Instr(Op.FZ, ra=reg(a["ra"]), sub=int(FzOp.TOK))
     if k == "halt":
         return Instr(Op.HALT)
     if k == "nop":

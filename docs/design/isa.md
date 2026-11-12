@@ -146,7 +146,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - The successor starts on the first own cycle ≥ max(predecessor completion + 1, word arrival).
 - **Costs that follow:**
   - **Untimed instructions, taken branches included:** exactly `U` cycles, except FZ ops, which
-    have fixed totals (`bus-fuzzer.md` §3). `ROLE_IF` costs `U`
+    have fixed totals (§4.6). `ROLE_IF` costs `U`
     whether or not it skips; a skip continues at `pc + 1 + count`, and the skipped words take no
     time. Role blocks don't nest.
   - **`RAW DELAY n`:** `n` cycles, rounded up to a multiple of `U`.
@@ -367,9 +367,45 @@ Logs `MARK(id)`. With IRQ it logs `IRQ(id)` instead, latches `id` and raises the
 host clears it.
 
 ### 4.6 `FZ` and `src = FZ`
-- Costs and semantics: `bus-fuzzer.md`. `FZ` is legal only in a single-party role block
-  (`R3-fz`), and only on engine 0.
-- `src = FZ` sends the next staged byte (0 when exhausted).
+The fuzz unit is attached to engine 0. Its algorithm is in `bus-fuzzer.md` §2–3; this is what a
+program sees.
+
+| Op | Effect | Cycles (total, `U` included) |
+|---|---|---|
+| `fz.next rd` | pick and mutate a seed into staging, rewind the read pointer, arm; `rd :=` the length (1–32) | 48 |
+| `fz.tok ra` | queue `ra[7:0]` as a token; nothing while disarmed | 2 |
+| `fz.end rd` | finish the fingerprint; `rd := 1` if it is new, else 0; disarm. While disarmed: `rd := 0` | 40 |
+
+- The cycles are fixed whatever the outcome, and the compiler counts them as untimed cycles (§6).
+- `FZ` is legal only in a role block for one party, the same party everywhere (`R3-fz`). On
+  engine 1 it is ILLEGAL. On engine 0 with the unit not enabled (`MEM2_MODE` ≠ 0, or
+  `FZ_STATUS.ready` 0), each op takes its cycles and does nothing else, and `rd := 0`, so a
+  `fz.next` length of 0 means the unit is off.
+- `src = FZ` sends the next staged byte, one per XFER, taken when the step takes its source:
+  an XFER with `n` < 8 sends its low `n` bits, and one with `n` > 8 sends the byte
+  zero-extended. In wire mode the length comes first. It reads 0 once the message is exhausted,
+  and always 0 without a unit (engine 1 included). The fuzzing party sends in every `src = FZ`
+  XFER (`R3-fz`): as its owner, or as the owner of a duplex lane's data2. Any other sender
+  reads 0.
+- **While the unit is armed**, engine 0:
+  - queues a step's tokens when it completes: what the engine received from the other party.
+    - An XFER gives the bits of each data line the engine follows. On one data line that is
+      `value[7:0]`, then `value[15:8]` if `n` > 8, and nothing for the line's owner. On a duplex
+      lane (`dst` = `(v2 << n) | v1`), the data line's `n` bits, then data2's: so the data owner
+      (an SPI controller) gets the reply on data2, and data2's owner gets the request. An XFER
+      that ends with no value (a TIMEOUT without ABORT) gives none.
+    - A followed COND gives `0x40 + bucket(m)`, with `m` = `tb` after the step minus `tb` before
+      it, clamped to 0–0xFFFF as MEAS is (a followed edge can come before `tb` under drift), or
+      0xFFFF on a TIMEOUT. A COND it does gives none.
+  - sets the bit of every event kind it logs (§7, bus exits included) in the unit's event mask.
+  - on a fatal abort (§4.1): the unit saves staging as a hang and disarms, and the abort takes
+    `FZ_HANG_CYCLES` = 12 cycles more. A bus exit is not a hang: the unit stays armed, and the
+    program ends the iteration later. Not with `fz.next` or `fz.end` between `abort_pc` and the
+    first timed step there (`T5-abort`): the timing rules don't time that path yet (§6).
+- While disarmed (after `fz.end` or a hang), `src = FZ` keeps reading the last staging.
+- The model never loses a token. A step queues at most 2, an XFER that queues 2 takes many
+  cycles, and the queue drains one a cycle (`bus-fuzzer.md` §2), so at most 3 wait at once and
+  `FZ_STATUS.token_lost` stays 0. The RTL must keep up as well.
 
 ### 4.7 The bus: detector and bus events
 - **The detector** runs every engine cycle, in every role except the owner of the bus's
@@ -443,7 +479,7 @@ host clears it.
 | `R3-lead` | `lead(party)`: one party. Every timed step in it is owned by that party, or uses a lane whose clock that party owns; a bus COND START/STOP, owned by the master line's owner (`R1-bus`), is also allowed. It leaves either by its fall-through exit (the leader carries on with the next step; no timed step may lie on that path) or by a path that runs a bus COND START/STOP and then branches to `abort_pc`; no path halts. The block's CFG fall-through successor S is a timed step with ABORT, which the other roles follow speculatively. It may not have CHK, and its profile `max` must be INF. When S's events come from the leader (it clocks S, or owns S), the others wait in S for the exit's bus COND, so no exit path may complete S first: before its bus COND the leader makes fewer edges on S's clock than S needs (2n), or none on a COND S's line (which may not be `bus_a`); a COND START S needs a STOP exit, and from `abort_pc` the leader reaches S before any other START. Such an S is not a COND STOP, HOLD or unclocked XFER, which would complete without the leader. Nothing timed lies between the exit's bus COND and its branch to `abort_pc`. |
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit, or from a lead block to `abort_pc` (the `abort_to` target, under `R3-lead`). `abort_pc` is not inside a block body. |
-| `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
+| `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere; that party sends in every `XFER src = FZ` (its owner, or a duplex lane's data2 owner) |
 | `S-*` | Names resolve (`S-label`); fields in range and program ≤ 512 (`S-range`); tables fit the chip's sizes (`S-table`); `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines with idle 1, and not on a line the SELECT master owns (`S-line`) |
 | `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 
@@ -468,7 +504,7 @@ costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are comp
 | `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample). A followed COND START/STOP adds `bus_confirm + 1` to the right side: the detector runs every cycle and its flag is sticky, so the follower only has to be waiting by the confirm. A COND START/STOP right after another (no timed step between) needs `nom − ceil(d·nom) − QUANT ≥ bus_confirm`: an edge inside the previous one's confirm window would replace its candidate (§4.7) |
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
-| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows, or a COND START/STOP it does (on a bus the others exit on it; any other edge of its own could land mid-frame). On a bus it has ABORT only if it is a followed COND START/STOP: a bus exit leaves its flag set, so any other ABORT step there would exit again at once, forever. |
+| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows, or a COND START/STOP it does (on a bus the others exit on it; any other edge of its own could land mid-frame). On a bus it has ABORT only if it is a followed COND START/STOP: a bus exit leaves its flag set, so any other ABORT step there would exit again at once, forever. No `fz.next` or `fz.end` lies between `abort_pc` and that step for a role that can abort or exit: the timing rules don't time the path from an abort or a bus exit into `abort_pc` (open), and their 40–48 cycles could miss the re-sync. |
 | `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block whose successor is one of those for it (the others wait in it). MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
 
 - Completion offsets relative to the step's end `tb`:

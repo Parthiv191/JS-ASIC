@@ -16,7 +16,7 @@ from .image import Profile
 from .isa import INF, NUM_REGS
 
 REGS = tuple(f"r{i}" for i in range(NUM_REGS))
-SRCS = ("zero", "ones", "fifo") + REGS
+SRCS = ("zero", "ones", "fifo", "fz") + REGS
 DSTS = ("discard", "fifo") + REGS
 COND_KINDS = ("fall", "rise", "start", "stop")
 BUS_KINDS = ("i2c", "select")
@@ -236,6 +236,16 @@ class Description:
 
     def pop(self, rd: str) -> None:
         self._add("pop", None, rd=self._reg(rd))
+
+    # ---- fuzzer (isa §4.6): only in a role block for the one fuzzing party (R3-fz) ----
+    def fz_next(self, rd: str) -> None:
+        self._add("fz_next", None, rd=self._reg(rd))
+
+    def fz_tok(self, ra: str) -> None:
+        self._add("fz_tok", None, ra=self._reg(ra))
+
+    def fz_end(self, rd: str) -> None:
+        self._add("fz_end", None, rd=self._reg(rd))
 
     def mark(self, id: int) -> None:
         self._add("mark", None, id=id)
