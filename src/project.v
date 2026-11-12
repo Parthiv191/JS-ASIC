@@ -7,7 +7,7 @@
 //      PIN_OUT and PIN_OE_SET, and reads them back through PINS and PIN_OE.
 //   4. Host access to both SRAM columns (0x1000, 0x3000).
 //   5. Engine 0 running a program from column 1 (engine.v), with the shared
-//      PROF, LINE, LANE and ABORT_PC tables.
+//      PROF, LINE, LANE, ABORT_PC and BUS tables.
 // Pins as in architecture §8.
 module tt_um_prot_emu_SAP (
     input  wire [7:0] ui_in,    // Dedicated inputs
@@ -135,6 +135,7 @@ module tt_um_prot_emu_SAP (
   reg  [383:0] prof_all;      // PROF[0..7], 6 bytes each (min, nom, max LE); PROF0 is ignored
   reg  [127:0] lane_all;      // LANE[0..3], 4 bytes each
   reg  [8:0]   abort_pc;
+  reg  [15:0]  bus_cfg;       // {BUS_CONFIRM, BUS_AB (b[5:3], a[2:0]), BUS_KIND[1:0]} (0x54-0x56)
   reg  [1:0]  e0_role;
   reg  [2:0]  e0_reg_sel;
   reg  [7:0]  e0_reg_lo;      // REG_DATA low byte, written with the high byte
@@ -183,6 +184,7 @@ module tt_um_prot_emu_SAP (
       prof_all      <= 384'h0;
       lane_all      <= 128'h0;
       abort_pc      <= 9'd0;
+      bus_cfg       <= 16'h0;
     end else begin
       if (ph) run_eff <= run;   // the next cycle has ph = 0
       if (soft_reset0) run[0] <= 1'b0;
@@ -208,6 +210,9 @@ module tt_um_prot_emu_SAP (
         end
         else if (off == 8'h4A)              abort_pc[7:0] <= hwdata;
         else if (off == 8'h4B)              abort_pc[8]   <= hwdata[0];
+        else if (off == 8'h54)              bus_cfg[1:0]  <= hwdata[1:0];
+        else if (off == 8'h55)              bus_cfg[7:2]  <= hwdata[5:0];
+        else if (off == 8'h56)              bus_cfg[15:8] <= hwdata;
       end
       if (ewr) begin
         case (off)
@@ -236,7 +241,7 @@ module tt_um_prot_emu_SAP (
       .clk(clk), .rst_n(rst_n_sync), .ph(ph), .run(run_eff[0]), .soft_reset(soft_reset0),
       .role(e0_role), .line_cfg(line_cfg), .pin_in(pin_in),
       .lane_cfg({lane_all[119:96], lane_all[87:64], lane_all[55:32], lane_all[23:0]}),
-      .prof_tab(prof_all[383:48]), .abort_pc(abort_pc),
+      .prof_tab(prof_all[383:48]), .abort_pc(abort_pc), .bus_cfg(bus_cfg),
       .fetch(e0_fetch), .fetch_addr(e0_fetch_addr), .sram_dout(col1_dout),
       .drv_low(e0_low), .drv_high(e0_high),
       .reg_sel(e0_reg_sel), .reg_we(e0_reg_we), .reg_wdata({hwdata, e0_reg_lo}),

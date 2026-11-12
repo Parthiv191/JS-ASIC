@@ -247,6 +247,7 @@ on `uio`, which makes a self-contained bring-up rig.
 | Rule | Evidence |
 |---|---|
 | Macros: one per column, x = 91.2 + 44.96·k, never over x = 366.6–370.7 | `src/pdn_cfg.tcl` bridges run edge to edge |
+| 8x4: both macros at the right end, x = 810.56 (column 1, k = 16) and 1260.16 (column 2, k = 26), y = 483.84; this supersedes §3's 6x4 positions | in the middle they walled off an 866 µm band of Metal1–4 (the only horizontal layer, Metal3, overflowed): two-engine global-route overflow 4329 → 389 at the same settings, and 0 with `GRT_ADJUSTMENT` 0.05 (local runs e2a, e2b, e2d) |
 | ≥ ~20 µm between a macro and the edge its VDDARRAY! bridges run to | run 41975804926 (the power-grid check failed, error PSM-0069) |
 | Macro signal pins are on the bottom edge. Logic goes below the macros; the TT pins are top-left. | LEF |
 | One client per macro, with its flops next to it; `A_DOUT` drives only flops | run 41975807753 (slew/cap) |
