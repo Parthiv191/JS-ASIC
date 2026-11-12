@@ -35,7 +35,7 @@ Roles: P0 = party 0 (e.g. the controller), P1 = party 1 (e.g. the target), MON =
 
 | Mode | What happens |
 |---|---|
-| Hosted | a host (the TT demo board's RP2040, or a PC through the Basys 3 bridge) loads programs, sets roles and moves data |
+| Hosted | a host (the TT demo board's RP2350, or a PC through the Basys 3 bridge) loads programs, sets roles and moves data |
 | Standalone | at power-up it boots from an external SPI flash (with a CRC check), runs, and reports on a UART text pin (`architecture.md` §6–7) |
 | Test | TESTMODE strap and the debug registers for bring-up (`architecture.md` §2, §5) |
 
