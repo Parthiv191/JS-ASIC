@@ -19,7 +19,7 @@
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
-  "CLOCK_PERIOD": 20,
+  "CLOCK_PERIOD": 25,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
   "//": "Hold margins 0.05 / 0.02 ns (template 0.1 / 0.05): hold padding was ~31K um2 of delay cells",
@@ -111,6 +111,9 @@
   "//": "cap still fail the flow in every corner (below); local run aBC: 0 of either.",
   "DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
   "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 250,
+  "//": "capacitance repair margins 20/10 -> 50%: the SRAM's A_DOUT pins (limit 0.064 pF) came out up to 9% over after routing at 25% (#48)",
+  "DESIGN_REPAIR_MAX_CAP_PCT": 50,
+  "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 50,
   "MAX_SLEW_VIOLATION_CORNERS": ["*"],
   "MAX_CAP_VIOLATION_CORNERS": ["*"],
 

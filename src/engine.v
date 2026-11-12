@@ -3,11 +3,12 @@
 // One protocol engine (isa.md).
 //
 // Built: NOP, LI, ALU, BR, ROLE_IF, MARK, RAW, HALT, and the timed steps COND
-// FALL/RISE (do, follow, MEAS), HOLD (do, follow) and XFER on unclocked lanes
-// (do, follow, CHK, RESYNC, MSB; OD owners read their bits back), with ABORT
-// into abort_pc. Not built yet, and halting as ILLEGAL until they are: COND
-// START/STOP (bus detector), clocked lanes, PUSH/POP and src/dst FIFO, CRC, FZ,
-// PROF, and profiles/lines/lanes past the built ones.
+// FALL/RISE (do, follow, MEAS), HOLD (do, follow), XFER on unclocked lanes
+// (do, follow, CHK, RESYNC, MSB; OD owners read their bits back) and on
+// clocked lanes with one data line (clock owner and follower, CPOL/CPHA,
+// ldelay, CLK_PHASE, TIMEOUT), with ABORT into abort_pc; PUSH/POP and src/dst
+// FIFO. Not built yet, and halting as ILLEGAL until they are: COND START/STOP
+// (bus detector), duplex and stretch lanes, CRC, FZ and PROF.
 //
 // Fetch and issue (isa §4.0): own cycles are those with ph == E. An
 // instruction starts only on an own cycle, presents its successor's address in
@@ -88,8 +89,8 @@ module engine #(
   localparam [3:0] BR_ALWAYS = 4'd0, BR_Z = 4'd1, BR_NZ = 4'd2, BR_TO = 4'd3, BR_ROLE = 4'd4;
   localparam [1:0] K_COND = 2'd1, K_HOLD = 2'd2, K_XFER = 2'd3;  // tr_op codes
   // event kinds
-  localparam OVERRUN = 0, EARLY = 1, TIMEOUT = 2, LEVEL = 3, EDGE = 4, ABORT = 6, OVERFLOW = 7,
-             ILLEGAL = 10;
+  localparam OVERRUN = 0, EARLY = 1, TIMEOUT = 2, LEVEL = 3, EDGE = 4, CLK_PHASE = 5, ABORT = 6,
+             OVERFLOW = 7, UNDERRUN = 8, ILLEGAL = 10;
   localparam [3:0] SRC_FIFO = 4'd2, DST_FIFO = 4'd2;
   localparam signed [23:0] AGE_MAX = 24'sh400000;  // 2^22: the 24-bit time clamp (isa §4.1)
   localparam signed [23:0] EDGE_LAT = 24'sd3;
@@ -118,6 +119,7 @@ module engine #(
   // ---- fetch and the prefetch register ----
   reg  [31:0] pf;
   (* keep *) reg [3:0] pf_pi;      // a copy of pf[20:17] that only drives the profile mux
+  (* keep *) reg [1:0] pf_li;      // a copy of pf[22:21] that only drives the lane mux
   reg         pf_valid, fetch_d, drop_d;
   reg  [8:0]  fpc;                  // address of the last fetch = pc of the word in pf
   reg  [10:0] skip;                 // own cycles still to wait (RAW DELAY)
@@ -145,13 +147,18 @@ module engine #(
   // the lane (XFER)
   reg  [23:0] lane;
   always @*
-    case (t_line[1:0])
+    case (pf_li)
       2'd0: lane = lane_cfg[23:0];
       2'd1: lane = lane_cfg[47:24];
       2'd2: lane = lane_cfg[71:48];
       default: lane = lane_cfg[95:72];
     endcase
+  // b0: data[2:0] clk[5:3] has_clk[6] cpol[7] · b1: cpha[8] data2[11:9] has_d2[12] stretch[13]
+  // nrzi[14] · b2: ldelay[19:16] (architecture §4)
   wire        lane_ck = lane[6];   // has_clk
+  wire [2:0]  lane_cl = lane[5:3];
+  // the clock owner: the clk line's owner party; SHARED and MON own no clock (isa §4.3)
+  wire        own_ck  = (role != 2'd2) && (line_cfg[{lane_cl, 3'd4} +: 2] == role);
   wire [3:0]  x_n1    = operand[3:0];   // n - 1
   wire [3:0]  x_src   = operand[7:4];
   wire [3:0]  x_dst   = operand[11:8];
@@ -159,11 +166,11 @@ module engine #(
   wire timed   = (op == OP_COND) | (op == OP_HOLD) | (op == OP_XFER);
   // Reserved codes halt as ILLEGAL in the start cycle (isa §3): step owner 3, profile >= 8,
   // line >= 8, lane >= 4, src 4-7, dst 1 and 3-7, ALU sub 10-15, BR 5-15, RAW 6-15.
-  // COND START/STOP, clocked lanes and src FZ are defined but not built yet.
+  // COND START/STOP, duplex and stretch lanes, and src FZ are defined but not built yet.
   wire t_ok    = (t_prof[3] == 1'b0) && (t_owner != 2'd3) &&
                  (op == OP_COND ? (t_line[3] == 1'b0 && operand[1] == 1'b0) :
                   op == OP_HOLD ? (t_line[3] == 1'b0) :
-                  (t_line[3:2] == 2'b00 && !lane_ck &&
+                  (t_line[3:2] == 2'b00 && !(lane_ck && (lane[12] || lane[13])) &&
                    (x_src == 4'd0 || x_src == 4'd1 || x_src == SRC_FIFO || x_src[3]) &&
                    (x_dst == 4'd0 || x_dst == DST_FIFO || x_dst[3])));
   wire untimed = (op == OP_NOP || op == OP_LI || (op == OP_ALU && sub <= 4'd9) ||
@@ -286,7 +293,8 @@ module engine #(
   assign tx_count = tx_n;
   assign rx_count = rx_n;
   assign rx_head  = rxq[rx_rp];
-  assign rx_next  = rxq[rx_rp + 3'd1];
+  wire [2:0]  rx_rp1 = rx_rp + 3'd1;   // a sized wire, not inline index arithmetic (see project.v)
+  assign rx_next  = rxq[rx_rp1];
 
   // ---- the timed step: fields latched at its start (s_*), or straight from pf in the start cycle ----
   reg  [1:0]  s_kind;
@@ -294,7 +302,13 @@ module engine #(
   reg  [2:0]  s_pin, s_rd, s_line;
   reg  [3:0]  s_n1, s_dst;
   reg  [15:0] s_min, s_nom, s_max, s_v, s_rx;
-  reg  [3:0]  s_k, s_j;                // bits driven, bits sampled
+  reg  [3:0]  s_k;                     // bits driven
+  reg  [4:0]  s_j;                     // bits sampled (to n = 16 on a clocked lane)
+  // clocked lane (isa §4.3): the clock line, its mode, the launch delay, and the step's state
+  reg         s_ck, s_own, s_cod, s_cpol, s_cpha, s_lp, s_nodst;
+  reg  [2:0]  s_cpin, s_sr;            // clock pin; the clock owner's capture -> sample delay
+  reg  [3:0]  s_ld, s_lcnt;            // ldelay; a pending launch's countdown
+  reg  [5:0]  s_e;                     // clock edges made or seen, from the first leading edge
   reg         s_srcfifo, s_fwait;      // src = FIFO; still waiting for the word
   reg  signed [23:0] slot_age, samp_age;
 
@@ -304,14 +318,19 @@ module engine #(
     case (pf_pi[2:0])
       3'd0:    prof = {16'hFFFF, 16'h0000, 16'h0000};   // IDLE = (0, 0, INF)
       3'd7:    prof = p7;
-      default: prof = prof_tab[(t_prof[2:0] - 3'd1) * 48 +: 48];
+      3'd1:    prof = prof_tab[0 +: 48];     // explicit: no inline index arithmetic (see project.v)
+      3'd2:    prof = prof_tab[48 +: 48];
+      3'd3:    prof = prof_tab[96 +: 48];
+      3'd4:    prof = prof_tab[144 +: 48];
+      3'd5:    prof = prof_tab[192 +: 48];
+      default: prof = prof_tab[240 +: 48];   // 6
     endcase
   end
 
   wire        st     = start & timed & t_ok;  // a timed step starts this cycle
   wire [2:0]  st_line = (op == OP_XFER) ? lane[2:0] : t_line[2:0];
   wire [15:0] st_v   = (x_src == 4'd0) ? 16'h0 : (x_src == 4'd1) ? 16'hFFFF :
-                       (x_src == SRC_FIFO) ? tx_head : rb;
+                       (x_src == SRC_FIFO) ? (tx_ne ? tx_head : 16'hFFFF) : rb;   // empty: UNDERRUN sends ONES
 
   // In the start cycle the fields come from pf; after it, from the latched s_*. Selecting on
   // busy (a flop) instead of st keeps the instruction decode off every datapath.
@@ -335,19 +354,33 @@ module engine #(
   wire        c_profz = sel ? (t_prof == 4'd0) : s_profz;
   wire [3:0]  c_n1    = sel ? (op == OP_XFER ? x_n1 : 4'd0) : s_n1;
   wire [3:0]  c_dst   = sel ? x_dst : s_dst;
+  wire        c_ck    = sel ? (op == OP_XFER && lane_ck) : s_ck;
+  wire        c_own   = sel ? own_ck : s_own;
+  wire [2:0]  c_cpin  = sel ? line_cfg[{lane_cl, 3'd0} +: 3] : s_cpin;
+  wire        c_cod   = sel ? line_cfg[{lane_cl, 3'd3}] : s_cod;
+  wire        c_cpol  = sel ? lane[7] : s_cpol;
+  wire        c_cpha  = sel ? lane[8] : s_cpha;
+  wire [3:0]  c_ld    = sel ? lane[19:16] : s_ld;
+  wire        c_lp    = sel ? 1'b0 : s_lp;
+  wire [3:0]  c_lcnt  = sel ? 4'd0 : s_lcnt;
+  wire [2:0]  c_sr    = sel ? 3'd0 : s_sr;
+  wire [5:0]  c_e     = sel ? 6'd0 : s_e;
   // An owned src = FIFO XFER (unclocked lane) waits for the word, checking every cycle; one
   // that waited re-bases when it takes it, tb := max(tb, now), and its bit 0 can go out in the
   // same cycle (isa §4.3). A step owned after a POP stall re-bases at its start (isa §4.1).
   wire        c_srcfifo = sel ? (x_src == SRC_FIFO) : s_srcfifo;
   wire        x_fifo    = c_on & (c_kind == K_XFER) & c_do & c_srcfifo;
-  wire        fwait     = x_fifo & (sel | s_fwait) & ~tx_ne;
+  wire        x_wait    = ~c_ck | c_own;        // a data owner without the clock can't wait (isa §4.3)
+  wire        fwait     = x_fifo & (sel | s_fwait) & ~tx_ne & x_wait;
   wire        take      = x_fifo & (sel | s_fwait) & tx_ne;
   wire        take_late = take & busy;
+  // (a clock owner's clocked XFER re-bases by its own rule from the raw tb_age instead, so the
+  // lane stays off tbx: every timed step's start-cycle arithmetic starts from it)
   wire        rebase    = (st & stalled & t_does) | take_late;
   wire [15:0] c_v     = take ? tx_head : sel ? st_v : s_v;
   wire [15:0] c_rx    = sel ? 16'h0 : s_rx;
   wire [3:0]  c_k     = sel ? 4'd0 : s_k;
-  wire [3:0]  c_j     = sel ? 4'd0 : s_j;
+  wire [4:0]  c_j     = sel ? 5'd0 : s_j;
   wire        c_first = sel;
 
   wire signed [23:0] nom   = u16(c_nom);
@@ -367,10 +400,12 @@ module engine #(
 
   wire       inp  = sync_s[c_pin];
   wire       edg  = sync_s[c_pin] ^ sync_p[c_pin];
+  wire       c_lvl = sync_s[c_cpin];                       // the clock line
+  wire       c_edg = sync_s[c_cpin] ^ sync_p[c_cpin];
 
   // value bit positions: bit k of the wire carries value bit k (LSB first) or n-1-k (MSB)
   wire [3:0] pos_k = c_msb ? c_n1 - c_k : c_k;
-  wire [3:0] pos_j = c_msb ? c_n1 - c_j : c_j;
+  wire [3:0] pos_j = c_msb ? c_n1 - c_j[3:0] : c_j[3:0];
 
   // Start-cycle results that nothing reads before the next own cycle (>= start + 2) land one
   // cycle late, off the decode -> profile -> arithmetic path: the window add (acc_pend), the
@@ -402,6 +437,13 @@ module engine #(
   reg                tb_upd, anc_upd;
   reg                acc_clr, acc_add;
   reg                k_inc, j_inc, smp;
+  reg                ck_en, ck_v;   // the clock owner's drive of the clock pin
+  reg                nodst;         // a clocked timeout: no dst, no push
+  reg                ck_ev, lead, launch, lp_nx;
+  reg  [3:0]         lcnt_nx, ldly;
+  reg  [5:0]         e_nx;
+  reg  [2:0]         sr_nx;
+  reg  signed [23:0] et;
   reg  [15:0]        rx_new;
   reg  [15:0]        value;         // the step's record value
   reg                sample_tr;     // a follower sample (trace)
@@ -420,6 +462,8 @@ module engine #(
     k_inc = 1'b0; j_inc = 1'b0; smp = 1'b0;
     rx_new = c_rx; value = 16'h0; sample_tr = 1'b0;
     m = 24'sd0; in_win = 1'b0; rxs = c_rx;
+    ck_en = 1'b0; ck_v = 1'b0; nodst = 1'b0; ck_ev = 1'b0; lead = 1'b0; launch = 1'b0;
+    lp_nx = c_lp; lcnt_nx = c_lcnt; e_nx = c_e; sr_nx = {c_sr[1:0], 1'b0}; ldly = 4'd0; et = 24'sd0;
 
     if (c_on) begin
       case (c_kind)
@@ -482,9 +526,100 @@ module engine #(
             end
           end
 
-        // XFER, unclocked lane (isa §4.3)
+        // XFER (isa §4.3)
         K_XFER: begin
-          if (c_do) begin
+          if (c_ck) begin
+            // Clocked lane, H = nom. Edge j (1..2n, counted from the first leading edge) is
+            // leading when j is odd. The clock owner makes edge j at base + jH, from its edge
+            // timer (slot_age); everyone else counts the edges it detects, by level. Launches go
+            // on the launching edges (cpha 0: trailing, bit 0 at max(start, tb); cpha 1:
+            // leading) after ldelay (the owner) or max(0, ldelay - E) (others); captures on the
+            // others. The clock owner samples E after it drives a capture edge (s_sr), others
+            // in the cycle they detect it.
+            if (!fwait) begin
+              if (c_own) begin
+                // base = max(tb, start) (cpha 0) or max(tb, start - H) (cpha 1): it never overruns.
+                // The edge timer starts at base - H. At the start only cpha 1 can make an edge
+                // (when tb + H <= start; cpha 0's first edge is at max(tb, start) + H, and H >= 1),
+                // so the start cycle needs one compare.
+                // From the raw tb_age: a stall re-base (tbx) doesn't apply to it; cpha 0's
+                // max(tb, start) is the same either way, and its tb is set at the last edge.
+                if (fresh) begin
+                  if (c_cpha && tb_age >= nom) begin ck_ev = 1'b1; slot_nx = 24'sd1 - nom; end
+                  else if (c_cpha || tb_age <= 24'sd0) slot_nx = tb_p1 - nom;
+                  else slot_nx = 24'sd1 - nom;
+                end else begin
+                  slot_nx = slot_age + 24'sd1;
+                  if (c_e != {c_n1, 1'b1} + 6'd1 && slot_age >= 24'sd0) begin
+                    ck_ev = 1'b1;
+                    slot_nx = slot_age + 24'sd1 - nom;
+                  end
+                end
+                ck_en = ck_ev;
+              end else begin
+                // the timeout and CLK_PHASE reference: the start, then each edge (samp_age)
+                et = fresh ? 24'sd0 : samp_age;
+                samp_nx = et + 24'sd1;
+                // CLK_PHASE needs an earlier edge, and the timeout a count past max + Q: neither in
+                // the start cycle, so both read only flops (busy)
+                if (c_edg && (c_e != 6'd0 || c_lvl != c_cpol)) begin
+                  ck_ev = 1'b1;
+                  samp_nx = 24'sd1;
+                  if (busy && c_chk && c_e != 6'd0 && et + QUANT < u16(c_min)) begin
+                    ev[CLK_PHASE] = 1'b1;
+                    if (c_abort) abort_now = 1'b1;
+                  end
+                end else if (busy && bounded && et > u16(c_max) + QUANT) begin   // an edge wins
+                  ev[TIMEOUT] = 1'b1;
+                  if (c_abort) abort_now = 1'b1;
+                  else begin
+                    to_set = 1'b1; nodst = 1'b1;
+                    tb_upd = 1'b1; tb_nx = 24'sd1; anc_upd = 1'b1; anc_nx = 24'sd1; acc_clr = 1'b1;
+                  end
+                  done = 1'b1;
+                end
+                // a data owner without the clock: an empty src = FIFO sends ONES (isa §4.3)
+                if (c_first && c_do && c_srcfifo && !tx_ne) ev[UNDERRUN] = 1'b1;
+              end
+              if (ck_ev) begin
+                e_nx = c_e + 6'd1;
+                lead = e_nx[0];
+                ck_v = c_cpol ^ lead;
+                if (lead == !c_cpha && c_own) sr_nx[0] = 1'b1;
+                if (busy && e_nx == {c_n1, 1'b1} + 6'd1) begin   // the n-th trailing edge: tb, the anchor
+                  tb_upd = 1'b1; tb_nx = c_own ? 24'sd1 : EDGE_LAT + 24'sd1;
+                  anc_upd = 1'b1; anc_nx = tb_nx; acc_clr = 1'b1;
+                end
+              end
+              // launches (data owner)
+              if (c_do && !abort_now) begin
+                ldly = c_own ? c_ld : (c_ld > 4'd3) ? c_ld - 4'd3 : 4'd0;
+                if (!c_cpha && c_e == 6'd0 && c_k == 4'd0 && tbx >= 24'sd0) launch = 1'b1;   // bit 0
+                if (c_lp) begin
+                  if (c_lcnt == 4'd0) begin launch = 1'b1; lp_nx = 1'b0; end
+                  else lcnt_nx = c_lcnt - 4'd1;
+                end
+                // one launch pends at a time: T4's ldelay <= H - 5 puts it before the next edge
+                if (ck_ev && (c_cpha ? lead : (!lead && e_nx != {c_n1, 1'b1} + 6'd1))) begin
+                  if (ldly == 4'd0) launch = 1'b1;
+                  else begin lp_nx = 1'b1; lcnt_nx = ldly - 4'd1; end
+                end
+                if (launch) begin drv_en = 1'b1; drv_v = c_v[pos_k]; k_inc = 1'b1; end
+              end
+              // samples: a follower, and an OD owner reading its bits back (no tr_sample)
+              smp = c_own ? c_sr[2] : (ck_ev && lead == !c_cpha);
+              if ((!c_do || c_od) && smp && !abort_now) begin
+                rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
+                j_inc = 1'b1; sample_tr = !c_do;
+              end
+              // completion needs 2n >= 2 edges, at most one a cycle: never in the start cycle
+              if (busy && !done && (e_nx == {c_n1, 1'b1} + 6'd1) &&
+                  ((c_do && !c_od) || (c_j + {4'd0, j_inc} == {1'b0, c_n1} + 5'd1))) begin
+                value = (c_do && !c_od) ? (c_v & ~(16'hFFFF << {1'b0, c_n1} << 1)) : rxs;
+                done  = 1'b1;
+              end
+            end
+          end else if (c_do) begin
             if (!fwait) begin   // an owner waiting for its src = FIFO word does nothing yet
               // owner: bit k at tb + k*P; the issue slot covers bit 0
               if (c_k <= c_n1 && c_slot >= 24'sd0) begin
@@ -498,10 +633,10 @@ module engine #(
                 end
               end
               // an OD owner reads its bits back where a follower samples them (isa §6)
-              if (c_od && c_j <= c_n1 && c_samp >= 24'sd0) begin
+              if (c_od && c_j[3:0] <= c_n1 && !c_j[4] && c_samp >= 24'sd0) begin
                 rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
                 j_inc = 1'b1; samp_nx = c_samp_p1 - nom;
-                if (c_j == c_n1) begin
+                if (c_j[3:0] == c_n1) begin
                   tb_upd = 1'b1; tb_nx = slot_nx;     // base + n*P, after this cycle's drive
                   value  = rxs;
                   done   = 1'b1;
@@ -528,7 +663,7 @@ module engine #(
               sample_tr = 1'b1;
               rxs = c_rx; rxs[pos_j] = inp; rx_new = rxs;
               j_inc = 1'b1; acc_add = 1'b1;
-              if (c_j == c_n1) begin
+              if (c_j[3:0] == c_n1) begin
                 tb_upd = 1'b1; tb_nx = s_cur_p1 - nom + h3;   // a + (n - ak)P
                 value  = rxs;
                 done   = 1'b1;
@@ -537,11 +672,11 @@ module engine #(
             end
             if (abort_now) done = 1'b1;
           end
-          if (done && !abort_now && c_dst[3]) begin
+          if (done && !abort_now && !nodst && c_dst[3]) begin
             wr_en = 1'b1; wr_rd = c_dst[2:0]; wr_val = value;
           end
           // dst = FIFO pushes in follow mode only (isa §4.3); a full RX FIFO drops it (§4.9)
-          if (done && !abort_now && !c_do && c_dst == DST_FIFO) begin
+          if (done && !abort_now && !nodst && !c_do && c_dst == DST_FIFO) begin
             fpush = 1'b1;
             if (rx_full) ev[OVERFLOW] = 1'b1;
           end
@@ -578,6 +713,12 @@ module engine #(
   wire        tx_pop   = (pop_st & tx_ne) | pop_done | take;
   wire        ill  = start & illegal;
   wire [10:0] evs  = ev | {ill, 10'h0} | ((u_push && rx_full) ? 11'h080 : 11'h0);
+  // evt (isa §4.1): bits set this cycle, and RAW EVT's clear mask (it reads evt before clearing)
+  wire [5:0]  evt_set = {evs[UNDERRUN], evs[OVERFLOW],
+                         (busy && (ev[LEVEL] || ev[EDGE] || ev[CLK_PHASE])) ||
+                         (evq_st && (ev_q[LEVEL] || ev_q[EDGE])),
+                         (busy && ev[TIMEOUT]) || (evq_st && ev_q[TIMEOUT]), 2'b00};
+  wire [5:0]  evt_clr = (start && op == OP_RAW && sub == RAW_EVT) ? operand[5:0] : 6'h0;
 
   // FIRST_VIOL: the lowest fatal or timing kind (0-6, 10) logged this cycle
   reg [3:0] fv_new;
@@ -599,6 +740,7 @@ module engine #(
       halted   <= 1'b0;
       pf       <= 32'h0;   // NOP
       pf_pi    <= 4'h0;
+      pf_li    <= 2'd0;
       pf_valid <= 1'b0;
       fetch_d  <= 1'b0;
       drop_d   <= 1'b0;
@@ -634,13 +776,16 @@ module engine #(
       s_resync <= 1'b0; s_msb <= 1'b0; s_level <= 1'b0; s_meas <= 1'b0; s_profz <= 1'b0;
       s_pin <= 3'd0; s_rd <= 3'd0; s_line <= 3'd0; s_n1 <= 4'd0; s_dst <= 4'd0;
       s_min <= 16'h0; s_nom <= 16'h0; s_max <= 16'h0; s_v <= 16'h0; s_rx <= 16'h0;
-      s_k <= 4'd0; s_j <= 4'd0; slot_age <= 24'sd0; samp_age <= 24'sd0;
+      s_k <= 4'd0; s_j <= 5'd0; slot_age <= 24'sd0; samp_age <= 24'sd0;
+      s_ck <= 1'b0; s_own <= 1'b0; s_cod <= 1'b0; s_cpol <= 1'b0; s_cpha <= 1'b0; s_lp <= 1'b0;
+      s_cpin <= 3'd0; s_sr <= 3'd0; s_ld <= 4'd0; s_lcnt <= 4'd0; s_e <= 6'd0;
       for (ri = 0; ri < 8; ri = ri + 1) r[ri] <= 16'h0;
     end else if (soft_reset) begin
       started  <= 1'b0;
       halted   <= 1'b0;
       pf       <= 32'h0;
       pf_pi    <= 4'h0;
+      pf_li    <= 2'd0;
       pf_valid <= 1'b0;
       fetch_d  <= 1'b0;
       drop_d   <= 1'b0;
@@ -682,6 +827,7 @@ module engine #(
       if (fetch_d) begin
         pf       <= sram_dout;
         pf_pi    <= sram_dout[20:17];
+        pf_li    <= sram_dout[22:21];
       end
       if (fetch_d && !drop_d && !abort_now) pf_valid <= 1'b1;
 
@@ -743,7 +889,6 @@ module engine #(
         if (st) s_srcfifo <= (x_src == SRC_FIFO);
         if (st && fwait) s_fwait <= 1'b1;
         if (take_late) begin s_fwait <= 1'b0; s_v <= tx_head; end
-        if (evs[OVERFLOW]) evt[4] <= 1'b1;
 
         // the step's own state
         if (st) begin
@@ -751,11 +896,14 @@ module engine #(
           s_resync <= c_rsync; s_msb <= c_msb; s_level <= c_level; s_meas <= c_meas;
           s_profz <= c_profz; s_pin <= c_pin; s_line <= c_line; s_rd <= c_rd; s_n1 <= c_n1; s_dst <= c_dst;
           s_min <= c_min; s_nom <= c_nom; s_max <= c_max; s_v <= c_v;
+          s_ck <= c_ck; s_own <= c_own; s_cpin <= c_cpin; s_cod <= c_cod; s_cpol <= c_cpol;
+          s_cpha <= c_cpha; s_ld <= c_ld;
           to_flag <= 1'b0;
         end
         if (c_on) begin
           s_k  <= c_k + {3'd0, k_inc};
-          s_j  <= c_j + {3'd0, j_inc};
+          s_j  <= c_j + {4'd0, j_inc};
+          s_e  <= e_nx; s_sr <= sr_nx; s_lp <= lp_nx; s_lcnt <= lcnt_nx;
           s_rx <= rx_new;
           busy <= ~done;
         end
@@ -764,14 +912,18 @@ module engine #(
           drv_low[c_pin]  <= ~drv_v;
           drv_high[c_pin] <= drv_v & ~c_od;
         end
+        if (ck_en) begin
+          drv_low[c_cpin]  <= ~ck_v;
+          drv_high[c_cpin] <= ck_v & ~c_cod;
+        end
         // register writes (untimed and step results) go through wq_* and land next cycle
         wq_v <= wr_en | u_wr | pop_done;
         if (u_wr) begin wq_rd <= rd; wq_val <= u_val; end
         else if (pop_done) begin wq_rd <= pop_rd; wq_val <= tx_head; end
         else if (wr_en) begin wq_rd <= wr_rd; wq_val <= wr_val; end
         if (wq_v) r[wq_rd] <= wq_val;
-        if ((busy && ev[TIMEOUT]) || (evq_st && ev_q[TIMEOUT])) evt[2] <= 1'b1;
-        if ((busy && (ev[LEVEL] || ev[EDGE])) || (evq_st && (ev_q[LEVEL] || ev_q[EDGE]))) evt[3] <= 1'b1;
+        // one assignment, so a flag set this cycle survives a RAW EVT that clears it (it wasn't read)
+        evt <= (evt & ~evt_clr) | evt_set;
 
         if (abort_now) begin
           // release OD lines, refetch from abort_pc (isa §4.1, §4.0)
@@ -797,9 +949,6 @@ module engine #(
                   drv_high[l_pin] <= 1'b0;
                 end
                 RAW_DELAY: skip  <= dly[11:1];
-                RAW_EVT: begin
-                  evt   <= evt & ~operand[5:0];
-                end
                 default: ;
               endcase
             OP_MARK:
