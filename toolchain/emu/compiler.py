@@ -294,7 +294,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     return Lowered(instrs, image, spans, pc_step, diags)
 
 
-def compile_desc(desc: Description, *, check_timing: bool = True,
+def compile_desc(desc: Description, *, check_timing: bool = True, check_levels: bool = True,
                  prog_depth: int = PROG_DEPTH) -> Image:
     low = lower(desc, prog_depth)
     diags = list(low.diags)
@@ -304,6 +304,8 @@ def compile_desc(desc: Description, *, check_timing: bool = True,
     if not diags:
         from . import analysis  # imports this module; deferred to avoid a cycle
         diags += analysis.check_branches(desc, low)
+        if check_levels:
+            diags += analysis.check_levels(desc, low)
         if check_timing:
             diags += analysis.check_timing(desc, low)
     if diags:

@@ -33,8 +33,8 @@ def i2c_desc(body, confirm=CONFIRM, abort_label=None):
     return d
 
 
-def i2c(body, **kw):
-    return compile_desc(i2c_desc(body, **kw), check_timing=False)
+def i2c(body, levels=True, **kw):
+    return compile_desc(i2c_desc(body, **kw), check_timing=False, check_levels=levels)
 
 
 def conds(t, i):
@@ -409,7 +409,7 @@ def test_a_followed_start_ignores_stop():
     def body(d, sda, scl, p):
         d.cond("start", owner="a", prof=p)
         d.cond("start", owner="a", prof=p)  # SDA is already low: no edge of its own
-    t = run_sys(i2c(body), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 30, 1)])
+    t = run_sys(i2c(body, levels=False), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 30, 1)])
     assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP", "START"]
     assert conds(t, 1)[1].tb == 40 + 30 - 1         # the fall on the wire at 70: e = 69
 
