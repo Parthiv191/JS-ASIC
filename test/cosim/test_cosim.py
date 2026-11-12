@@ -234,6 +234,27 @@ async def test_uart_protocol(dut, role, peer_clock):
     await cosim(dut, rep, role)
 
 
+SPI_CTL = [0, 0xA4, 0x3C]  # the frame token, then the frame's two bytes
+SPI_PER = [0x5A, 0xC3]
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], mode=[(0, 0), (0, 1), (1, 0), (1, 1)])
+async def test_spi_protocol(dut, role, mode):
+    """The library SPI (emu/protocols/spi.py), one 2-byte frame in each mode, as ctl, per and mon
+    against peers 2% slow: the SELECT bus, the gated MISO and duplex XFERs from and to the FIFOs.
+    Every role pushes (MISO << 8) | MOSI. MON samples both data lines, the second on tr_sample2."""
+    img = compile_desc(get("spi").build(cpol=mode[0], cpha=mode[1], words=2))
+    rep = model(img, role, (49, 50), host={Role.P0: SPI_CTL, Role.P1: SPI_PER})
+    et = rep.trace.engines[0]
+    assert et.rx == [0x5AA4, 0xC33C] and et.tx_left == 0 and not et.events
+    names = [ln.name for ln in img.lines]
+    mosi, miso = names.index("mosi"), names.index("miso")
+    sampled = {p.fields[0] for p in rep.expected if p.kind == Kind.SAMPLE}
+    assert sampled == {Role.P0: {miso}, Role.P1: {mosi}, Role.MON: {mosi, miso}}[role]
+    await cosim(dut, rep, role, sample2=True)
+
+
 GLITCHES = {  # on the receiver, perfect clocks; tick 72 is the middle of data bit 2 on the wire
     "edge": (Glitch(0, 71, 4, 0), lambda rep: "EDGE" in kinds(rep) and rep.trace.engines[0].regs[1] == DATA),
     "data": (Glitch(0, 74, 4, 0), lambda rep: rep.trace.engines[0].regs[1] == 0xA0),

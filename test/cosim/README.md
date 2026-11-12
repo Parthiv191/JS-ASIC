@@ -74,7 +74,7 @@ below, then by fields, so the order of signals inside a cycle doesn't matter.
 | evt | kind code (isa §7) | each set bit of `tr_evt` | `events`, except MARK |
 | mark | id | `tr_mark` with `tr_value` | `events` of kind MARK |
 | br | taken | `tr_br` with `tr_taken` | `branches` |
-| sample | line | `tr_sample` with `tr_line` | `samples` |
+| sample | line | `tr_sample` with `tr_line`; with `cosim(..., sample2=True)` also `tr_sample2` with `tr_line2`, a duplex MON's data2 sample | `samples` |
 | halt | – | the first cycle `tr_halted` reads 1. Time freezes at the halt, so its `tr_now` is the HALT's start cycle. | `halt_cycle` |
 
 `pc` is `tr_pc` in the pulse's cycle. Times compare modulo 2^24.
