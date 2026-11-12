@@ -59,10 +59,11 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `T5-abort` | `test_analysis.py`, `test_engine_bus.py`, `test_fz.py`, `test_lead.py` |
 | `T5-overrun` | `test_analysis.py` |
 | `T5-stall` | `test_analysis.py`, `test_engine_clocked.py`, `test_lead.py` |
+| `T5-startup` | `test_startup.py` |
 | `T5-timeout` | `test_analysis.py` |
 | `T5-watch` | `test_analysis.py`, `test_engine_bus.py`, `test_fz.py` |
 | `OVERRUN` | `test_analysis.py`, `test_engine_timed.py` |
-| `EARLY` | `test_engine_bus.py`, `test_engine_timed.py`, `test_fuzz_unit.py` |
+| `EARLY` | `test_engine_bus.py`, `test_engine_timed.py`, `test_fuzz_unit.py`, `test_startup.py` |
 | `TIMEOUT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fuzz_unit.py`, `test_fz.py` |
 | `LEVEL` | `test_engine_timed.py`, `test_protocols.py` |
 | `EDGE` | `test_engine_timed.py` |
