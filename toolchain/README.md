@@ -13,6 +13,13 @@ python3 -m venv ../.venv && ../.venv/bin/pip install -e ".[dev]"
 CI runs the same tests on Python 3.11 and 3.12 (`.github/workflows/toolchain.yaml`).
 A `CompileWarning` fails the run, locally too (`pyproject.toml`).
 
+Two longer checks run by hand (`docs/design/verification.md` §1):
+
+```sh
+../.venv/bin/python -m emu.gen run --iters 500 --seed 1          # random programs, the rule cross-check
+../.venv/bin/python -m emu.mutate emu/model/engine.py --workers 4 # mutation testing: which planted bugs no test catches
+```
+
 Status (2026-11-09): the encoding (`emu/isa.py`), the image with its host table
 bytes (`emu/image.py`), and the model's fetch and issue timing (isa §4.0, with
 the matching T rules in `emu/analysis.py`) are at ISA v1. Clocked transfers,

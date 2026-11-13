@@ -16,7 +16,7 @@ different kind of bug; a new layer earns its place by catching what the others m
 | Formal proofs (SymbiYosys): FIFOs, host SPI, fetch parity, the bus detector | handshake bugs simulation misses | Not started | `formal/` |
 | Gate level: the cocotb tests on the synthesized netlist (CI `gl_test`) | synthesis mismatches, X propagation | Running on every push. Co-sim runs on the netlist too (`make GATES=yes`: pins and registers, aligned by clk count and checked on ACT), locally so far; devOps adds it to CI | `.github/workflows/gds.yaml`, `test/`, `test/cosim/` |
 | FPGA (Basys 3): LOOPBACK (the two engines talk on-chip), then real devices (sensor, EEPROM, a microcontroller) | real timing, pads, electrical surprises | Not started; bring-up order in architecture §5 | `fpga/`, `host/` |
-| Mutation testing: plant a bug, check that some test fails | checks too loose to fail | By hand so far: planted bugs in the image encoder (#5), the issue timing (step 3a) and the reserved-code rule (off-by-one indices, a dropped dst code, an inverted ROLE_IF record; 11-10), each caught by a test | — |
+| Mutation testing: plant a bug, check that some test fails | checks too loose to fail | `emu/mutate.py` (11-12) plants one small bug at a time (a flipped comparison, a constant off by one, a swapped operator, a deleted statement) and runs the tests: a mutant no test kills is a test gap, or an equivalent mutant that changes nothing a program can see. On the model, `engine.py`: 1479 mutants, 1332 killed, 142 survived; `system.py`: 133, 3 survived; `bus.py`: 19, none. The first 21 gaps now have tests (`test_mutation_gaps.py`): the event bits, what an abort keeps and releases, the EARLY and TIMEOUT boundaries, the CHK window and what re-anchors it, completion against the compiler, `to`, a RAW JPIN to an odd target, bus MEAS and STOP. The 8 reviewed equivalents, each with its reason, are in `mutation_equivalents.json`, which a test keeps in step with the code. Next: the engine's 133 open survivors (clocked XFER, followed START/STOP and the auto-tokens first), then `analysis.py` and `compiler.py`. Before the runner, by hand: planted bugs in the image encoder (#5), the issue timing (step 3a) and the reserved-code rule (11-10), each caught by a test | `toolchain/emu/mutate.py`, `toolchain/tests/test_mutation_gaps.py` |
 
 ## 2. Rule coverage
 
@@ -63,15 +63,15 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `T5-timeout` | `test_analysis.py` |
 | `T5-watch` | `test_analysis.py`, `test_engine_bus.py`, `test_fz.py` |
 | `OVERRUN` | `test_analysis.py`, `test_engine_timed.py` |
-| `EARLY` | `test_engine_bus.py`, `test_engine_timed.py`, `test_fuzz_unit.py`, `test_startup.py` |
-| `TIMEOUT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fuzz_unit.py`, `test_fz.py` |
-| `LEVEL` | `test_engine_timed.py`, `test_protocols.py` |
-| `EDGE` | `test_engine_timed.py` |
-| `CLK_PHASE` | `test_engine_clocked.py` |
-| `ABORT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fz.py`, `test_protocols.py` |
-| `OVERFLOW` | `test_cosim.py`, `test_engine_core.py`, `test_system.py` |
-| `UNDERRUN` | `test_engine_clocked.py`, `test_spi.py` |
-| `BUS` | `test_engine_bus.py`, `test_fz.py`, `test_i2c.py`, `test_lead.py`, `test_spi.py` |
+| `EARLY` | `test_engine_bus.py`, `test_engine_timed.py`, `test_fuzz_unit.py`, `test_mutation_gaps.py`, `test_startup.py` |
+| `TIMEOUT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fuzz_unit.py`, `test_fz.py`, `test_mutation_gaps.py` |
+| `LEVEL` | `test_engine_timed.py`, `test_mutation_gaps.py`, `test_protocols.py` |
+| `EDGE` | `test_engine_timed.py`, `test_mutation_gaps.py` |
+| `CLK_PHASE` | `test_engine_clocked.py`, `test_mutation_gaps.py` |
+| `ABORT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fz.py`, `test_mutation_gaps.py`, `test_protocols.py` |
+| `OVERFLOW` | `test_cosim.py`, `test_engine_core.py`, `test_mutation_gaps.py`, `test_system.py` |
+| `UNDERRUN` | `test_engine_clocked.py`, `test_mutation_gaps.py`, `test_spi.py` |
+| `BUS` | `test_engine_bus.py`, `test_fz.py`, `test_i2c.py`, `test_lead.py`, `test_mutation_gaps.py`, `test_spi.py` |
 | `ILLEGAL` | `test_engine_core.py`, `test_fz.py` |
 
 ## 3. Rules

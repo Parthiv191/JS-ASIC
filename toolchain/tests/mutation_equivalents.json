@@ -1,0 +1,18 @@
+[
+ {"file": "emu/model/engine.py", "func": "Engine.__init__", "desc": "or -> and", "code": "self.name = name or self.role.name", "nth": 0,
+  "why": "the name only labels the engine's trace"},
+ {"file": "emu/model/engine.py", "func": "Engine._bus_exit", "desc": "statement -> pass", "code": "self._reanchor(self.now)", "nth": 0,
+  "why": "T5-abort: on a bus the first timed step at abort_pc is a COND START/STOP, which re-anchors before any CHK window is checked"},
+ {"file": "emu/model/engine.py", "func": "Engine.log", "desc": "and -> or", "code": "if kind in SATURATING and measured is not None:", "nth": 0,
+  "why": "every saturating kind is logged with a value, and the other kinds' values (a level, a pc, a mark) are below 0xFFFF"},
+ {"file": "emu/model/engine.py", "func": "Engine._abort", "desc": "statement -> pass", "code": "self._letgo.clear()", "nth": 0,
+  "why": "the abort releases every OD line and any later drive cancels a pending let-go (drive()), so a stale one can only release a line already released"},
+ {"file": "emu/model/engine.py", "func": "Engine._op_cond", "desc": "65535 -> 65536", "code": "measure(0xFFFF)", "nth": 0,
+  "why": "measure() clamps to 0xFFFF"},
+ {"file": "emu/model/engine.py", "func": "Engine._xfer_clocked", "desc": "+ -> -", "code": "if self.now >= wait + EDGE_LAT and self.inp[clk] == 1:", "nth": 0,
+  "why": "T4: a stretch lane has H >= EDGE_LAT + 2, so from the release until EDGE_LAT after it the owner reads its own low drive, never 1"},
+ {"file": "emu/model/system.py", "func": "System.run", "desc": ">= -> >", "code": "if (stop_when_quiescent and all(started) and not self._pushes and tick >= last_glitch", "nth": 0,
+  "why": "the run stops one quiescent tick later: nothing changes in it but the tick count"},
+ {"file": "emu/model/system.py", "func": "System.run", "desc": "> -> >=", "code": "and tick - last_edge > settle and all(e.idle for e in self.engines)):", "nth": 0,
+  "why": "the settle has a spare cycle: a follower acts on an edge SYNC_LAT of its cycles after it, inside the shorter window too, and is no longer idle once it acts"}
+]
