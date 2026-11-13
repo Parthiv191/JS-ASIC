@@ -202,15 +202,23 @@ def test_every_timed_step_clears_to_when_it_starts(step):
         assert kinds_of(e) == ["TIMEOUT"] and not e.to
 
 
-def test_a_stretch_timeout_without_abort_sets_to():
-    """isa §4.3: the clock owner's wait for a stretched clock is bounded by max; a TIMEOUT
-    without ABORT sets `to` and ends the step (the setup of test_a_stretch_past_max_times_out)."""
-    from test_engine_clocked import stretch_img, trailing
-    s = System([EngineSpec(stretch_img(hi=12), r) for r in (Role.P0, Role.P1, Role.MON)],
+def test_a_stretch_timeout_without_abort_sets_to_and_falls_through():
+    """isa §4.3: the clock owner's wait for a stretched clock is bounded by max, counted from the
+    previous edge; a TIMEOUT(m) without ABORT sets `to` and ends the step, and the next
+    instruction runs (the setup of test_a_stretch_past_max_times_out)."""
+    from test_engine_clocked import HS, stretch_desc, trailing
+
+    def body(d, scl, sda, lane, prof):
+        d.xfer(8, lane, owner="a", prof=prof, src="ones", dst="r4")
+        d.li("r2", 7)
+    bounded = compile_desc(stretch_desc(hi=HS + 4, body=body), check_timing=False)
+    free = compile_desc(stretch_desc(body=body), check_timing=False)
+    s = System([EngineSpec(bounded, Role.P0), EngineSpec(free, Role.P1), EngineSpec(free, Role.MON)],
                glitches=[Glitch(0, trailing(2) + 1, 40, 0)])
-    s.engines[1].image = s.engines[2].image = stretch_img()
     t = s.run(5000)
-    assert "TIMEOUT" in kinds(t, 0) and "ABORT" not in kinds(t, 0) and s.engines[0].to
+    (ev,) = [e for e in t.engines[0].events if e.kind == "TIMEOUT"]
+    assert ev.measured == HS + 4 + QUANT + 1 and "ABORT" not in kinds(t, 0)
+    assert s.engines[0].to and t.engines[0].regs[2] == 7 and t.engines[0].halted
 
 
 def test_clk_phase_is_checked_only_with_chk():
@@ -320,3 +328,252 @@ def test_tx_left_counts_the_fifo_and_the_backlog():
     s.host_push(0, [1, 2, 3, 4, 5, 6])
     et = s.run(1000).engines[0]
     assert len(s.engines[0].tx) == 4 and et.tx_left == 6
+
+
+# ---------------------------------------------------------------- FZ auto-tokens (isa §4.6)
+def armed_pair(build, armer="ctl", peer=True, peer_scale=None):
+    """The program `build()` makes, with `armer` as engine 0 holding the unit; the other party
+    (engine 1) runs it with its profiles scaled by `peer_scale`, if given."""
+    from emu.fuzz.unit import FuzzConfig, FuzzUnit
+    d = build()
+    img = compile_desc(d, check_timing=False, check_levels=False)
+    u = FuzzUnit(FuzzConfig(length=1))
+    u.load(0, bytes([0xA4]))
+    roles = {"ctl": Role.P0, "per": Role.P1, "tgt": Role.P1}
+    other = {"ctl": "per" if "per" in d.parties else "tgt", "per": "ctl", "tgt": "ctl"}[armer]
+    specs = [EngineSpec(img, roles[armer], engine=0, fuzz=u)]
+    if peer:
+        specs.append(EngineSpec(img.with_profiles(peer_scale) if peer_scale else img, roles[other], engine=1))
+    return u, System(specs).run(20_000).engines[0]
+
+
+def uart_from_tgt(n=9, value=0x1BC, prof=None):
+    def build():
+        from emu.protocols import slack
+        d = Description("w", parties=("ctl", "tgt"))
+        rx = d.line("rx", owner="tgt", idle=1)
+        bit = d.profile("BIT", nom=20, min=20 - slack(20, 20000), max=20 + slack(20, 20000))
+        with d.only("ctl"):
+            d.fz_next("r1")
+        with d.only("tgt"):
+            d.li("r2", value)
+            d.raw_delay(100)
+        d.cond("fall", rx, owner="tgt", **({"prof": d.profile("W", **prof)} if prof else {}))
+        d.hold(rx, 0, owner="tgt", prof=bit)
+        d.xfer(n, rx, owner="tgt", prof=bit, src="r2", dst="r3")
+        d.hold(rx, 1, owner="tgt", prof=bit)
+        with d.only("ctl"):
+            d.fz_end("r4")
+        d.halt()
+        return d
+    return build
+
+
+def test_a_followed_xfer_wider_than_8_bits_gives_both_bytes():
+    """isa §4.6: an XFER gives value[7:0], then value[15:8] if n > 8. A 9-bit frame from tgt:
+    the COND's latency token, then 0xBC and 0x01."""
+    u, et = armed_pair(uart_from_tgt())
+    assert et.regs[3] == 0x1BC and len(u.tokens) == 3 and u.tokens[1:] == [0xBC, 0x01]
+
+
+def test_a_followed_cond_gives_its_latency_token_even_when_early():
+    """isa §4.6: a followed COND gives 0x40 + bucket(m), m = tb after - tb before; 0xFFFF only on
+    a timeout. The edge comes before min, so the COND logs EARLY in the same cycle it completes,
+    and still gives its own latency."""
+    from emu.fuzz.unit import bucket
+    u, et = armed_pair(uart_from_tgt(n=8, value=0x5A, prof=dict(nom=200, min=180, max=INF)),
+                       peer_scale={"W": 0.5})  # tgt acts at about 100
+    cond = next(r for r in et.records if r.op == "COND")
+    assert "EARLY" in [e.kind for e in et.events] and cond.tb < 180
+    assert u.tokens[0] == 0x40 + bucket(cond.tb) != 0x40 + bucket(0xFFFF)
+
+
+def test_a_timed_out_followed_cond_gives_the_0xffff_token():
+    from emu.fuzz.unit import bucket
+    u, et = armed_pair(uart_from_tgt(n=8, value=0x5A, prof=dict(nom=40, min=0, max=60)), peer=False)
+    assert "TIMEOUT" in [e.kind for e in et.events]
+    assert u.tokens[0] == 0x40 + bucket(0xFFFF)
+
+
+def narrow_duplex(armer):
+    """A 4-bit duplex XFER under CS: ctl sends 0xB on MOSI, per 0xD on MISO, both from r3 (the
+    armed party doesn't send from the unit, so every token is known)."""
+    from test_fz import spi_base
+    d, lane, half, wait = spi_base()
+    with d.only("ctl"):
+        d.li("r3", 0x5B)
+        d.raw_delay(120)
+    with d.only("per"):
+        d.li("r3", 0x3D)
+    with d.only(armer):
+        d.fz_next("r1")
+    d.cond("start", owner="ctl", prof=wait)
+    d.xfer(4, lane, owner="ctl", prof=half, src="r3", dst="r2")
+    d.cond("stop", owner="ctl", prof=wait)
+    with d.only(armer):
+        d.fz_end("r4")
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("armer", ["ctl", "per"])
+def test_a_narrow_duplex_xfer_gives_each_side_the_other_lines_bits(armer):
+    """isa §4.6: on a duplex lane dst = (v2 << n) | v1, and each side's token is the line it
+    followed: the controller gets MISO's 4 bits, the peripheral MOSI's (with its START and STOP
+    tokens around them)."""
+    u, et = armed_pair(lambda: narrow_duplex(armer), armer=armer)
+    assert et.regs[2] == 0xD << 4 | 0xB
+    if armer == "ctl":
+        assert u.tokens == [0xD]
+    else:
+        assert len(u.tokens) == 3 and u.tokens[1] == 0xB
+
+
+# ---------------------------------------------------------------- followed START/STOP (isa §4.2)
+def select_desc(start, head=None, tail=None, abort=False):
+    """SELECT on CS (confirm 1) and a's line u: [head], COND START (profile `start`, MEAS r1,
+    with or without ABORT), [tail], HALT; abort_pc "top" is an unbounded followed START."""
+    d = Description("sel", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    u = d.line("u", owner="a", idle=1)
+    d.bus("select", cs)
+    d.abort_to("top")
+    if head:
+        head(d, u)
+    d.cond("start", owner="a", prof=d.profile("S", **start), meas="r1", abort=abort)
+    if tail:
+        tail(d, u)
+    d.halt()
+    d.label("top")
+    d.cond("start", owner="a", prof=d.profile("T", nom=10, min=0, max=INF))
+    d.halt()
+    return compile_desc(d, check_timing=False, check_levels=False)
+
+
+SMIN = 31  # instructions start on even cycles, so m is even: min - QUANT = 30 is one of them
+
+
+@pytest.mark.parametrize("delay", range(SMIN - 8, SMIN + 4))
+def test_a_followed_start_is_early_below_min_minus_quant(delay):
+    """EARLY when min > 0 and m = start_e - tb < min - QUANT. The master acts at its start, after
+    a RAW DELAY; the followers' tb is 0."""
+    def head(d, u):
+        with d.only("a"):
+            d.raw_delay(delay)
+    t = run_sys(select_desc(dict(nom=0, min=SMIN, max=INF), head=head))
+    for i in (1, 2):
+        (rec,) = [r for r in t.engines[i].records if r.op == "COND"][:1]
+        m = rec.tb
+        assert t.engines[i].regs[1] == m
+        assert kinds(t, i) == (["EARLY"] if m < SMIN - QUANT else [])
+
+
+def test_a_followed_start_before_tb_is_early_with_min_1():
+    """m < 0 (the START came before the follower's tb) is below min - QUANT = 0 for min = 1. The
+    master runs the HOLD before it at half length, so its START is early in the followers' time;
+    MEAS clamps m to 0."""
+    def head(d, u):
+        d.hold(u, 1, owner="a", prof=d.profile("H", nom=40, min=0, max=INF))
+    img = select_desc(dict(nom=0, min=1, max=INF), head=head)
+    t = run_sys(img, images={0: img.with_profiles({"H": 0.5})})
+    for i in (1, 2):
+        early = [e for e in t.engines[i].events if e.kind == "EARLY"]
+        assert len(early) == 1 and early[0].measured < 0 and t.engines[i].regs[1] == 0
+
+
+def test_a_followed_start_re_anchors_the_chk_window():
+    """isa §4.3: a COND re-anchors the window, a followed START too: a HOLD and a CHK XFER of
+    zeros after a START at about 30, whose boundary-0 edge is one HOLD after the START."""
+    def head(d, u):
+        with d.only("a"):
+            d.raw_delay(30)
+
+    def tail(d, u):
+        bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+        d.hold(u, 1, owner="a", prof=bit)
+        d.xfer(4, u, owner="a", prof=bit, src="zero", dst="r2", check=True)
+    t = run_sys(select_desc(dict(nom=0, min=0, max=INF), head=head, tail=tail))
+    assert not any(et.events for et in t.engines)
+    assert [len(et.records) for et in t.engines] == [3, 3, 3]
+
+
+def test_a_followed_stop_with_abort_and_no_start_completes():
+    """A followed STOP exits only when it sees a START; with ABORT and no START it completes on
+    the STOP."""
+    def tail(d, u):
+        d.cond("stop", owner="a", prof=d.profile("W", nom=30, min=0, max=INF), abort=True)
+    t = run_sys(select_desc(dict(nom=8, min=0, max=INF), tail=tail), roles=(Role.P0, Role.P1))
+    assert "BUS" not in kinds(t, 1)
+    assert [r.op for r in t.engines[1].records] == ["COND", "COND"] and t.engines[1].halted
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_a_followed_start_timeout(abort):
+    """No master: the bounded START times out when now - EDGE_LAT - bus_confirm - tb passes max +
+    QUANT, and logs TIMEOUT(m) with that m. With ABORT a fatal abort to abort_pc; without, `to`
+    := 1, MEAS 0xFFFF, tb := tb + nom and a re-anchor there (isa §4.2)."""
+    def head(d, u):  # a followed HOLD first, so tb = 10 when the START starts
+        d.hold(u, 1, owner="a", prof=d.profile("H", nom=10, min=0, max=INF))
+    s = System([EngineSpec(select_desc(dict(nom=20, min=0, max=30), head=head, abort=abort), Role.P1)])
+    t = s.run(2000)
+    e = s.engines[0]
+    ev = t.engines[0].events[0]
+    assert ev.kind == "TIMEOUT" and ev.measured == 30 + QUANT + 1
+    if abort:
+        assert kinds(t, 0)[:2] == ["TIMEOUT", "ABORT"] and e.pc == e.image.abort_pc
+    else:
+        assert kinds(t, 0) == ["TIMEOUT"] and e.halted
+        assert e.to and e.regs[1] == 0xFFFF and e.tb == 10 + 20 and e.anchor == 30
+
+
+def test_clk_phase_measures_the_cycles_between_edges():
+    """isa §4.3: CLK_PHASE(m), m the cycles between two edges the follower detects. The clock
+    owner runs at half the period (H = 2), so every later phase is 2."""
+    from test_engine_clocked import spi
+    img = spi(check=True, lo=4, hi=6)
+    t = run_sys(img, images={0: img.with_profiles({"H": 0.5})})
+    ms = {e.measured for e in t.engines[1].events if e.kind == "CLK_PHASE"}
+    assert ms == {2}
+
+
+# ---------------------------------------------------------------- waits and lateness
+@pytest.mark.parametrize("clocked", [False, True])
+def test_an_owner_waiting_on_an_empty_tx_is_idle(clocked):
+    """isa §4.3: an owned src = FIFO XFER waits while TX is empty, as POP does, so a run with no
+    host data ends quiescent rather than at its tick budget."""
+    d = Description("q", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    clk = d.line("c", owner="a", idle=0)
+    if clocked:
+        d.li("r0", 0)
+        d.xfer(4, d.lane("L", ln, clk=clk), owner="a", prof=d.profile("H", nom=4, min=0, max=INF),
+               src="fifo", dst="discard")
+    else:
+        d.xfer(4, ln, owner="a", prof=d.profile("BIT", nom=P, min=P - 2, max=P + 2), src="fifo", dst="discard")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,), max_ticks=20_000)
+    assert t.quiescent and t.ticks < 20_000 and not t.engines[0].halted
+
+
+def late_xfer(kind, head):
+    d = Description("x", parties=("a", "b"))
+    ln = d.line("l", kind, owner="a", idle=1)
+    if head:
+        d.li("r0", 0)
+    d.xfer(2, ln, owner="a", prof=d.profile("BIT", nom=P, min=P - 2, max=P + 2), src="zero", dst="discard")
+    d.halt()
+    return run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,))
+
+
+@pytest.mark.parametrize("kind", ["pp", "od"])
+def test_a_done_xfer_bit_0_may_be_issue_late(kind):
+    """isa §4.1: an owned step's first action may be up to ISSUE late. Instruction 0 starts at
+    now = 2 with tb = 0, so bit 0 is 2 late and logs nothing (as test_hold_at_pc0 for HOLD)."""
+    assert kinds(late_xfer(kind, head=False), 0) == []
+
+
+@pytest.mark.parametrize("kind", ["pp", "od"])
+def test_a_done_xfer_bit_0_after_an_li_overruns_by_4(kind):
+    """After an LI, bit 0 goes out at now = 4 with tb = 0: OVERRUN(4); bit 1 is on time."""
+    t = late_xfer(kind, head=True)
+    assert [(e.kind, e.measured) for e in t.engines[0].events] == [("OVERRUN", 4)]
