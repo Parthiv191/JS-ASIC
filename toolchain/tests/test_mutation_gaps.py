@@ -670,6 +670,22 @@ def test_the_bus_anchors_trail_now_by_at_most_the_clamp(monkeypatch, kind):
     assert rec.cycle > 300 and rec.tb == rec.cycle - 64
 
 
+def test_with_confirm_0_a_candidate_is_confirmed_in_its_own_cycle():
+    """isa §4.7 with bus_confirm 0: the window is empty, so an edge is confirmed in the cycle it
+    is a candidate, anchor c - EDGE_LAT. A one-cycle CS pulse sets START and then STOP; were the
+    fall left a candidate for a cycle, the rise would drop it."""
+    d = Description("c0", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    d.bus("select", cs, confirm=0)
+    with d.only("b"):
+        d.raw_delay(60)
+        d.raw_evt("r1", 0)
+    d.halt()
+    e = follower(d, lambda t: [0 if t == 10 else 1], 120)
+    assert e.bus_events == [(12, "START"), (13, "STOP")]
+    assert (e.regs[1], e.start_e, e.stop_e) == (0b11, 12 - EDGE_LAT, 13 - EDGE_LAT)
+
+
 def test_a_bus_exit_restarts_tb_for_the_step_at_abort_pc():
     """isa §4.7: a bus exit sets tb := now. P1 follows a long HOLD with ABORT; CS falls during it
     (START: a bus exit), and the followed STOP at abort_pc, bounded by max 40, counts from the
