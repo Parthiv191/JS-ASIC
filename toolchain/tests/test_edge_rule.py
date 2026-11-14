@@ -300,6 +300,27 @@ def test_a_gated_line_reads_1_where_a_shut_gate_meets_a_high_drive(set_level, ok
     assert len([r for r in t.engines[0].records if r.op == "COND"]) > 100
 
 
+def test_a_timed_step_opens_a_gate_shut_on_only_some_paths():
+    """Reset reaches top with g's gate shut, the loop with g high. a's COND FALL on x opens the
+    gate on both, so b's RAW SET 0 drives g low and its COND RISE makes an edge."""
+    d = Description("go", parties=("a", "b"))
+    x = d.line("x", owner="a", idle=1)
+    g = d.line("g", owner="b", idle=1, gated=True)
+    w = d.profile("W", nom=P, min=0, max=INF)
+    d.label("top")
+    d.cond("fall", x, owner="a", prof=w)
+    with d.only("b"):
+        d.raw_set(g, 0)
+    d.cond("rise", g, owner="b", prof=w)
+    d.cond("rise", x, owner="a", prof=w)
+    d.br("top")
+    img = compile_desc(d)
+    from emu.model.engine import VIOLATIONS
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1)]).run(3000)
+    assert [e.kind for et in t.engines for e in et.events if e.kind in VIOLATIONS] == []
+    assert len([r for r in t.engines[0].records if r.op == "COND"]) > 100
+
+
 def test_a_timed_step_opens_the_gate_for_raw_set_on_the_model_too():
     """I on the model: b's RAW SET drives g low, so b's COND FALL makes no edge and a waits."""
     img = compile_desc(I(), check_levels=False)

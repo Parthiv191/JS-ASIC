@@ -294,6 +294,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 if does(ins.owner, q):
                     st[int(q)][line] = level
             edge_on(st, line)
+            # the STOP shuts the gate it opened: for a follower that holds only because T5-watch
+            # has it start the COND STOP by the confirm cycle (a later start would reopen it)
             if k == CondKind.STOP and kind == BusKind.SELECT:
                 for i, ln in enumerate(lines):
                     if ln.gated:

@@ -44,9 +44,9 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
 - **Line config:** `kind ∈ {PP (push-pull), OD (open-drain)}`, `owner ∈ {P0, P1, SHARED (OD only), SWITCHED (reserved,
   for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`, and `pin`: the uio pin it maps to (default: its
   index). Each line has its own pin; the image rejects two lines on one pin.
-  - `gated` (PP, idle 1): the owner drives the line only from the first step that drives it
-    until the next STOP on a SELECT bus, or an abort; otherwise the line is released and reads
-    the pull-up. For example, SPI MISO on a shared bus.
+  - `gated` (PP, idle 1): the owner drives the line only while its gate is open (below): from
+    the start of a timed step until the next STOP on a SELECT bus, or an abort; otherwise the
+    line is released and reads the pull-up. For example, SPI MISO on a shared bus.
     - Each engine has one gate for its gated lines. It is shut at RUN, and opens at the start of
       each timed step. While it is shut, drives to gated lines (RAW SET too) do nothing.
     - The gate shuts, and the engine's gated lines are released, when its own detector confirms
