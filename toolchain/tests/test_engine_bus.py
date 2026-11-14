@@ -526,6 +526,11 @@ CS_DRIVES = {
     "COND FALL": lambda d, cs, p: d.cond("fall", cs, owner="a", prof=p),
     "HOLD": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.hold(cs, 0, owner="a", prof=p)),
     "XFER": lambda d, cs, p: d.xfer(1, cs, owner="a", prof=p, src="ones"),
+    "XFER clocked by CS": lambda d, cs, p: d.xfer(
+        1, d.lane("Lc", d.line("m", owner="a", idle=1), clk=cs, cpol=1), owner="a", prof=p, src="ones"),
+    "XFER with CS as data2": lambda d, cs, p: d.xfer(
+        1, d.lane("L2", d.line("s", owner="b", idle=0), clk=d.line("k", owner="b", idle=0), data2=cs),
+        owner="b", prof=p, src="ones"),
     "RAW SET": lambda d, cs, p: d.raw_set(cs, 1),
     "RAW REL": lambda d, cs, p: d.raw_rel(cs),
 }
@@ -544,6 +549,17 @@ def test_on_select_only_start_and_stop_drive_cs(drive):
             CS_DRIVES[drive](d, cs, p)
     with pytest.raises(CompileError, match=r"\[R1-bus\] .*only COND START/STOP drive the SELECT line 'cs'"):
         select_desc(body)
+
+
+def test_a_select_cs_idles_at_1():
+    """isa §5 S-bus: CS's owner drives it to idle from now = 1, so an idle-0 CS would fall at
+    start-up: a START to every detector that no COND START made."""
+    d = Description("sel", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=0)
+    d.bus("select", cs)
+    d.halt()
+    with pytest.raises(CompileError, match=r"\[S-bus\] .*idles at 1"):
+        compile_desc(d)
 
 
 def test_a_gated_line_is_in_the_image_and_only_on_pp():
