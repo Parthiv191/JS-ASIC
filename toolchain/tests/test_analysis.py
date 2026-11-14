@@ -29,6 +29,7 @@ def test_r2_rejects_branch_on_popped_reg():
     with d.only("a"):
         d.pop("r0")
     d.br("x", cond="z", reg="r0")
+    d.halt()
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
@@ -38,6 +39,7 @@ def test_r2_rejects_branch_on_reg_never_written():
     d, ln, p = two_party()
     d.label("x")
     d.br("x", cond="z", reg="r0")
+    d.halt()
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
@@ -47,6 +49,7 @@ def test_r2_rejects_branch_on_reg_written_in_role_block():
     with d.only("b"):
         d.li("r1", 3)
     d.br("x", cond="nz", reg="r1")
+    d.halt()
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
@@ -58,6 +61,7 @@ def test_r2_accepts_branch_on_xfer_dst():
     d.xfer(8, ln, owner="a", prof=p, src="r0", dst="r1")
     d.alu("eq", "r2", "r1", 0x55)
     d.br("x", cond="nz", reg="r2")
+    d.halt()
     assert diag_rules(d, check_timing=False) == set()
 
 
@@ -79,6 +83,7 @@ def test_r2_rejects_jpin_outside_block():
     d, ln, p = two_party()
     d.label("x")
     d.raw_jpin(ln, 0, "x")
+    d.halt()
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
     d2, ln2, p2 = two_party()
     d2.label("y")
@@ -86,6 +91,7 @@ def test_r2_rejects_jpin_outside_block():
         d2.nop()
         d2.label("z")
         d2.raw_jpin(ln2, 0, "z")
+    d2.halt()
     assert diag_rules(d2, check_timing=False) == set()
 
 
@@ -440,6 +446,7 @@ def test_r2_rejects_branch_on_raw_evt_reg():
     d.label("x")
     d.raw_evt("r0", 0)
     d.br("x", cond="z", reg="r0")
+    d.halt()
     assert diag_rules(d, check_timing=False) == {"R2-branch"}
 
 
@@ -562,3 +569,52 @@ def test_t5_stall_checks_code_reached_only_from_abort_pc():
     d.hold(ln, 1, owner="a", prof=p)
     d.halt()
     assert "T5-stall" in diag_rules(d)
+
+
+# ---------------------------------------------------------------- S-end: nothing runs past the last word
+def _ends(tail):
+    d, ln, p = two_party()
+    d.hold(ln, 1, owner="a", prof=p)
+    tail(d, ln, p)
+    return d
+
+
+@pytest.mark.parametrize("tail", [
+    lambda d, ln, p: None,                                               # falls through
+    lambda d, ln, p: d.br("top", cond="nz", reg="r0"),                   # a conditional branch last
+    lambda d, ln, p: d.raw_jpin(ln, 1, "top"),                           # in a role block, below
+])
+def test_s_end_rejects_a_path_past_the_last_word(tail):
+    """isa §5 S-end: the chip has no program length, so past the last word it would run whatever the
+    SRAM holds; the model halts there. A program that can get there is rejected."""
+    def body(d, ln, p):
+        d.li("r0", 0)
+        d.label("top")
+        with d.only("a"):
+            d.nop()
+            tail(d, ln, p)
+    rules = diag_rules(_ends(body), check_timing=False)
+    assert "S-end" in rules
+
+
+def test_s_end_rejects_a_role_block_that_skips_to_the_end():
+    """The roles a block skips land past it: if the block is last, past the program."""
+    d, ln, p = two_party()
+    d.hold(ln, 1, owner="a", prof=p)
+    with d.only("a"):
+        d.halt()
+    assert diag_rules(d, check_timing=False) == {"S-end"}
+
+
+@pytest.mark.parametrize("last", ["halt", "loop"])
+def test_s_end_accepts_a_halt_or_a_loop_at_the_end(last):
+    d, ln, p = two_party()
+    d.label("top")
+    d.hold(ln, 1, owner="a", prof=p)
+    with d.only("a"):
+        d.li("r1", 1)
+    if last == "halt":
+        d.halt()
+    else:
+        d.br("top")
+    assert diag_rules(d, check_timing=False) == set()

@@ -256,6 +256,7 @@ def test_act_stays_1_without_a_halt():
     d = Description("t", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")  # unbounded, and no one makes the fall
+    d.halt()  # never reached
     t = System([EngineSpec(compile_desc(d, check_timing=False), Role.P1)]).run(200)
     assert t.engines[0].halt_cycle is None and act(t, 0, range(0, 5)) == [0, 0, 1, 1, 1]
     assert act(t, 0, range(t.ticks, t.ticks + 3)) == [1, 1, 1]

@@ -50,6 +50,18 @@ def successors(instrs: list[Instr], pc: int, role: Role | None = None) -> list[i
     return nxt
 
 
+def _runs_off(instrs: list[Instr], pc: int) -> bool:
+    """S-end: a path from pc runs past the last word, by falling through it or by a role block's
+    skip. The model halts there; the chip doesn't (NOP is opcode 0). A label at the end names no
+    step, so a branch or abort_pc can't get there (S-label)."""
+    ins, n = instrs[pc], len(instrs)
+    if ins.op == Op.HALT or (ins.op == Op.BR and BrCond(ins.sub) == BrCond.ALWAYS):
+        return False
+    if ins.op == Op.ROLE_IF and pc + 1 + unpack_role_if(ins.operand)[1] >= n:
+        return True
+    return pc + 1 >= n
+
+
 def _in_block(low: Lowered, pc: int) -> bool:
     return any(sp.start <= pc < sp.end for sp in low.spans)
 
@@ -94,6 +106,9 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
             diags.add("R2-branch", pc, f"branch on r{ins.ra}, whose value can differ between roles")
         if ins.op == Op.RAW and ins.sub == RawOp.JPIN and not inblock:
             diags.add("R2-branch", pc, "raw pin branch outside a role block")
+        if _runs_off(instrs, pc):
+            diags.add("S-end", pc, "a path runs past the program's last word, where the chip runs "
+                                   "whatever the SRAM holds next: end it with halt or a branch")
         out = _taint(ins, t, inblock, od_lanes)
         edges = [(s, out) for s in successors(instrs, pc)]
         if abort_pc is not None and _aborts(ins) and abort_pc < len(instrs):
