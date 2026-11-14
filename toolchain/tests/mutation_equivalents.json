@@ -102,13 +102,11 @@
  {"file": "emu/analysis.py", "func": "_cost", "desc": "1 -> 0", "code": "return -(-max(1, ins.operand) // U) * U", "nth": 0,
   "why": "S-range rejects RAW DELAY 0 (1 <= n <= 4095), so max(0, n) = max(1, n) = n"},
  {"file": "emu/analysis.py", "func": "_reach", "desc": "< -> <=", "code": "work = [s for s in starts if s < len(instrs)]", "nth": 0,
-  "why": "the starts are pc 0 and abort_pc: S-end rejects an empty program, and abort_pc is a label's pc, which names an instruction (a label past the last word doesn't resolve: S-label)"},
+  "why": "the starts are pc 0 and abort_pc: check_timing returns at once on an empty program, and abort_pc is a label's pc, which names an instruction (a label past the last word doesn't resolve: S-label, in lower())"},
  {"file": "emu/analysis.py", "func": "_makes_others_wait", "desc": "and -> or", "code": "if low is not None and steps is not None:", "nth": 0,
   "why": "the callers pass both low and steps (_check_stalls) or neither (the call for a lead block's successor), never one"},
  {"file": "emu/analysis.py", "func": "_makes_others_wait", "desc": "< -> <=", "code": "if sp.lead and r in sp.roles and sp.start <= s.pc < sp.end:", "nth": 0,
   "why": "a step at a block's end pc is in no block (blocks don't nest, and a block starting there would have its ROLE_IF at that pc), so the mutant applies the plain rule to the step itself, as falling out of the loop does"},
  {"file": "emu/analysis.py", "func": "_pair_checks", "desc": "> -> >=", "code": "if p.bounded or p.min > 0:", "nth": 0,
-  "why": "for an unbounded COND with min 0 the block computes the window, but its test, (min > 0 and ...) or (bounded and ...), is false: no diagnostic either way"},
- {"file": "emu/analysis.py", "func": "_pair_checks", "desc": "0 -> 1", "code": "c_hi = st[s.clk_owner][1] if s.clk_owner in st else 0", "nth": 0,
-  "why": "the clock owner lacks a start only if it can't run this step after the predecessor: R3-lead keeps a lead block's steps off its fall-through path and T5-abort puts a COND first at abort_pc, so only a clock owner that HALTed in a role block lacks one, and then no clock edge ever comes"}
+  "why": "for an unbounded COND with min 0 the block computes the window, but its test, (min > 0 and ...) or (bounded and ...), is false: no diagnostic either way"}
 ]

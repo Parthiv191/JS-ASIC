@@ -3,7 +3,7 @@
 are isa §5-6."""
 import pytest
 
-from emu.analysis import BIG, drift
+from emu.analysis import BIG, PATH_CAP, drift
 from emu.compiler import CompileError, compile_desc
 from emu.desc import Description
 from emu.isa import INF
@@ -377,9 +377,9 @@ def test_t5_overrun_at_pc_0_names_the_owner_s_start_at_2(nom, bad):
 
 @pytest.mark.parametrize("mn,mx,bad", [(8, 12, False), (9, 12, True), (8, 11, True)])
 def test_t2_a_bounded_cond_s_window_holds_its_event_plus_minus_drift_and_quant(mn, mx, bad):
-    """isa §6 T2 for a COND: [min, max] holds [event − drift − QUANT, latest action + drift +
-    QUANT]. At pc 0 with nom 10 both are at max(10, 2) = 10, and the drift is ceil(0.02·10) = 1,
-    so the window must hold [8, 12]."""
+    """isa §6 T2 for a COND: [min, max] holds [t_lo − drift − QUANT, t_hi + drift + QUANT], where
+    the owner acts at t = max(nom, its start). At pc 0 with nom 10 both are 10 (the owner starts at
+    2), and the drift is ceil(0.02·10) = 1, so the window must hold [8, 12]."""
     d, ln = two_party()
     d.cond("fall", ln, owner="a", prof=d.profile("W", nom=10, min=mn, max=mx))
     d.halt()
@@ -506,16 +506,20 @@ def diamonds(k: int) -> Description:
 UNBOUNDED_B = f"P1 starts watching at {BIG + 5} but the event is visible at 103 (drift 2)"
 
 
-@pytest.mark.parametrize("k,bad", [(12, False), (13, True)])
+CAP_K = PATH_CAP.bit_length() - 1  # 2^12 = 4096 paths
+
+
+@pytest.mark.parametrize("k,bad", [(CAP_K, False), (CAP_K + 1, True)])
 def test_gaps_follow_at_most_4096_paths_then_count_the_gap_unbounded(k, bad):
-    """PATH_CAP = 4096: 12 diamonds make 4096 paths, all followed (b starts by 3 + 2 + 12·4 = 53);
-    13 make 8192, and the walk gives up: b may start at any time (BIG)."""
+    """isa §6 (L): 12 diamonds make 4096 paths, all followed (b starts by 3 + 2 + 12·4 = 53); 13
+    make 8192, past the checker's limit, and the walk gives up: b may start at any time (BIG)."""
+    assert PATH_CAP == 1 << CAP_K
     assert msgs(diamonds(k), "T5-watch") == ([f"pc {2 + 2 * k}: {UNBOUNDED_B}"] if bad else [])
 
 
 def test_an_untimed_loop_makes_the_gap_unbounded():
-    """A loop with no timed step (NOP, BR Z back) can run any number of times: b may reach the
-    COND after it at any time."""
+    """A loop with no timed step (NOP, BR Z back): r0 is 1, so it never loops, but the checker
+    doesn't track register values (isa §6, L), so b may reach the COND after it at any time."""
     d, ln = two_party()
     d.li("r0", 1)
     d.cond("fall", ln, owner="a")
