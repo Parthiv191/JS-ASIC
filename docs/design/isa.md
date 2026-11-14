@@ -276,7 +276,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     checks at the step start, so the whole word is ONES.
 - Bit `k` is `value >> k` (LSB first) or `value >> (n−1−k)` (MSB).
 - **Unclocked lane** (`P = nom`):
-  - Do: bit `k` at `max(now, tb + k·P)`, then `tb := tb + n·P`.
+  - Do: bit `k` at `max(now, tb + k·P)`, at most one bit per cycle (a late bit still gets a
+    cycle on the wire), then `tb := tb + n·P`.
   - Follow: sample bit `k` at `a + (k − ak)·P + P//2 + EDGE_LAT`, from the anchor `(a, ak)`
     (initially `(tb, 0)`).
   - At most one sample per cycle: bit `k` is sampled at the later of its planned cycle and one
