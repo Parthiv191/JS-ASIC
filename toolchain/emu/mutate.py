@@ -154,8 +154,13 @@ class _Sites(ast.NodeTransformer):
 
     def visit_arguments(self, node):
         node.defaults = self._visit_field(node.defaults)
-        node.kw_defaults = self._visit_field(node.kw_defaults)
+        # None marks a keyword-only argument with no default: keep it, or the defaults shift
+        node.kw_defaults = [None if v is None else self.visit(v) for v in node.kw_defaults]
         return node  # annotations are not code
+
+    def visit_MatchValue(self, node):
+        # a complex literal (1 + 2j) is the only BinOp a pattern allows, and only unparenthesized
+        return node if isinstance(node.value, ast.BinOp) else self.generic_visit(node)
 
     def visit_AnnAssign(self, node):
         if node.value is not None:
@@ -199,12 +204,12 @@ class _Sites(ast.NodeTransformer):
         v = node.value
         if isinstance(v, bool):
             if self._site(node, "true", f"{v} -> {not v}"):
-                self.edit = (node, f"({not v})")
+                self.edit = (node, f"{not v}")
                 return ast.copy_location(ast.Constant(not v), node)
         elif isinstance(v, int):
             for new in (v + 1, v - 1):
                 if new >= 0 and self._site(node, "int", f"{v} -> {new}"):
-                    self.edit = (node, f"({new})")
+                    self.edit = (node, f"{new}")  # bare: a match pattern takes no parentheses
                     return ast.copy_location(ast.Constant(new), node)
         return node
 
@@ -212,7 +217,7 @@ class _Sites(ast.NodeTransformer):
     def visit_If(self, node):
         self.generic_visit(node)
         if self.in_body and self._site(node, "if", "if c -> if not c"):
-            self.edit = (node.test, f"not {self._seg(node.test)}")
+            self.edit = (node.test, f"(not {self._seg(node.test)})")  # `if-x:` has no space to keep
             node.test = ast.UnaryOp(ast.Not(), node.test)
         return node
 
@@ -250,7 +255,7 @@ def apply(source: str, index: int) -> str:
     """`source` with mutant `index` applied: its node's span replaced, the rest kept as written."""
     s = _Sites(index, source=source)
     s.visit(ast.parse(source))
-    if index >= len(s.found):
+    if not 0 <= index < len(s.found):
         raise IndexError(f"no mutant {index}: {len(s.found)} sites")
     node, text = s.edit
     lines = [ln + "\n" for ln in source.split("\n")]  # ast breaks lines at \n only

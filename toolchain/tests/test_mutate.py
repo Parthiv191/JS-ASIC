@@ -46,13 +46,17 @@ def test_every_mutant_is_valid_python_and_changes_one_thing():
 
 
 LAYOUT = textwrap.dedent('''
-    def f(a, b, diags):  # § a comment
+    def f(a, b, diags, *, k: int, j=1):  # § a comment
         s = "§" + "x"; t = (a +
                             b)
         if a < (b + 1) * 2:
             diags.add("R1-x", "msg")
         elif not (a and b):
             t -= 1
+        if-a: t = 0
+        match a:
+            case -1 | {1: _}:
+                t = 3
         return t, s
 ''')
 
@@ -76,7 +80,6 @@ def test_a_mutant_changes_only_its_own_text():
             assert all(x == y for i, (x, y) in enumerate(zip(lines, new)) if i + 1 != m.line), m
 
 
-@reads_source
 def test_a_mutant_of_the_analysis_keeps_the_rule_ids_it_raises():
     import re
 
