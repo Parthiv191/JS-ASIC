@@ -50,6 +50,7 @@ def test_r1_rejects_shared_on_pp():
 def test_r1_accepts_shared_on_od():
     d, pp, od, p = base()
     d.hold(od, 0, owner="shared", prof=p)
+    d.halt()
     compile_desc(d, check_timing=False)
 
 
@@ -94,6 +95,7 @@ def test_r3_allows_loop_back_to_own_block_head():
     with d.only("b"):
         d.label("wait")
         d.raw_jpin(pp, 1, "wait")  # "wait" names the block's ROLE_IF
+    d.halt()
     compile_desc(d, check_timing=False)
 
 
@@ -119,7 +121,7 @@ def test_s_rejects_9_profiles():
         d, pp, od, p = base()
         for i in range(k):
             d.profile(f"x{i}", nom=4)
-        d.nop()
+        d.halt()
         return d
     compile_desc(with_extra(6), check_timing=False)  # IDLE + base's 1 + 6 = 8
     assert rules(with_extra(7)) == {"S-table"}
@@ -144,6 +146,7 @@ def test_implicit_lanes_are_deduplicated():
     d, pp, od, p = base()
     d.xfer(8, pp, owner="a", prof=p)
     d.xfer(4, pp, owner="a", prof=p)
+    d.halt()
     img = compile_desc(d, check_timing=False)
     assert len(img.lanes) == 1 and img.lanes[0].data == pp.index and img.lanes[0].clk is None
 
@@ -165,8 +168,9 @@ def test_debug_map_has_every_pc():
 def test_s_rejects_program_over_depth():
     def nops(k):
         d = Description("t", parties=("a", "b"))
-        for _ in range(k):
+        for _ in range(k - 1):
             d.nop()
+        d.halt()
         return d
     assert PROG_DEPTH == 512  # isa §1
     assert rules(nops(PROG_DEPTH + 1)) == {"S-range"}

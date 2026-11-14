@@ -45,6 +45,7 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `R3-raw-drive` | `test_compiler.py` |
 | `R3-timed-in-role` | `test_compiler.py`, `test_lead.py` |
 | `S-bus` | `test_engine_bus.py`, `test_engine_clocked.py` |
+| `S-end` | `test_analysis.py` |
 | `S-flags` | `test_compiler.py`, `test_engine_bus.py` |
 | `S-label` | `test_compiler.py` |
 | `S-lane` | `test_engine_clocked.py` |

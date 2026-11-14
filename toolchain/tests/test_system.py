@@ -46,6 +46,7 @@ def test_clock_enable_ratio():
     d = Description("t", parties=("a", "b"))
     d.line("l", owner="a")
     d.raw_delay(4000)
+    d.halt()
     image = compile_desc(d, check_timing=False)
     trace = System([EngineSpec(image, Role.P0, clock=(49, 50), phase=3)]).run(53, stop_when_quiescent=False)
     ticks = trace.engines[0].cycle_tick
@@ -56,6 +57,8 @@ def raw_image(build):
     d = Description("t", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     build(d, ln)
+    if not d.steps or d.steps[-1].kind != "halt":
+        d.halt()
     return compile_desc(d, check_timing=False)
 
 

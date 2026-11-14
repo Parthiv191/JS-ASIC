@@ -50,6 +50,53 @@ def successors(instrs: list[Instr], pc: int, role: Role | None = None) -> list[i
     return nxt
 
 
+def _role_successors(instrs: list[Instr], pc: int, role: Role) -> list[int]:
+    """Where `role` can go from pc, a pc past the last word included: ROLE_IF follows the role's
+    own path (descriptions have no BR ROLE)."""
+    ins = instrs[pc]
+    if ins.op == Op.HALT:
+        return []
+    if ins.op == Op.BR:
+        return [ins.operand] if BrCond(ins.sub) == BrCond.ALWAYS else [pc + 1, ins.operand]
+    if ins.op == Op.RAW and ins.sub == RawOp.JPIN:
+        return [pc + 1, ins.operand & 0x7FF]
+    if ins.op == Op.ROLE_IF:
+        mask, count = unpack_role_if(ins.operand)
+        return [pc + 1] if mask >> int(role) & 1 else [pc + 1 + count]
+    return [pc + 1]
+
+
+def check_end(desc, low: Lowered) -> list[Diagnostic]:
+    """S-end (isa §5): no role's path runs past the last word, by falling through it or by skipping
+    a role block at the end. The model halts there; the chip has no program length and runs
+    whatever the SRAM holds next (NOP is opcode 0). A label at the end names no step, so no branch
+    or abort_pc gets there (S-label); a bus exit goes to abort_pc only from a step with ABORT."""
+    instrs, diags = low.instrs, _Diags(desc, low)
+    n = len(instrs)
+    if not n:
+        diags.add("S-end", 0, "the program is empty: the chip would run whatever the SRAM holds")
+        return diags.list()
+    entry = [0] + ([low.image.abort_pc] if any(_aborts(ins) for ins in instrs) else [])
+    for role in ROLES:
+        seen: set[int] = set()
+        work = list(entry)  # abort_pc names a step, so it is < n
+        while work:
+            pc = work.pop()
+            if pc in seen:
+                continue
+            seen.add(pc)
+            for s in _role_successors(instrs, pc, role):
+                if s < n:
+                    work.append(s)
+                elif instrs[pc].op == Op.ROLE_IF:
+                    diags.add("S-end", pc, f"{role.name} skips this role block, the program's last, "
+                                           f"and runs past the end: put a step (halt) after it")
+                else:
+                    diags.add("S-end", pc, f"{role.name} runs past the program's last word here, where "
+                                           f"the chip runs whatever the SRAM holds: end with halt or a branch")
+    return diags.list()
+
+
 def _in_block(low: Lowered, pc: int) -> bool:
     return any(sp.start <= pc < sp.end for sp in low.spans)
 
