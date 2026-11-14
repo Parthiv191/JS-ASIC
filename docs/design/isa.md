@@ -107,7 +107,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 | `ROLE_IF` | 7 | U | operand `[2:0]` role mask (P0, P1, MON) · `[11:3]` count |
 | `PUSH` / `POP` | 8 / 9 | U | PUSH ra → RX FIFO (full: §4.9) · POP rd ← TX FIFO (stalls while empty) |
 | `MARK` | 10 | U | operand = id · IRQ |
-| `RAW` | 11 | U | sub = SET 0 / REL 1 / GET 2 / DELAY 3 / JPIN 4 / EVT 5 · line in `[23:21]` · rd for GET/EVT · operand: SET `[0]` level · DELAY n (≥ U) · JPIN `[11]` level, `[10:0]` target · EVT `[5:0]` clear mask |
+| `RAW` | 11 | U | sub = SET 0 / REL 1 / GET 2 / DELAY 3 / JPIN 4 / EVT 5 · line in `[23:21]` · rd for GET/EVT · operand: SET `[0]` level · DELAY n (1–4095) · JPIN `[11]` level, `[10:0]` target · EVT `[5:0]` clear mask |
 | `HALT` | 12 | U | – |
 | `CRC` | 13 | U | sub = RESET 0 / FEED 1 / GET 2 · ra (FEED) / rd (GET) · FEED operand `[3:0]` n−1 |
 | `FZ` | 14 | U | sub = NEXT 0 / TOK 1 / END 2 · rd / ra (`bus-fuzzer.md`) |
@@ -149,7 +149,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     have fixed totals (§4.6). `ROLE_IF` costs `U`
     whether or not it skips; a skip continues at `pc + 1 + count`, and the skipped words take no
     time. Role blocks don't nest.
-  - **`RAW DELAY n`:** `n` cycles, rounded up to a multiple of `U`.
+  - **`RAW DELAY n`:** `n` cycles, rounded up to a multiple of `U`, so `n = 1` takes `U` (as does `0`, which
+    the compiler doesn't emit).
   - **Timed step** started at `t`, completing at `c`: its successor starts on the first own cycle
     ≥ max(c + 1, t + 2), so `ISSUE` ≤ 2.
   - **Effects:** an untimed instruction acts in its start cycle. That covers RAW SET's drive,
@@ -484,7 +485,7 @@ program sees.
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit, or from a lead block to `abort_pc` (the `abort_to` target, under `R3-lead`). `abort_pc` is not inside a block body. |
 | `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere; that party sends in every `XFER src = FZ` (its owner, or a duplex lane's data2 owner) |
-| `S-*` | Names resolve (`S-label`); fields in range and program ≤ 512 (`S-range`); no role's path runs past the last word, by falling through it or by skipping a role block at the end, and the program isn't empty (`S-end`: the chip has no program length and would run what the SRAM holds next; the model halts there); tables fit the chip's sizes (`S-table`); `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines with idle 1, and not on a line the SELECT master owns (`S-line`) |
+| `S-*` | Names resolve (`S-label`); fields in range and program ≤ 512 (`S-range`); no role's path runs past the last word, by falling through it or by skipping a role block at the end, and the program isn't empty (`S-end`: the chip has no program length and would run what the SRAM holds next; the model halts there); tables fit the chip's sizes (`S-table`); `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY` 1 ≤ n ≤ 4095; `BR ROLE` mask ≠ 0; `gated` only on PP lines with idle 1, and not on a line the SELECT master owns (`S-line`) |
 | `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 
 ## 6. Timing rules (compiler)

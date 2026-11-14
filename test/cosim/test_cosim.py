@@ -13,7 +13,7 @@ from harness import GATES, CosimMismatch, cosim
 from emu.compiler import compile_desc
 from emu.cosim import Kind, pulse, replay
 from emu.desc import Description
-from emu.isa import INF, Instr, Op, Role, encode
+from emu.isa import INF, Instr, Op, Role, decode, encode
 from emu.model.system import EngineSpec, Glitch
 from emu.protocols import get, slack
 
@@ -39,7 +39,8 @@ def kinds(rep):
 @cocotb.test()
 async def test_untimed(dut):
     """LI, every ALU op (each result folded into r2 as r2 := 3·r2 ^ result, so all of them reach
-    the register readback), a BR NZ loop of 3, MARK, RAW DELAY and GET, NOP, HALT on P0 alone."""
+    the register readback), a BR NZ loop of 3, MARK, RAW DELAY 1, 2, 3 and 5 (rounded up to
+    U = 2: 2, 2, 4, 6 cycles), GET, NOP, HALT on P0 alone."""
     d = Description("untimed", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     d.li("r5", 0xBEEF)
@@ -53,11 +54,17 @@ async def test_untimed(dut):
     d.alu("sub", "r0", "r0", 1)
     d.br("loop", cond="nz", reg="r0")
     d.mark(5)
-    d.raw_delay(5)
+    for n in (1, 2, 3, 5):
+        d.raw_delay(n)
     d.raw_get("r4", ln)
     d.nop()
     d.halt()
-    await cosim(dut, model(compile_desc(d), Role.P0, peers=False), Role.P0)
+    img = compile_desc(d)
+    rep = model(img, Role.P0, peers=False)
+    starts = rep.trace.engines[0].starts
+    gaps = [b[1] - a[1] for a, b in zip(starts, starts[1:]) if decode(img.words[a[0]]).op == Op.RAW]
+    assert gaps == [2, 2, 4, 6, 2]  # the four DELAYs, then GET
+    await cosim(dut, rep, Role.P0)
 
 
 @cocotb.test()
