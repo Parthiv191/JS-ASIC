@@ -521,6 +521,31 @@ def stops(t, i):
     return [c for c, k in t.engines[i].bus_events if k == "STOP"]
 
 
+CS_DRIVES = {
+    "COND RISE": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.cond("rise", cs, owner="a", prof=p)),
+    "COND FALL": lambda d, cs, p: d.cond("fall", cs, owner="a", prof=p),
+    "HOLD": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.hold(cs, 0, owner="a", prof=p)),
+    "XFER": lambda d, cs, p: d.xfer(1, cs, owner="a", prof=p, src="ones"),
+    "RAW SET": lambda d, cs, p: d.raw_set(cs, 1),
+    "RAW REL": lambda d, cs, p: d.raw_rel(cs),
+}
+
+
+@pytest.mark.parametrize("drive", CS_DRIVES)
+def test_on_select_only_start_and_stop_drive_cs(drive):
+    """isa §5 R1-bus: every follower's detector takes any edge of CS as a START or STOP (§4.7), and
+    only COND START/STOP are timed and tracked as one. A COND RISE on CS, say, would release the
+    peripheral's gated lines where R2-edge doesn't see it, and hang a follower."""
+    def body(d, cs, miso, x, p):
+        if drive.startswith("RAW"):
+            with d.only("a"):
+                CS_DRIVES[drive](d, cs, p)
+        else:
+            CS_DRIVES[drive](d, cs, p)
+    with pytest.raises(CompileError, match=r"\[R1-bus\] .*only COND START/STOP drive the SELECT line 'cs'"):
+        select_desc(body)
+
+
 def test_a_gated_line_is_in_the_image_and_only_on_pp():
     img = select_desc(lambda d, cs, miso, x, p: None)
     assert [ln.gated for ln in img.lines] == [False, True, False]
