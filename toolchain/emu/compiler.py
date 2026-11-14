@@ -519,6 +519,10 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                 continue
             if ck in (CondKind.START, CondKind.STOP):
                 bus = ck
+                if not mine(ins.owner) and profiles[ins.prof].max != INF:
+                    err("R3-lead", at(pc), "the leader follows the exit's bus COND, which its owner makes "
+                                           "from the block's successor whenever it gets there: it needs "
+                                           "max INF")
                 if kind == "clock" and watch == bus_a:
                     edges += 1
             else:
