@@ -113,7 +113,7 @@ def test_t1_unanchored_past_an_anchor_distance_of_2_to_the_22(n, bad):
     cycles each, with no re-anchor, reach 8·2^19 = 2^22 (accepted) or 9·2^19 (rejected). The
     windows' lower edge (min 1) stays far below: the cap is on the distance."""
     d, ln = two_party(ppm=0)
-    x = d.profile("X", nom=32768, min=1, max=40000)
+    x = d.profile("X", nom=32768, min=1, max=32768)
     d.cond("fall", ln, owner="a")
     for _ in range(n):
         d.xfer(16, ln, owner="a", prof=x)
@@ -136,6 +136,46 @@ def test_t1_unanchored_past_64_anchor_states_at_one_pc(k, bad):
     d.hold(ln, 1, owner="a", prof=hs[0])
     d.halt()
     assert ("T1-unanchored" in rules(d)) == bad
+
+
+def test_abort_pc_reached_from_pc_0_keeps_only_the_states_that_reach_it():
+    """The seed is only for code pc 0 never reaches: here 64 states flow into abort_pc (six
+    optional HOLDs after an ABORT HOLD), whose COND re-anchors. A 65th, seeded state would trip
+    the cap where nothing reads it."""
+    d, ln = two_party(ppm=0)
+    hs = [d.profile(f"H{i}", nom=16 << i, min=(16 << i) - 1, max=(16 << i) + 1) for i in range(6)]
+    d.abort_to("top")
+    d.li("r0", 1)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=hs[0], abort=True)
+    for i in range(6):
+        d.br(f"s{i}", cond="nz", reg="r0")
+        d.hold(ln, 0, owner="a", prof=hs[i])
+        d.label(f"s{i}")
+    d.label("top")
+    d.cond("fall", ln, owner="a", prof=d.profile("G", nom=10, min=0, max=INF))
+    d.halt()
+    assert "T1-unanchored" not in rules(d)
+
+
+@pytest.mark.parametrize("live", [True, False])
+def test_code_after_abort_pc_is_timed_only_when_a_step_can_abort(live):
+    """With no ABORT step nothing reaches the code after the HALT (S-end and R2 skip it too), so
+    its second COND, which b reaches late, is no T5-watch; with one, it is. (The path into
+    abort_pc itself isn't timed: isa §6, open.)"""
+    d, ln = two_party()
+    d.abort_to("rec")
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=d.profile("H", nom=16, min=14, max=18), abort=live)
+    d.halt()
+    d.label("rec")
+    d.cond("fall", ln, owner="a", prof=d.profile("G", nom=10, min=0, max=INF))
+    with d.only("b"):
+        for _ in range(3):
+            d.nop()
+    d.cond("rise", ln, owner="a", prof=d.profile("G2", nom=0, min=0, max=INF))
+    d.halt()
+    assert bool(msgs(d, "T5-watch")) == live
 
 
 @pytest.mark.parametrize("main", [True, False])

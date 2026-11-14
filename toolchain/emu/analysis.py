@@ -346,6 +346,13 @@ def _aborts(ins: Instr) -> bool:
     return ins.op in (Op.COND, Op.HOLD, Op.XFER) and bool(ins.flags & F_ABORT)
 
 
+def _entries(low: Lowered) -> list[int]:
+    """Where a run can start: pc 0, and abort_pc once a step has ABORT (an abort or a bus exit
+    restarts there; with none, nothing jumps to it)."""
+    apc = low.image.abort_pc
+    return [0] + ([apc] if apc and any(_aborts(ins) for ins in low.instrs) else [])
+
+
 def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int] = frozenset()) -> int:
     def put(reg: int, tainted: bool) -> int:
         return t | (1 << reg) if tainted else t & ~(1 << reg)
@@ -519,28 +526,32 @@ def gaps(instrs: list[Instr], timed: set[int], start: int, role: Role) -> dict[i
 
 def _anchor_states(low: Lowered, steps: dict[int, _Step], diags: _Diags) -> dict[int, set[tuple[int, int, int]]]:
     instrs = low.instrs
-    state: dict[int, set[tuple[int, int, int]]] = {0: {(0, 0, 0)}}
-    work = [0]
-    # an abort or a bus exit restarts at abort_pc, where the first timed step re-anchors (T5-abort):
-    # seed it too, or code only an abort reaches gets no T1/T2 check
-    apc = low.image.abort_pc
-    if apc and any(s.abort for s in steps.values()):  # S-label: abort_pc names a step
-        state.setdefault(apc, set()).add((0, 0, 0))
-        work.append(apc)
-    while work:
-        pc = work.pop()
-        out = {_advance(steps.get(pc), t) for t in state[pc]}
-        for s in successors(instrs, pc):
-            cur = state.setdefault(s, set())
-            new = out - cur
-            if not new:
-                continue
-            if any(t[0] > A_CAP for t in new) or len(cur | new) > SET_CAP:
-                diags.add("T1-unanchored", s, "the timeline is never re-anchored around this loop; "
-                                              "add a followed COND or a clocked XFER")
-                continue
-            cur |= new
-            work.append(s)
+    state: dict[int, set[tuple[int, int, int]]] = {}
+
+    def walk(start: int) -> None:
+        state[start] = {(0, 0, 0)}
+        work = [start]
+        while work:
+            pc = work.pop()
+            out = {_advance(steps.get(pc), t) for t in state[pc]}
+            for s in successors(instrs, pc):
+                cur = state.setdefault(s, set())
+                new = out - cur
+                if not new:
+                    continue
+                if any(t[0] > A_CAP for t in new) or len(cur | new) > SET_CAP:
+                    diags.add("T1-unanchored", s, "the timeline is never re-anchored here (the anchor distance "
+                                                  "passes 2^22, or more than 64 anchor states meet): add a "
+                                                  "followed COND or a clocked XFER")
+                    continue
+                cur |= new
+                work.append(s)
+
+    # an abort or a bus exit restarts at abort_pc, whose first timed step re-anchors (T5-abort):
+    # code that only they reach is checked from there (S-label: abort_pc names a step)
+    for start in _entries(low):
+        if start not in state:
+            walk(start)
     return state
 
 
@@ -668,8 +679,7 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
 
     # pairwise checks: predecessor timed step (or reset) -> next timed step
     preds: list[tuple[_Step | None, int]] = [(None, 0)] + [(s, pc + 1) for pc, s in steps.items()]
-    starts = [0] + ([apc] if apc else [])
-    runs = {r: _reach(instrs, starts, r) for r in ROLES}
+    runs = {r: _reach(instrs, _entries(low), r) for r in ROLES}
     for prev, start in preds:
         # only the roles that can run prev (a step in a lead block is the leader's alone)
         per_role = {r: gaps(instrs, timed, start, r) if prev is None or prev.pc in runs[r] else {}
@@ -747,7 +757,7 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
     XFER waits inside the step (unless the clock is someone else's: then it sends ONES), so it
     must itself make the others wait: only a clocked XFER its owner clocks does."""
     instrs = low.instrs
-    starts = [0] + ([low.image.abort_pc] if low.image.abort_pc else [])
+    starts = _entries(low)
     for r in ROLES:  # MON owns no step, so nothing after a MON POP makes the others wait
         for pc in sorted(_reach(instrs, starts, r)):
             ins = instrs[pc]
