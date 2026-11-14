@@ -399,7 +399,7 @@ class _Step:
     od_drivers: frozenset = frozenset()  # parties that may drive an OD data line of the lane
     stretch: bool = False   # a clocked XFER on a stretch lane
     cpol: int = 0
-    stretch_wait: bool = False  # a HOLD 1 / COND RISE on a stretch lane's clock: its owner waits
+    stretch_wait: bool = False  # a COND RISE on a stretch lane's clock (never HOLD 1, S-bus): its owner waits
     bus_wait: int = 0  # COND START/STOP: a follower completes bus_confirm + 1 after the edge is seen
     ldelay: int = 0
 

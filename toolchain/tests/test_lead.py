@@ -223,6 +223,27 @@ def test_after_a_pop_a_step_inside_a_lead_block_makes_the_others_wait():
         compile_desc(i2c(after=lambda P: (pop_then_cond(P), stop_and_halt(P))))
 
 
+def test_after_a_pop_a_lead_block_s_first_step_waits_as_its_successor_does():
+    """T5-stall: c POPs (in an only block) right before its lead block, whose first step is a
+    bounded COND. The others wait in the block's successor, a clocked XFER c clocks (max INF), so
+    that COND makes them wait too. (The block always leaves by its STOP.)"""
+    def blk(P):
+        d = P.d
+        with d.only("c"):
+            d.pop("r6")
+        with d.lead("c"):
+            d.cond("fall", P.scl, owner="c", prof=d.profile("Bc", nom=H, min=0, max=3 * H))
+            d.cond("rise", P.scl, owner="c", prof=P.wait)
+            stop_seq(P)
+            d.br("top")
+        d.xfer(8, P.L, owner="c", prof=P.bit, src="r6", dst="r7", msb_first=True, abort=True)
+        stop_and_halt(P)
+    d = i2c(after=blk)
+    (sp,) = [sp for sp in lower(d).spans if sp.roles == frozenset({Role.P0}) and sp.lead]
+    assert lower(d).instrs[sp.start].op == Op.COND
+    compile_desc(d)
+
+
 # ---------------------------------------------------------------- on the model, both parties
 def test_the_target_acks_its_own_address():
     t = run(i2c())

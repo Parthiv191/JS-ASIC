@@ -92,5 +92,21 @@
  {"file": "emu/analysis.py", "func": "_check_stalls", "desc": "1 -> 0", "code": "for nxt in sorted(gaps(instrs, timed, pc + 1, r)):", "nth": 0,
   "why": "gaps from the POP itself: a POP is untimed, so the next timed steps on every path are those from pc + 1"},
  {"file": "emu/analysis.py", "func": "_check_stalls", "desc": "+ -> -", "code": "for nxt in sorted(gaps(instrs, timed, pc + 1, r)):", "nth": 0,
-  "why": "a POP outside a block runs in MON, which T5-stall rejects anyway; in a block, pc - 1 is its ROLE_IF or an untimed instruction (same next steps), or a timed step of the same lead block, whose verdict is the block successor's, as the POP's next step's is"}
+  "why": "a POP outside a block runs in MON, which T5-stall rejects anyway; in a block, pc - 1 is its ROLE_IF or an untimed instruction (same next steps), or a timed step of the same lead block, whose verdict is the block successor's, as the POP's next step's is"},
+ {"file": "emu/analysis.py", "func": "completion", "desc": "+ -> -", "code": "return -nom + wait, max(ISSUE - s.n * nom, -nom) + wait", "nth": 0,
+  "why": "wait is E only for a COND RISE on a stretch lane's clock (_steps sets stretch_wait for a COND alone; S-bus releases a stretch clock with COND RISE, never HOLD 1), so it is 0 in the HOLD and unclocked XFER branch"},
+ {"file": "emu/analysis.py", "func": "completion", "desc": "+ -> -", "code": "return -nom + wait, max(ISSUE - s.n * nom, -nom) + wait", "nth": 1,
+  "why": "wait is E only for a COND RISE on a stretch lane's clock (_steps sets stretch_wait for a COND alone; S-bus releases a stretch clock with COND RISE, never HOLD 1), so it is 0 in the HOLD and unclocked XFER branch"},
+ {"file": "emu/analysis.py", "func": "_cost", "desc": "1 -> 2", "code": "return -(-max(1, ins.operand) // U) * U", "nth": 0,
+  "why": "U = 2: RAW DELAY 1 and 2 both round up to 2 cycles, with max(1, n) or max(2, n)"},
+ {"file": "emu/analysis.py", "func": "_cost", "desc": "1 -> 0", "code": "return -(-max(1, ins.operand) // U) * U", "nth": 0,
+  "why": "S-range rejects RAW DELAY 0 (1 <= n <= 4095), so max(0, n) = max(1, n) = n"},
+ {"file": "emu/analysis.py", "func": "_reach", "desc": "< -> <=", "code": "work = [s for s in starts if s < len(instrs)]", "nth": 0,
+  "why": "the starts are pc 0 and abort_pc: check_timing returns at once on an empty program, and abort_pc is a label's pc, which names an instruction (a label past the last word doesn't resolve: S-label, in lower())"},
+ {"file": "emu/analysis.py", "func": "_makes_others_wait", "desc": "and -> or", "code": "if low is not None and steps is not None:", "nth": 0,
+  "why": "the callers pass both low and steps (_check_stalls) or neither (the call for a lead block's successor), never one"},
+ {"file": "emu/analysis.py", "func": "_makes_others_wait", "desc": "< -> <=", "code": "if sp.lead and r in sp.roles and sp.start <= s.pc < sp.end:", "nth": 0,
+  "why": "a step at a block's end pc is in no block (blocks don't nest, and a block starting there would have its ROLE_IF at that pc), so the mutant applies the plain rule to the step itself, as falling out of the loop does"},
+ {"file": "emu/analysis.py", "func": "_pair_checks", "desc": "> -> >=", "code": "if p.bounded or p.min > 0:", "nth": 0,
+  "why": "for an unbounded COND with min 0 the block computes the window, but its test, (min > 0 and ...) or (bounded and ...), is false: no diagnostic either way"}
 ]
