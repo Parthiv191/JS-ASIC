@@ -19,8 +19,12 @@ memory. A survivor runs every test, so the time limit is 3 x the clean run measu
 | `true` | `True` ↔ `False` |
 | `del` | an assignment or a call statement in a function body → `pass` |
 
-Raise statements, asserts and f-strings are left alone: their mutants only change messages. Each
-worker runs the tests in its own copy of the package and the tests, with no bytecode cache (a
+Raise statements, asserts and f-strings are left alone: their mutants only change messages. A
+mutant changes only its node's text, parenthesized, so the file keeps its comments, quotes and
+layout: a test may read the source (`test_rule_coverage.py` greps the compiler and the analysis for
+the rule ids they raise). Such a check compares the code's text, not what it does, so it skips when
+`EMU_MUTANT` is set, as it is for every test run here (`simutil.reads_source`): a mutant it
+failed would hide a missing behaviour test. Each worker runs the tests in its own copy of the package and the tests, with no bytecode cache (a
 rewritten file in the same second could reuse a stale one), so the source tree is never touched.
 The tests run fail-fast, the files that import the target's package first."""
 from __future__ import annotations
@@ -70,11 +74,16 @@ class Mutant:
 
 
 class _Sites(ast.NodeTransformer):
-    """Counts the mutation sites in a fixed order. With `target` set, it rewrites that one."""
+    """Counts the mutation sites in a fixed order. With `target` set, it rewrites that one, and
+    with `source` too it records the rewrite as text: `edit` is (the node whose source span is
+    replaced, the replacement)."""
 
-    def __init__(self, target: int | None = None, lines: list[str] | None = None):
+    def __init__(self, target: int | None = None, lines: list[str] | None = None,
+                 source: str | None = None):
         self.target = target
-        self.lines = lines or []
+        self.source = source
+        self.lines = lines or (source.splitlines() if source else [])
+        self.edit: tuple[ast.AST, str] | None = None
         self.seen: dict[tuple, int] = {}
         self.found: list[Mutant] = []
         self.func: list[str] = []
@@ -88,6 +97,17 @@ class _Sites(ast.NodeTransformer):
         self.seen[(func, desc, code)] = nth + 1
         self.found.append(Mutant(k, line, func, op, desc, code, nth))
         return k == self.target
+
+    def _seg(self, node: ast.AST) -> str:
+        """`node`'s source text, parenthesized (an operand keeps its precedence)."""
+        return f"({ast.get_source_segment(self.source, node)})" if self.source else ""
+
+    def _ops(self, node: ast.AST, ops: list, values: list) -> None:
+        """The edit for an operator change: the operands' own text between the new operators."""
+        text = self._seg(values[0])
+        for o, v in zip(ops, values[1:]):
+            text += f" {_SYM[type(o)]} {self._seg(v)}"
+        self.edit = (node, f"({text})")
 
     # contexts left alone
     def visit_Raise(self, node):
@@ -149,6 +169,7 @@ class _Sites(ast.NodeTransformer):
             new = _CMP.get(type(o))
             if new is not None and self._site(node, "cmp", f"{_SYM[type(o)]} -> {_SYM[new]}"):
                 node.ops[i] = new()
+                self._ops(node, node.ops, [node.left] + node.comparators)
         return node
 
     def visit_BinOp(self, node):
@@ -156,6 +177,7 @@ class _Sites(ast.NodeTransformer):
         new = _BIN.get(type(node.op))
         if new is not None and self._site(node, "bin", f"{_SYM[type(node.op)]} -> {_SYM[new]}"):
             node.op = new()
+            self._ops(node, [node.op], [node.left, node.right])
         return node
 
     def visit_BoolOp(self, node):
@@ -163,11 +185,13 @@ class _Sites(ast.NodeTransformer):
         new = ast.Or if isinstance(node.op, ast.And) else ast.And
         if self._site(node, "bool", f"{_SYM[type(node.op)]} -> {_SYM[new]}"):
             node.op = new()
+            self._ops(node, [node.op] * (len(node.values) - 1), node.values)
         return node
 
     def visit_UnaryOp(self, node):
         self.generic_visit(node)
         if isinstance(node.op, ast.Not) and self._site(node, "not", "not x -> x"):
+            self.edit = (node, self._seg(node.operand))
             return node.operand
         return node
 
@@ -175,10 +199,12 @@ class _Sites(ast.NodeTransformer):
         v = node.value
         if isinstance(v, bool):
             if self._site(node, "true", f"{v} -> {not v}"):
+                self.edit = (node, f"({not v})")
                 return ast.copy_location(ast.Constant(not v), node)
         elif isinstance(v, int):
             for new in (v + 1, v - 1):
                 if new >= 0 and self._site(node, "int", f"{v} -> {new}"):
+                    self.edit = (node, f"({new})")
                     return ast.copy_location(ast.Constant(new), node)
         return node
 
@@ -186,6 +212,7 @@ class _Sites(ast.NodeTransformer):
     def visit_If(self, node):
         self.generic_visit(node)
         if self.in_body and self._site(node, "if", "if c -> if not c"):
+            self.edit = (node.test, f"not {self._seg(node.test)}")
             node.test = ast.UnaryOp(ast.Not(), node.test)
         return node
 
@@ -194,6 +221,8 @@ class _Sites(ast.NodeTransformer):
         new = _BIN.get(type(node.op))
         if new is not None and self._site(node, "aug", f"{_SYM[type(node.op)]}= -> {_SYM[new]}="):
             node.op = new()
+            target = ast.get_source_segment(self.source, node.target) if self.source else ""
+            self.edit = (node, f"{target} {_SYM[new]}= {self._seg(node.value)}")
         return self._delete(node)
 
     def visit_Assign(self, node):
@@ -206,6 +235,7 @@ class _Sites(ast.NodeTransformer):
 
     def _delete(self, node):
         if self.in_body and self._site(node, "del", "statement -> pass"):
+            self.edit = (node, "pass")
             return ast.copy_location(ast.Pass(), node)
         return node
 
@@ -217,17 +247,22 @@ def sites(source: str) -> list[Mutant]:
 
 
 def apply(source: str, index: int) -> str:
-    """`source` with mutant `index` applied."""
-    s = _Sites(index)
-    tree = ast.fix_missing_locations(s.visit(ast.parse(source)))
+    """`source` with mutant `index` applied: its node's span replaced, the rest kept as written."""
+    s = _Sites(index, source=source)
+    s.visit(ast.parse(source))
     if index >= len(s.found):
         raise IndexError(f"no mutant {index}: {len(s.found)} sites")
-    return ast.unparse(tree)
+    node, text = s.edit
+    lines = [ln + "\n" for ln in source.split("\n")]  # ast breaks lines at \n only
+
+    def at(line: int, col: int) -> int:  # ast columns count UTF-8 bytes
+        return sum(map(len, lines[:line - 1])) + len(lines[line - 1].encode()[:col].decode())
+    return source[:at(node.lineno, node.col_offset)] + text + source[at(node.end_lineno, node.end_col_offset):]
 
 
 def diff(source: str, index: int, context: int = 2) -> str:
-    """Mutant `index` as a diff against the source, both through `ast.unparse`."""
-    a = ast.unparse(ast.parse(source)).splitlines()
+    """Mutant `index` as a diff against the source."""
+    a = source.splitlines()
     b = apply(source, index).splitlines()
     lines = list(difflib.unified_diff(a, b, lineterm="", n=context))
     return "\n".join(lines[2:])  # without the ---/+++ header
@@ -274,7 +309,7 @@ _FAILED = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.M)
 
 
 def _pytest(cwd: Path, tests: list[str], timeout: float) -> tuple[str, float, str]:
-    env = {**os.environ, "PYTHONPATH": str(cwd), "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {**os.environ, "PYTHONPATH": str(cwd), "PYTHONDONTWRITEBYTECODE": "1", "EMU_MUTANT": "1"}
     cmd = [sys.executable, "-m", "pytest", "-x", "-q", "-rfE", "-p", "no:cacheprovider", *tests]
     t0 = time.monotonic()
     try:

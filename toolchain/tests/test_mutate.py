@@ -6,6 +6,7 @@ import ast
 import textwrap
 
 from emu.mutate import apply, order_tests, run, sites
+from simutil import reads_source
 
 SNIPPET = textwrap.dedent('''
     N = 3
@@ -37,11 +38,53 @@ def test_each_operator_makes_its_mutants():
 def test_every_mutant_is_valid_python_and_changes_one_thing():
     clean = ast.unparse(ast.parse(SNIPPET))
     ms = sites(SNIPPET)
-    outs = [apply(SNIPPET, m.index) for m in ms]
+    outs = [ast.unparse(ast.parse(apply(SNIPPET, m.index))) for m in ms]
     assert all(o != clean for o in outs)
     assert len(set(outs)) == len(outs)
-    assert "a - b" in apply(SNIPPET, next(m.index for m in ms if m.desc == "+ -> -"))
-    assert "x >>= 1" in apply(SNIPPET, next(m.index for m in ms if m.op == "aug"))
+    assert "a - b" in outs[next(m.index for m in ms if m.desc == "+ -> -")]
+    assert "x >>= 1" in outs[next(m.index for m in ms if m.op == "aug")]
+
+
+LAYOUT = textwrap.dedent('''
+    def f(a, b, diags):  # § a comment
+        s = "§" + "x"; t = (a +
+                            b)
+        if a < (b + 1) * 2:
+            diags.add("R1-x", "msg")
+        elif not (a and b):
+            t -= 1
+        return t, s
+''')
+
+
+def test_a_mutant_changes_only_its_own_text():
+    """apply() splices the mutated node into the source, so the file keeps its comments, quotes
+    and layout. A test may read the source: test_rule_coverage greps the compiler and the analysis
+    for `diags.add("R1-...")`. Rebuilt with ast.unparse, every mutant of those files failed it,
+    whatever it changed. Each mutant parses to the tree the visitor makes, and only its lines differ
+    (column offsets count UTF-8 bytes, hence the § before a site)."""
+    from emu.mutate import _Sites
+    lines = LAYOUT.splitlines()
+    for m in sites(LAYOUT):
+        out = apply(LAYOUT, m.index)
+        assert ast.dump(ast.parse(out)) == ast.dump(_Sites(m.index).visit(ast.parse(LAYOUT))), m
+        assert "# § a comment" in out, m
+        assert 'diags.add("R1-x", "msg")' in out or m.op == "del", m
+        new = out.splitlines()
+        assert len(new) <= len(lines)
+        if len(new) == len(lines):
+            assert all(x == y for i, (x, y) in enumerate(zip(lines, new)) if i + 1 != m.line), m
+
+
+@reads_source
+def test_a_mutant_of_the_analysis_keeps_the_rule_ids_it_raises():
+    import re
+
+    from emu.mutate import ROOT
+    src = (ROOT / "emu/analysis.py").read_text(encoding="utf-8")
+    rules = re.compile(r'(?:err|diags\.add)\(\s*"([RST]\d?-[a-z][a-z-]*)"')
+    m = next(m for m in sites(src) if m.op == "cmp")
+    assert set(rules.findall(apply(src, m.index))) == set(rules.findall(src)) != set()
 
 
 def test_messages_asserts_and_annotations_are_left_alone():
@@ -77,6 +120,8 @@ def spin(n):
     return i
 '''
 TEST = '''
+import os
+
 from pkg.m import double, spin
 
 def test_double():
@@ -84,6 +129,9 @@ def test_double():
 
 def test_spin():
     assert spin(3) == 3
+
+def test_the_runner_flags_its_runs():  # tests that read the source skip under it
+    assert os.environ.get("EMU_MUTANT") == "1"
 '''
 
 
@@ -106,6 +154,7 @@ def test_the_runner_tells_killed_survived_and_timeout(tmp_path):
     assert (tmp_path / "pkg" / "m.py").read_text() == PKG  # the source tree is never touched
 
 
+@reads_source
 def test_every_reviewed_equivalent_is_a_current_mutant_with_a_reason():
     """tests/mutation_equivalents.json: survivors reviewed as equivalent, keyed by function,
     change and source line (not by index, which moves with every edit). An entry that matches
