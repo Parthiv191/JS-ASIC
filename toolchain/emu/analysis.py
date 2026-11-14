@@ -157,6 +157,15 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
 
 # ----------------------------------------------------------------------------- R2-edge
 _LG, _SHUT = "LG", "SHUT"   # a pending OD let-go (low until the lane's next clock edge); a shut gate
+_SHUT1 = "SHUT?"            # a gated line shut on some paths, released or driven 1 on the others
+_READS_1 = (_SHUT, _SHUT1, 1)
+
+
+def _join(x, y):
+    """Two paths' drives: the same, a gated line that reads 1 on both, or unknown."""
+    if x == y:
+        return x
+    return _SHUT1 if x in _READS_1 and y in _READS_1 else None
 _PARTIES = (Role.P0, Role.P1)
 
 
@@ -171,8 +180,9 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
     - a drive comes from a HOLD, a COND's post-edge level, an XFER from ZERO or ONES (a PP data line
       keeps its last bit; a clocked OD one holds it until the lane's next clock edge, the let-go),
       a lane's clock at its idle level after a clocked XFER, or RAW SET/REL;
-    - a gated line is released while its gate is shut: at RUN and after a SELECT STOP. RAW SET does
-      nothing then (isa §2);
+    - a gated line is released while its gate is shut: at RUN and after a SELECT STOP, until the
+      next timed step its engine runs. RAW SET does nothing then (isa §2). Where a path with the
+      gate shut meets one where the line is released or 1, it reads 1 (_SHUT1);
     - a role block r skips leaves unknown whatever its parties may drive in it;
     - anything else, and paths that disagree, leave a drive unknown.
 
@@ -227,7 +237,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         ln = lines[i]
         if ln.kind == "pp":
             v = st[int(ln.owner)][i]
-            return 1 if v == _SHUT else v
+            return 1 if v in (_SHUT, _SHUT1) else v
         vals = [st[int(q)][i] for q in _PARTIES]
         if any(v in (0, _LG) for v in vals):
             return 0
@@ -265,6 +275,13 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
 
     def step(st, pc: int) -> None:
         ins, ex = instrs[pc], runs(pc)
+        if ins.op in (Op.COND, Op.HOLD, Op.XFER):
+            # a timed step opens the gate of every engine that runs it (isa §2): its gated lines
+            # stay released, at the pull-up, but a RAW SET now drives them
+            for q in ex:
+                for i, ln in enumerate(lines):
+                    if ln.gated and int(ln.owner) == int(q) and st[int(q)][i] in (_SHUT, _SHUT1):
+                        st[int(q)][i] = 1
         if ins.op in (Op.COND, Op.HOLD):
             if ins.op == Op.COND:
                 k, line = edge_line(ins)
@@ -277,6 +294,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 if does(ins.owner, q):
                     st[int(q)][line] = level
             edge_on(st, line)
+            # the STOP shuts the gate it opened: for a follower that holds only because T5-watch
+            # has it start the COND STOP by the confirm cycle (a later start would reopen it)
             if k == CondKind.STOP and kind == BusKind.SELECT:
                 for i, ln in enumerate(lines):
                     if ln.gated:
@@ -301,6 +320,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     continue  # a shut gate ignores RAW (isa §2)
                 if lines[ins.ra].gated and cur is None:
                     st[int(q)][ins.ra] = None
+                elif cur == _SHUT1:  # ignored where the gate is shut, driven where it is open
+                    st[int(q)][ins.ra] = _SHUT1 if ins.sub == RawOp.SET and ins.operand & 1 else None
                 elif ins.sub == RawOp.SET:
                     st[int(q)][ins.ra] = ins.operand & 1
                 else:
@@ -334,7 +355,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             out = tuple(tuple(row) for row in st)
             for s in successors(instrs, pc, r):
                 old = state.get(s)
-                new = out if old is None else tuple(tuple(x if x == y else None for x, y in zip(o, n))
+                new = out if old is None else tuple(tuple(_join(x, y) for x, y in zip(o, n))
                                                     for o, n in zip(old, out))
                 if new != old:
                     state[s] = new
