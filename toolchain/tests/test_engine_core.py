@@ -149,7 +149,7 @@ def test_taken_branch_and_role_if_skip_cost_U():
     assert run(Engine(img(skip), Role.P0), 20).starts == [(0, 2), (3, 4)]
 
 
-@pytest.mark.parametrize("n,gap", [(2, 2), (3, 4), (4, 4), (5, 6)])
+@pytest.mark.parametrize("n,gap", [(1, 2), (2, 2), (3, 4), (4, 4), (5, 6)])
 def test_raw_delay_rounds_up_to_U(n, gap):
     """RAW DELAY n takes n cycles rounded up to a multiple of U = 2 (isa §4.0)."""
     def b(d, l):
