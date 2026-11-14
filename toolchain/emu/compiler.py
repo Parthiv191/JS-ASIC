@@ -283,6 +283,10 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                                  f"runs no detector)")
         if kind == "select" and lines[a.index].kind != "pp":
             err("S-bus", anchor, "a SELECT bus needs a push-pull CS line (a)")
+        if kind == "select" and lines[a.index].idle != 1:
+            # its owner drives idle from now = 1 (isa §2): an idle-0 CS would fall at start-up, a
+            # START to every detector that no COND START made
+            err("S-bus", anchor, f"a SELECT bus's CS line {lines[a.index].name!r} idles at 1 (a fall is START)")
     image = Image(desc.name, desc.parties, words, profiles, lines, lanes, abort_pc, desc.tolerance_ppm, debug,
                   bus=bus)
     if not any(d.rule == "S-table" for d in diags):
