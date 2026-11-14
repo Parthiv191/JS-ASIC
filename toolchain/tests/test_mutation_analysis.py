@@ -418,6 +418,46 @@ def test_t3_a_clock_owner_that_starts_early_re_bases_to_the_step_start(mx, bad):
     assert msgs(clocked(10, ppm=0, mx=mx, cs_hold=16), "T3-latency") == (want if bad else [])
 
 
+def late_clock(mx: int, k: int = 24) -> Description:
+    """b owns the data of an XFER a clocks (half period 20, max `mx`, 10% tolerance); a runs k
+    NOPs of its own first, so it starts the XFER late."""
+    d = Description("lc", parties=("a", "b"), tolerance_ppm=100000)
+    cs = d.line("cs", owner="a", idle=1)
+    clk = d.line("clk", owner="a", idle=0)
+    miso = d.line("miso", owner="b", idle=0)
+    lane = d.lane("L", miso, clk=clk)
+    d.cond("fall", cs, owner="a", prof=d.profile("SU", nom=80, min=0, max=INF))
+    with d.only("a"):
+        for _ in range(k):
+            d.nop()
+    d.xfer(4, lane, owner="b", prof=d.profile("H", nom=20, min=0, max=mx), src="ones")
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("mx,bad", [(70, True), (75, True), (76, False)])
+def test_t3_takes_the_drift_up_to_the_first_edge(mx, bad):
+    """isa §6 T3: a follower's timeout runs from its start to the first edge, so the drift is over
+    A + F, not A + H. a starts by 0 + ISSUE + 2 + 24·2 = 52 (its ROLE_IF and NOPs), so the edge is
+    seen at F = 52 + 20 + EDGE_LAT = 75; b starts at the earliest at EDGE_LAT + 1 + 2 = 6, so
+    75 + ceil(0.1·75) − 6 = 77 ≤ max + QUANT needs max 76. With A + H the drift was 2, which passed
+    max 70, and there, with a's clock 5% slow, the followers time out on the model (below)."""
+    got = msgs(late_clock(mx), "T3-latency")
+    if not bad:
+        assert got == []
+    else:
+        assert got == [f"pc 26: P1 may start at 6 and time out: the first clock edge may be visible only at 75 "
+                       f"(drift 8), past max {mx} + QUANT after it"]
+
+
+def test_the_old_drift_boundary_times_out_on_the_model():
+    from simutil import run_sys
+    from emu.isa import Role
+    img = compile_desc(late_clock(70), check_timing=False, check_levels=False)
+    t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON), max_ticks=4000, clocks={0: (19, 20)})
+    assert [e.kind for i in (1, 2) for e in t.engines[i].events] == ["TIMEOUT", "TIMEOUT"]
+
+
 @pytest.mark.parametrize("H,bad", [(50, False), (51, True)])
 def test_t3_each_clock_phase_plus_drift_fits_a_bounded_follower_s_max(H, bad):
     """isa §4.1: after the first edge a bounded clock follower counts max from each edge, so

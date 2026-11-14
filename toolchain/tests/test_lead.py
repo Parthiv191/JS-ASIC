@@ -444,38 +444,49 @@ def test_a_cond_successor_on_the_bus_line_is_completed_by_the_exits_own_bus_cond
 
 
 # ---------------------------------------------------------------- a step on the other party's clock
-def spi_lead(k: int = 0, mx: int = 20, s_nom: int = 20, pre_hold: bool = False):
-    """SELECT: a's START, a HOLD of 12 (a's), then a's k NOPs. b leads a block: its bounded XFER on
-    a's clock (half period 20, max `mx`), a's STOP, back to top. The block's successor S is the same
-    XFER, unbounded, with half period `s_nom`. With `pre_hold`, b HOLDs its line y first in the block.
-    a skips the block and clocks S meanwhile: those are the edges b's XFER gets."""
+def spi_lead(k: int = 0, mx: int = 20, s_nom: int = 20, pre_hold: bool = False, s_n: int = 8,
+             s_cpha: int = 0, pop: bool = False, fifo: bool = False, stop_max: int = INF):
+    """SELECT: a's START, a HOLD of 12 (a's), then a's k NOPs (and with `pop` a POP). b leads a
+    block: its bounded 8-bit XFER on a's clock (half period 20, max `mx`, cpha 0), a's STOP (max
+    `stop_max`), back to top. The block's successor S is an unbounded XFER on a's clock, b's (or
+    with `fifo` a's, from TX, on mosi), of `s_n` bits, half period `s_nom`, cpha `s_cpha`. With
+    `pre_hold`, b HOLDs its line y first in the block. a skips the block and clocks S meanwhile:
+    those are the edges b's XFER gets."""
     d = Description("s", parties=("a", "b"), tolerance_ppm=0)
     cs = d.line("cs", owner="a", idle=1)
     clk = d.line("clk", owner="a", idle=0)
     miso = d.line("miso", owner="b", idle=0)
+    mosi = d.line("mosi", owner="a", idle=0)
     x = d.line("x", owner="a", idle=1)
     y = d.line("y", owner="b", idle=1)
     d.bus("select", cs)
     L = d.lane("L", miso, clk=clk)
+    Ls = d.lane("Ls", mosi if fifo else miso, clk=clk, cpha=s_cpha) if fifo or s_cpha else L
     W = d.profile("W", nom=20, min=0, max=INF)
     d.abort_to("top")
     d.li("r2", 1)
     d.label("top")
     d.cond("start", owner="a", prof=W)
     d.hold(x, 0, owner="a", prof=d.profile("X", nom=12, min=11, max=13))
-    if k:
+    if k or pop:
         with d.only("a"):
             for _ in range(k):
                 d.nop()
+            if pop:
+                d.pop("r3")
     with d.lead("b"):
         d.br("go", cond="z", reg="r2")
         if pre_hold:
             d.hold(y, 0, owner="b", prof=d.profile("Y", nom=12, min=11, max=13))
         d.xfer(8, L, owner="b", prof=d.profile("Bb", nom=20, min=0, max=mx), src="ones")
-        d.cond("stop", owner="a", prof=W)
+        d.cond("stop", owner="a", prof=W if stop_max == INF else d.profile("SB", nom=20, min=0, max=stop_max))
         d.br("top")
     d.label("go")
-    d.xfer(8, L, owner="b", prof=d.profile("B", nom=s_nom, min=0, max=INF), src="zero", abort=True)
+    B = d.profile("B", nom=s_nom, min=0, max=INF)
+    if fifo:
+        d.xfer(s_n, Ls, owner="a", prof=B, src="fifo", abort=True)
+    else:
+        d.xfer(s_n, Ls, owner="b", prof=B, src="zero", abort=True)
     d.cond("stop", owner="a", prof=W)
     d.halt()
     return d
@@ -512,11 +523,19 @@ NO_CLOCK = ("P1 may time out: the clock owner P0 doesn't run this step; it clock
             "block's successor on the same clock with the same half period, after a step before the block")
 
 
-@pytest.mark.parametrize("variant", ["other half period", "after a step in the block", "clock owner halted"])
+NO_CLOCK_VARIANTS = {
+    "other half period": dict(s_nom=30),
+    "S shorter": dict(s_n=4),
+    "S on another cpha": dict(s_cpha=1),
+    "after a step in the block": dict(pre_hold=True),
+}
+
+
+@pytest.mark.parametrize("variant", [*NO_CLOCK_VARIANTS, "clock owner halted"])
 def test_a_bounded_clock_follower_whose_clock_owner_never_clocks_the_step_fails_t3(variant):
     """Where the clock owner can't run the step and S gives no start for it, its edges may never
-    come: S on another half period, a step after another in the block (a's start of S isn't
-    tracked across it), or a clock owner that HALTed."""
+    come: S on another half period or cpha, or with fewer bits (a stops clocking after S's), a step
+    after another in the block (a's start of S isn't tracked across it), or a HALTed clock owner."""
     if variant == "clock owner halted":
         d = Description("h", parties=("a", "b"), tolerance_ppm=0)
         clk = d.line("clk", owner="a", idle=0)
@@ -529,6 +548,25 @@ def test_a_bounded_clock_follower_whose_clock_owner_never_clocks_the_step_fails_
         d.xfer(8, lane, owner="b", prof=d.profile("HALF", nom=10, min=0, max=14), src="ones")
         d.halt()
     else:
-        d = spi_lead(s_nom=30) if variant == "other half period" else spi_lead(pre_hold=True)
+        d = spi_lead(**NO_CLOCK_VARIANTS[variant])
     (m,) = t3(d)
     assert m.split(": ", 1)[1] == NO_CLOCK
+
+
+@pytest.mark.parametrize("variant", ["pop", "fifo"])
+def test_a_stall_on_the_way_to_the_successor_times_out_a_lead_block_step_on_its_clock(variant):
+    """T5-stall: a POP before the block, or S taking src = FIFO, lets a stall on its way to S, and
+    b's bounded step in the block gets S's edges, so S doesn't make b wait: b times out (with the
+    host late, on the model too)."""
+    d = spi_lead(**{variant: True})
+    with pytest.raises(CompileError, match="T5-stall"):
+        compile_desc(d)
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1), max_ticks=4000,
+                tx={0: [0x55]}, push_at=400)
+    assert "TIMEOUT" in [e.kind for e in t.engines[1].events]
+
+
+def test_the_exit_s_bus_cond_the_leader_follows_has_max_inf():
+    """R3-lead: a makes the exit's STOP from S, whenever its own path gets there, so b, which
+    follows it in the block, can't bound it."""
+    assert "R3-lead" in rule_diags(spi_lead(stop_max=25))

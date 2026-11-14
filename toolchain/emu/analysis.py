@@ -750,12 +750,13 @@ def _start(prev: _Step | None, r: Role, lo: int, hi: int) -> tuple[int, int]:
 def _lead_clock(low: Lowered, steps: dict[int, _Step], s: _Step):
     """(block, S) for a clocked step in a lead block whose clock the other party owns: that party
     skips the block and clocks its fall-through successor S meanwhile, so S's edges are the
-    step's, if S is a clocked XFER on the same clock with the same half period (else S is None)."""
+    step's, if S is a clocked XFER on the same clock with the same half period and cpha, and at
+    least as many bits (else S is None)."""
     for sp in low.spans:
         if sp.lead and sp.start <= s.pc < sp.end and s.clk_owner not in sp.roles:
             succ = steps.get(sp.end)
             same = (succ is not None and succ.clocked and succ.clk_line == s.clk_line
-                    and succ.prof.nom == s.prof.nom)
+                    and succ.prof.nom == s.prof.nom and succ.cpha == s.cpha and succ.n >= s.n)
             return sp, succ if same else None
     return None, None
 
@@ -778,12 +779,18 @@ def _makes_others_wait(s: _Step, r: Role, low: Lowered | None = None,
     """An unbounded COND that r does, or an unbounded clocked XFER r clocks (whoever owns its
     data): the others wait for r however long it stalled. A bounded one times them out. A step
     in a lead block r leads, if the block's successor makes the others wait for r: they are in
-    it while r decides (R3-lead)."""
+    it while r decides (R3-lead). Not the successor of another party's lead block that holds a
+    bounded step on r's clock: that step gets the successor's edges, and times out while r stalls."""
     if low is not None and steps is not None:
         for sp in low.spans:
             if sp.lead and r in sp.roles and sp.start <= s.pc < sp.end:
                 succ = steps.get(sp.end)
                 return succ is not None and _makes_others_wait(succ, r)
+        for sp in low.spans:  # r clocks s for another party's lead block that falls through to it
+            if sp.lead and sp.end == s.pc and r not in sp.roles and any(
+                    t.clocked and t.clk_owner == r and t.prof.bounded
+                    for t in (steps.get(pc) for pc in range(sp.start, sp.end)) if t is not None):
+                return False  # the leader's bounded step there gets s's edges: it times out while r stalls
     if s.prof.bounded:
         return False
     if s.op == Op.COND:
@@ -877,10 +884,11 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
                 return
             c_hi = c_start[1]
             first = (max(0, c_hi) + p.nom if s.cpha == 0 else max(p.nom, c_hi)) + E
+            df = drift(ppm, amax + first)  # the follower's timeout runs until that edge
             for r in st:
-                if not s.is_clk_owner(r) and first + dr - st[r][0] > p.max + Q:
+                if not s.is_clk_owner(r) and first + df - st[r][0] > p.max + Q:
                     diags.add("T3-latency", pc, f"{r.name} may start at {st[r][0]} and time out: the first "
-                                                f"clock edge may be visible only at {first} (drift {dr}), "
+                                                f"clock edge may be visible only at {first} (drift {df}), "
                                                 f"past max {p.max} + QUANT after it")
             if p.nom + drift(ppm, p.nom) > p.max + Q:
                 diags.add("T3-latency", pc, f"a clock phase of {p.nom} plus drift outlasts max {p.max} + "
