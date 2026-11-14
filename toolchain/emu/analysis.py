@@ -521,6 +521,12 @@ def _anchor_states(low: Lowered, steps: dict[int, _Step], diags: _Diags) -> dict
     instrs = low.instrs
     state: dict[int, set[tuple[int, int, int]]] = {0: {(0, 0, 0)}}
     work = [0]
+    # an abort or a bus exit restarts at abort_pc, where the first timed step re-anchors (T5-abort):
+    # seed it too, or code only an abort reaches gets no T1/T2 check
+    apc = low.image.abort_pc
+    if apc and any(s.abort for s in steps.values()):  # S-label: abort_pc names a step
+        state.setdefault(apc, set()).add((0, 0, 0))
+        work.append(apc)
     while work:
         pc = work.pop()
         out = {_advance(steps.get(pc), t) for t in state[pc]}
@@ -529,7 +535,7 @@ def _anchor_states(low: Lowered, steps: dict[int, _Step], diags: _Diags) -> dict
             new = out - cur
             if not new:
                 continue
-            if any(t[0] > A_CAP for t in new) or len(cur) + len(new) > SET_CAP:
+            if any(t[0] > A_CAP for t in new) or len(cur | new) > SET_CAP:
                 diags.add("T1-unanchored", s, "the timeline is never re-anchored around this loop; "
                                               "add a followed COND or a clocked XFER")
                 continue
