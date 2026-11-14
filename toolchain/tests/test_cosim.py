@@ -252,7 +252,7 @@ def test_act_reads_running_through_one_flop():
     assert act(t, 0, range(-1, h + 4)) == [0, 0, 0] + [1] * h + [0, 0]
 
 
-def test_act_stays_1_without_a_halt():
+def test_act_stays_1_while_the_engine_never_halts():
     d = Description("t", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     d.cond("fall", ln, owner="a")  # unbounded, and no one makes the fall

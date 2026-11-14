@@ -304,6 +304,7 @@ def compile_desc(desc: Description, *, check_timing: bool = True, check_levels: 
     if not diags:
         from . import analysis  # imports this module; deferred to avoid a cycle
         diags += analysis.check_branches(desc, low)
+        diags += analysis.check_end(desc, low)
         if check_levels:
             diags += analysis.check_levels(desc, low)
         if check_timing:

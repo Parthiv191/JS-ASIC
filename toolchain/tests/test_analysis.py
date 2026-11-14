@@ -572,49 +572,93 @@ def test_t5_stall_checks_code_reached_only_from_abort_pc():
 
 
 # ---------------------------------------------------------------- S-end: nothing runs past the last word
-def _ends(tail):
+def s_end_pcs(desc, says=""):
+    """The pcs S-end flags (each message saying `says`), and the other rules that fired."""
+    try:
+        compile_desc(desc, check_timing=False, check_levels=False)
+    except CompileError as e:
+        ends = [d for d in e.diags if d.rule == "S-end"]
+        assert all(says in d.msg for d in ends), [d.msg for d in ends]
+        return sorted(int(d.msg.split()[1].rstrip(":")) for d in ends), {d.rule for d in e.diags} - {"S-end"}
+    return [], set()
+
+
+def test_s_end_rejects_a_fall_through_past_the_last_word():
+    """isa §5 S-end: the chip has no program length, so past the last word it would run whatever
+    the SRAM holds; the model halts there. A program whose last step can fall through is rejected:
+    a timed step, or a conditional branch."""
     d, ln, p = two_party()
     d.hold(ln, 1, owner="a", prof=p)
-    tail(d, ln, p)
-    return d
+    assert s_end_pcs(d, says="runs past the program's last word here") == ([0], set())
+    d, ln, p = two_party()
+    d.li("r0", 1)
+    d.label("top")
+    d.hold(ln, 1, owner="a", prof=p)
+    d.br("top", cond="nz", reg="r0")
+    assert s_end_pcs(d) == ([2], set())
 
 
-@pytest.mark.parametrize("tail", [
-    lambda d, ln, p: None,                                               # falls through
-    lambda d, ln, p: d.br("top", cond="nz", reg="r0"),                   # a conditional branch last
-    lambda d, ln, p: d.raw_jpin(ln, 1, "top"),                           # in a role block, below
-])
-def test_s_end_rejects_a_path_past_the_last_word(tail):
-    """isa §5 S-end: the chip has no program length, so past the last word it would run whatever the
-    SRAM holds; the model halts there. A program that can get there is rejected."""
-    def body(d, ln, p):
-        d.li("r0", 0)
-        d.label("top")
-        with d.only("a"):
-            d.nop()
-            tail(d, ln, p)
-    rules = diag_rules(_ends(body), check_timing=False)
-    assert "S-end" in rules
+def test_s_end_rejects_a_jpin_that_falls_through_past_the_last_word():
+    """A RAW JPIN (role blocks only, here back to its block's head) falls through when its pin
+    doesn't match."""
+    d, ln, p = two_party()
+    d.hold(ln, 1, owner="a", prof=p)
+    with d.only("a", "b", "mon"):
+        d.label("w")
+        d.raw_jpin(ln, 1, "w")
+    assert s_end_pcs(d) == ([2], set())
 
 
-def test_s_end_rejects_a_role_block_that_skips_to_the_end():
-    """The roles a block skips land past it: if the block is last, past the program."""
+def test_s_end_follows_a_jpin_to_its_target():
+    """Code reached only by a JPIN's jump (to pc 3, odd) is walked too: there the last word falls
+    through. The JPIN is pc 1 (after the ROLE_IF), the HALT pc 2."""
+    d, ln, p = two_party()
+    with d.only("a", "b", "mon"):
+        d.raw_jpin(ln, 1, "x")
+        d.halt()
+    d.label("x")
+    d.hold(ln, 1, owner="a", prof=p)
+    assert s_end_pcs(d) == ([3], set())
+
+
+def test_s_end_ignores_dead_code_after_a_halt():
+    """Only paths count: a step nothing reaches may sit last. (RAW DELAY 2's operand is no target,
+    though it equals the dead step's pc.)"""
+    d, ln, p = two_party()
+    d.raw_delay(2)
+    d.halt()
+    d.hold(ln, 1, owner="a", prof=p)
+    assert s_end_pcs(d) == ([], set())
+
+
+def test_s_end_rejects_a_role_block_that_others_skip_past_the_end():
+    """The roles a block excludes skip past it: if it is last, past the program (the ROLE_IF)."""
     d, ln, p = two_party()
     d.hold(ln, 1, owner="a", prof=p)
     with d.only("a"):
         d.halt()
-    assert diag_rules(d, check_timing=False) == {"S-end"}
+    assert s_end_pcs(d, says="skips this role block") == ([1], set())
 
 
-@pytest.mark.parametrize("last", ["halt", "loop"])
-def test_s_end_accepts_a_halt_or_a_loop_at_the_end(last):
+def test_s_end_rejects_an_empty_program():
+    """No words at all: the chip's first fetch is already past the end."""
+    d, ln, p = two_party()
+    assert s_end_pcs(d) == ([0], set())
+
+
+@pytest.mark.parametrize("last", ["halt", "loop", "each_role_halts"])
+def test_s_end_accepts_every_role_ending_in_a_halt_or_a_loop(last):
+    """Each role's own path counts: a HALT in every role's own block runs nobody past the end."""
     d, ln, p = two_party()
     d.label("top")
     d.hold(ln, 1, owner="a", prof=p)
-    with d.only("a"):
-        d.li("r1", 1)
     if last == "halt":
         d.halt()
-    else:
+    elif last == "loop":
         d.br("top")
-    assert diag_rules(d, check_timing=False) == set()
+    else:
+        with d.only("a"):
+            d.halt()
+        with d.only("b", "mon"):
+            d.halt()
+    assert s_end_pcs(d) == ([], set())
