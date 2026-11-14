@@ -3,6 +3,7 @@
 are isa §5-6."""
 import pytest
 
+from emu.analysis import BIG, drift
 from emu.compiler import CompileError, compile_desc
 from emu.desc import Description
 from emu.isa import INF
@@ -199,8 +200,11 @@ def test_t4_needs_nom_at_least_1_for_a_hold(nom, bad):
     assert ("T4-profile" in rules(d)) == bad
 
 
-def clocked(H: int, ppm: int = 20000, mn: int = 0, mx: int = INF, chk: bool = False) -> Description:
-    """a clocks a lane whose data it owns too, half period H; b follows the clock."""
+def clocked(H: int, ppm: int = 20000, mn: int = 0, mx: int = INF, chk: bool = False,
+            cs_hold: int = 0, late: int = 0, up: int = 0) -> Description:
+    """a clocks a lane whose data it owns too, half period H; b follows the clock. Between a's COND
+    FALL on cs and the XFER: a HOLDs cs low for `cs_hold` (± 2), and b and MON run `late` NOPs.
+    After it a HOLDs cs high for `up`."""
     d = Description("c", parties=("a", "b"), tolerance_ppm=ppm)
     clk = d.line("clk", owner="a", idle=0)
     dat = d.line("dat", owner="a", idle=0)
@@ -208,8 +212,16 @@ def clocked(H: int, ppm: int = 20000, mn: int = 0, mx: int = INF, chk: bool = Fa
     lane = d.lane("L", data=dat, clk=clk)
     d.li("r0", 0x5A)
     d.cond("fall", cs, owner="a", prof=d.profile("SU", nom=40, min=0, max=INF))
+    if cs_hold:
+        d.hold(cs, 0, owner="a", prof=d.profile("CS", nom=cs_hold, min=cs_hold - 2, max=cs_hold + 2))
+    if late:
+        with d.only("b", "mon"):
+            for _ in range(late):
+                d.nop()
     d.xfer(8, lane, owner="a", prof=d.profile("HALF", nom=H, min=mn, max=mx), src="r0", dst="r1",
            check=chk)
+    if up:
+        d.hold(cs, 1, owner="a", prof=d.profile("UP", nom=up, min=0, max=INF))
     d.halt()
     return d
 
@@ -353,8 +365,177 @@ def test_pair_checks_start_after_a_step_at_its_completion_plus_1_or_issue():
         "pc 5: P1 starts watching at 13 but the event is visible at 6 (drift 0)"]
 
 
-def test_t5_overrun_at_pc_0_names_the_owner_s_start_at_2():
+@pytest.mark.parametrize("nom,bad", [(0, False), (1, True), (2, False)])
+def test_t5_overrun_at_pc_0_names_the_owner_s_start_at_2(nom, bad):
+    """isa §6 T5-overrun: a bounded COND's owner starts by its planned action at nom, or by ISSUE
+    when nom = 0. At pc 0 it starts at 2: nom 2 and nom 0 pass, nom 1 fails."""
     d, ln = two_party()
-    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=1, min=0, max=40))
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=nom, min=0, max=40))
     d.halt()
-    assert msgs(d, "T5-overrun") == ["pc 0: owner starts at 2, after the planned action at 1"]
+    assert msgs(d, "T5-overrun") == (["pc 0: owner starts at 2, after the planned action at 1"] if bad else [])
+
+
+@pytest.mark.parametrize("mn,mx,bad", [(8, 12, False), (9, 12, True), (8, 11, True)])
+def test_t2_a_bounded_cond_s_window_holds_its_event_plus_minus_drift_and_quant(mn, mx, bad):
+    """isa §6 T2 for a COND: [min, max] holds [event − drift − QUANT, latest action + drift +
+    QUANT]. At pc 0 with nom 10 both are at max(10, 2) = 10, and the drift is ceil(0.02·10) = 1,
+    so the window must hold [8, 12]."""
+    d, ln = two_party()
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=10, min=mn, max=mx))
+    d.halt()
+    assert msgs(d, "T2-window") == ([f"pc 0: window [{mn},{mx}] does not contain [8,12]"] if bad else [])
+
+
+# ---------------------------------------------------------------- the pair checks: clocked XFER
+@pytest.mark.parametrize("H,bad", [(2, True), (3, False)])
+def test_t5_watch_a_clock_follower_starts_by_the_first_edge(H, bad):
+    """After a's COND FALL b starts at the latest at EDGE_LAT + ISSUE = 5. With drift ceil(0.02·H)
+    = 1 that must not pass the first edge, visible at H + EDGE_LAT: H = 3 (6) passes, H = 2 (5)
+    fails."""
+    want = ["pc 2: P1 starts at 5, after the first clock edge is visible at 5"]
+    assert msgs(clocked(H), "T5-watch") == (want if bad else [])
+
+
+@pytest.mark.parametrize("mx,bad", [(10, True), (11, False)])
+def test_t3_a_bounded_clock_follower_times_the_first_edge_from_its_own_start(mx, bad):
+    """isa §4.1: a bounded clock follower counts max from its own start. a starts at the latest at
+    0 + ISSUE = 2 and b at the earliest at EDGE_LAT + 1 = 4. a's first edge (cpha 0) is at 2 + H =
+    12, visible at 15, and the drift is ceil(0.02·10) = 1: 15 + 1 − 4 = 12 must not pass
+    max + QUANT."""
+    want = ["pc 2: P1 may start at 4 and time out: the first clock edge may be visible only at 15 "
+            "(drift 1), past max 10 + QUANT after it"]
+    assert msgs(clocked(10, mx=mx), "T3-latency") == (want if bad else [])
+
+
+@pytest.mark.parametrize("mx,bad", [(15, True), (16, False)])
+def test_t3_a_clock_owner_that_starts_early_re_bases_to_the_step_start(mx, bad):
+    """After its CS HOLD (16) a starts at the latest at 2 − 16 + ISSUE = −12, before the step: it
+    re-bases to 0 (cpha 0), so its first edge is at 0 + H = 10, visible at 13. b followed the HOLD
+    to its sample at 8 + EDGE_LAT and starts at the earliest at −16 + 11 + 1 = −4, so
+    13 − (−4) = 17 must not pass max + QUANT (0 ppm)."""
+    want = ["pc 3: P1 may start at -4 and time out: the first clock edge may be visible only at 13 "
+            "(drift 0), past max 15 + QUANT after it"]
+    assert msgs(clocked(10, ppm=0, mx=mx, cs_hold=16), "T3-latency") == (want if bad else [])
+
+
+@pytest.mark.parametrize("H,bad", [(50, False), (51, True)])
+def test_t3_each_clock_phase_plus_drift_fits_a_bounded_follower_s_max(H, bad):
+    """isa §4.1: after the first edge a bounded clock follower counts max from each edge, so
+    H + ceil(0.02·H) ≤ max + QUANT, here with max = H: 50 + 1 passes, 51 + 2 fails. (b and MON
+    start late, after a NOP, so the first edge's timeout from their start passes.)"""
+    want = ["pc 4: a clock phase of 51 plus drift outlasts max 51 + QUANT: a bounded clock follower "
+            "would time out"]
+    assert msgs(clocked(H, mx=H, late=1), "T3-latency") == (want if bad else [])
+
+
+# ---------------------------------------------------------------- the pair checks: HOLD
+@pytest.mark.parametrize("n,bad", [(4, True), (6, False)])
+def test_t5_watch_a_hold_s_follower_starts_by_its_sample(n, bad):
+    """isa §6 T5-watch for a HOLD (or an unclocked XFER): the follower's latest start plus drift
+    must not pass its first sample at nom//2 + EDGE_LAT. After a clocked XFER (an anchor) b starts
+    at the latest at EDGE_LAT + ISSUE = 5, and the drift is ceil(0.02·n) = 1: n = 4 (sample 5)
+    fails, n = 6 (sample 6) passes."""
+    want = ["pc 3: P1 starts at 5, after its first sample at 5"]
+    assert msgs(clocked(10, up=n), "T5-watch") == (want if bad else [])
+
+
+# ---------------------------------------------------------------- drift, and the control flow
+@pytest.mark.parametrize("ppm,x,want", [(20000, 0, 0), (20000, 50, 1), (20000, 51, 2),
+                                        (1, 10**6, 1), (1, 10**6 + 1, 2)])
+def test_drift_is_ppm_times_x_over_a_million_rounded_up(ppm, x, want):
+    """isa §6: drift(x) = ceil(ppm·x / 10^6)."""
+    assert drift(ppm, x) == want
+
+
+def test_a_jpin_jumps_to_its_target_at_an_odd_pc():
+    """b's block: NOP, JPIN to pc 5 (odd), BR to the block's exit, then 3 NOPs at pcs 5-7. b's
+    slowest path, through the jump, costs 2 (ROLE_IF) + 2 + 2 + 3·2 = 12, so it starts a's COND
+    RISE at the latest at EDGE_LAT + ISSUE + 12 = 17."""
+    d, ln = two_party()
+    d.cond("fall", ln, owner="a")
+    with d.only("b"):
+        d.nop()
+        d.raw_jpin(ln, 0, "late")
+        d.br("go")
+        d.label("late")
+        for _ in range(3):
+            d.nop()
+    d.label("go")
+    d.cond("rise", ln, owner="a", prof=d.profile("W", nom=0, min=0, max=INF))
+    d.halt()
+    assert msgs(d, "T5-watch") == ["pc 8: P1 starts watching at 17 but the event is visible at 6 (drift 0)"]
+
+
+def test_the_others_skip_a_role_block_that_halts():
+    """The roles of a block that HALTs stop there, and the others skip it, so the code after it is
+    still walked: by R2 (r0 from a POP can differ between roles), and for the anchor states (a CHK
+    XFER at reset's anchor)."""
+    d, ln = two_party()
+    d.pop("r0")
+    with d.only("b"):
+        d.halt()
+    d.br("x", cond="nz", reg="r0")
+    d.label("x")
+    d.halt()
+    assert rules(d) == {"R2-branch"}
+    d, ln = two_party()
+    with d.only("b"):
+        d.halt()
+    d.xfer(8, ln, owner="a", prof=d.profile("X", nom=16, min=14, max=18), check=True)
+    d.halt()
+    (m,) = msgs(d, "T2-window")
+    assert m.startswith(f"pc 2: {AT_ANCHOR}")
+
+
+# ---------------------------------------------------------------- gaps: when the walk gives up
+def diamonds(k: int) -> Description:
+    """k optional NOPs (a BR over each) between a's COND FALL and its unbounded COND RISE (nom
+    100): 2^k paths."""
+    d, ln = two_party()
+    d.li("r0", 1)
+    d.cond("fall", ln, owner="a")
+    for i in range(k):
+        d.br(f"s{i}", cond="nz", reg="r0")
+        d.nop()
+        d.label(f"s{i}")
+    d.cond("rise", ln, owner="a", prof=d.profile("W", nom=100, min=0, max=INF))
+    d.halt()
+    return d
+
+
+UNBOUNDED_B = f"P1 starts watching at {BIG + 5} but the event is visible at 103 (drift 2)"
+
+
+@pytest.mark.parametrize("k,bad", [(12, False), (13, True)])
+def test_gaps_follow_at_most_4096_paths_then_count_the_gap_unbounded(k, bad):
+    """PATH_CAP = 4096: 12 diamonds make 4096 paths, all followed (b starts by 3 + 2 + 12·4 = 53);
+    13 make 8192, and the walk gives up: b may start at any time (BIG)."""
+    assert msgs(diamonds(k), "T5-watch") == ([f"pc {2 + 2 * k}: {UNBOUNDED_B}"] if bad else [])
+
+
+def test_an_untimed_loop_makes_the_gap_unbounded():
+    """A loop with no timed step (NOP, BR Z back) can run any number of times: b may reach the
+    COND after it at any time."""
+    d, ln = two_party()
+    d.li("r0", 1)
+    d.cond("fall", ln, owner="a")
+    d.label("loop")
+    d.nop()
+    d.br("loop", cond="z", reg="r0")
+    d.cond("rise", ln, owner="a", prof=d.profile("W", nom=100, min=0, max=INF))
+    d.halt()
+    assert msgs(d, "T5-watch") == [f"pc 4: {UNBOUNDED_B}"]
+
+
+# ---------------------------------------------------------------- T5-stall
+def test_t5_stall_looks_only_at_lead_blocks_the_staller_leads():
+    """After b's POP (in an only block) and a NOP, b's own unbounded COND makes the others wait.
+    The POP's block is no lead block, so where it ends decides nothing."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="b", idle=1)
+    with d.only("b"):
+        d.pop("r1")
+    d.nop()
+    d.cond("fall", ln, owner="b", prof=d.profile("G", nom=10, min=0, max=INF))
+    d.halt()
+    assert diags(d) == []
