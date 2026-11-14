@@ -491,9 +491,12 @@ program sees.
 ## 6. Timing rules (compiler)
 
 `d = tolerance_ppm / 1e6`. `A` = nominal cycles since the last guaranteed anchor, the max over CFG
-paths. Anchors are a followed COND (START/STOP included), a clocked XFER, and an exit into
-`abort_pc` from a bus event or a lead block. HOLD and unclocked XFER add their duration. `A`
-unbounded around a loop fails `T1-unanchored`.
+paths. Anchors are reset, a followed COND (START/STOP included), a clocked XFER, and an exit into
+`abort_pc` from a bus event or a lead block. Code that only an abort or a bus exit reaches (after a
+HALT) is checked from `abort_pc` at `A = 0`, when a step has ABORT: a fatal abort's restart isn't
+synced to the owner, but T5-abort makes the first timed step there re-anchor. HOLD and unclocked
+XFER add their duration. `A` unbounded around a loop fails `T1-unanchored`, as does `A` past 2^22
+(the 24-bit clamp, §4.1) or more than 64 distinct `(A, window)` states at one step (the checker's limit).
 
 `L` (used in T3) = the start cycle of a step relative to its `tb`. That is the predecessor's
 completion offset + `ISSUE` + `U` × (untimed instructions between them), worst case over paths,

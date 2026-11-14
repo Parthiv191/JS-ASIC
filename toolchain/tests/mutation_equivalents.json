@@ -86,5 +86,11 @@
  {"file": "emu/model/engine.py", "func": "Engine._op_xfer", "desc": "statement -> pass", "code": "fresh = False", "nth": 0,
   "why": "the loop yields once per pass, so fresh is True on every pass that checks it"},
  {"file": "emu/model/engine.py", "func": "Engine._xfer_clocked", "desc": "and -> or", "code": "if drives and cpha == 1:", "nth": 0,
-  "why": "launch_bit drives only the lines the engine owns, so a non-driver's launch does nothing, and a cpha-0 driver's extra launch at leading edge k repeats the bit k it launched at the trailing edge before"}
+  "why": "launch_bit drives only the lines the engine owns, so a non-driver's launch does nothing, and a cpha-0 driver's extra launch at leading edge k repeats the bit k it launched at the trailing edge before"},
+ {"file": "emu/analysis.py", "func": "check_timing", "desc": "0 -> 1", "code": "(_advance(prev, t)[0] for t in states.get(prev.pc, set())), default=0)", "nth": 1,
+  "why": "a step the pair checks reach has anchor states from the same entries (pc 0, and abort_pc with an ABORT step), unless T1-unanchored cut the walk short before it, and that rejects the program already"},
+ {"file": "emu/analysis.py", "func": "_check_stalls", "desc": "1 -> 0", "code": "for nxt in sorted(gaps(instrs, timed, pc + 1, r)):", "nth": 0,
+  "why": "gaps from the POP itself: a POP is untimed, so the next timed steps on every path are those from pc + 1"},
+ {"file": "emu/analysis.py", "func": "_check_stalls", "desc": "+ -> -", "code": "for nxt in sorted(gaps(instrs, timed, pc + 1, r)):", "nth": 0,
+  "why": "a POP outside a block runs in MON, which T5-stall rejects anyway; in a block, pc - 1 is its ROLE_IF or an untimed instruction (same next steps), or a timed step of the same lead block, whose verdict is the block successor's, as the POP's next step's is"}
 ]
