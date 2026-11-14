@@ -205,7 +205,7 @@ def test_every_timed_step_clears_to_when_it_starts(step):
 def test_a_stretch_timeout_without_abort_sets_to_and_falls_through():
     """isa §4.3: the clock owner's wait for a stretched clock is bounded by max, counted from the
     previous edge; a TIMEOUT(m) without ABORT sets `to` and ends the step, and the next
-    instruction runs (the setup of test_a_stretch_past_max_times_out)."""
+    instruction runs (the setup of test_a_stretch_past_max_times_out); tb := now re-anchors."""
     from test_engine_clocked import HS, stretch_desc, trailing
 
     def body(d, scl, sda, lane, prof):
@@ -219,6 +219,7 @@ def test_a_stretch_timeout_without_abort_sets_to_and_falls_through():
     (ev,) = [e for e in t.engines[0].events if e.kind == "TIMEOUT"]
     assert ev.measured == HS + 4 + QUANT + 1 and "ABORT" not in kinds(t, 0)
     assert s.engines[0].to and t.engines[0].regs[2] == 7 and t.engines[0].halted
+    assert s.engines[0].tb == s.engines[0].anchor == ev.cycle
 
 
 def test_clk_phase_is_checked_only_with_chk():
@@ -244,6 +245,49 @@ def test_raw_jpin_lands_on_an_odd_target():
     d.halt()
     e = follower(d, lambda t: [1], 40, role=Role.P0)
     assert [pc for pc, _ in e.starts] == [0, 1, 3, 4] and e.regs[1] == 7
+
+
+@pytest.mark.parametrize("level", [0, 1])
+def test_raw_jpin_compares_the_line_with_its_level_bit(level):
+    """isa §3: RAW JPIN line, level jumps iff the line reads `level` (operand [11]); here 0."""
+    d = Description("j0", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    with d.only("b"):
+        d.raw_jpin(ln, 0, "x")
+        d.li("r1", 1)
+    d.label("x")
+    d.halt()
+    e = follower(d, lambda t: [level], 40)
+    assert e.regs[1] == level  # taken, so r1 stays 0, when the line reads 0
+
+
+def test_raw_set_drives_its_level_bit():
+    """isa §3: RAW SET drives operand [0]: a 0, then a 1, so the line falls and rises."""
+    d = Description("s", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    with d.only("a"):
+        d.raw_set(ln, 0)
+        d.raw_delay(4)
+        d.raw_set(ln, 1)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,))
+    assert len(t.wire_edges[0]) == 2
+
+
+def test_alu_reads_rb_and_shifts_by_b_and_15():
+    """isa §3: ALU with REG takes b from rb ([2:0]); SHL and SHR shift by b & 15."""
+    d = Description("alu", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    d.li("r1", 5)
+    d.li("r2", 3)
+    d.alu("add", "r3", "r1", "r2")
+    d.alu("shl", "r4", "r1", 1)
+    d.alu("shr", "r5", "r1", 1)
+    d.li("r6", 17)
+    d.alu("shl", "r7", "r1", "r6")
+    d.halt()
+    e = follower(d, lambda t: [1], 60)
+    assert e.regs[3:8] == [8, 10, 2, 17, 10]
 
 
 def test_a_followed_stop_that_sees_start_keeps_waiting_without_abort():
@@ -577,3 +621,416 @@ def test_a_done_xfer_bit_0_after_an_li_overruns_by_4(kind):
     """After an LI, bit 0 goes out at now = 4 with tb = 0: OVERRUN(4); bit 1 is on time."""
     t = late_xfer(kind, head=True)
     assert [(e.kind, e.measured) for e in t.engines[0].events] == [("OVERRUN", 4)]
+
+
+# ---------------------------------------------------------------- the bus flags and RUN
+def test_start_and_stop_set_evt_bits_0_and_1_and_raw_evt_clears_only_its_mask():
+    """isa §4.7: a confirmed START sets evt bit 0, a STOP bit 1; RAW EVT rd, mask reads evt, then
+    clears only the masked bits, the bus flags included (isa §4.1). P1 sees CS fall and rise on a
+    SELECT bus during a RAW DELAY, then reads evt twice, clearing STOP the first time."""
+    d = Description("ev", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    d.bus("select", cs)
+    with d.only("b"):
+        d.raw_delay(60)
+        d.raw_evt("r1", 0b10)
+        d.raw_evt("r2", 0)
+    d.halt()
+    e = follower(d, lambda t: [0 if 10 <= t < 30 else 1], 120)
+    assert (e.regs[1], e.regs[2], e.evt) == (0b11, 0b01, 0b01)
+
+
+def test_a_start_flag_kept_across_run_completes_a_followed_start_at_once():
+    """isa §4.0-4.1: evt survives RUN (all six bits), and RUN sets the anchors, start_e and stop_e
+    too, to 0. A START flag left from the last run completes instruction 0, a followed START, in
+    its start cycle: m = start_e - tb = 0, tb := 0, and both flags clear."""
+    assert Engine(select_desc(dict(nom=0, min=0, max=INF)), Role.P1, evt=0x3F).evt == 0x3F
+    e = Engine(select_desc(dict(nom=0, min=0, max=INF)), Role.P1, evt=0b01)
+    for _ in range(20):
+        e.cycle([1, 1])
+    rec = e.records[0]
+    assert (rec.op, rec.cycle, rec.tb, e.regs[1], e.evt) == ("COND", 2, 0, 0, 0)
+
+
+@pytest.mark.parametrize("kind", ["start", "stop"])
+def test_the_bus_anchors_trail_now_by_at_most_the_clamp(monkeypatch, kind):
+    """isa §4.7: start_e and stop_e take part in the 24-bit clamp. With the clamp at 64, a flag
+    confirmed long before its followed COND anchors it 64 cycles back from now, as tb is."""
+    import emu.model.engine as engine_mod
+    monkeypatch.setattr(engine_mod, "TIME_CLAMP", 64)
+    d = Description("cl", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    d.bus("select", cs)
+    with d.only("b"):
+        d.raw_delay(300)
+    d.cond(kind, owner="a", prof=d.profile("W", nom=0, min=0, max=INF))
+    d.halt()
+    e = follower(d, lambda t: [0 if 10 <= t < 30 else 1], 400, check_levels=False)
+    (rec,) = e.records
+    assert rec.cycle > 300 and rec.tb == rec.cycle - 64
+
+
+def test_with_confirm_0_a_candidate_is_confirmed_in_its_own_cycle():
+    """isa §4.7 with bus_confirm 0: the window is empty, so an edge is confirmed in the cycle it
+    is a candidate, anchor c - EDGE_LAT. A one-cycle CS pulse sets START and then STOP; were the
+    fall left a candidate for a cycle, the rise would drop it."""
+    d = Description("c0", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    d.bus("select", cs, confirm=0)
+    with d.only("b"):
+        d.raw_delay(60)
+        d.raw_evt("r1", 0)
+    d.halt()
+    e = follower(d, lambda t: [0 if t == 10 else 1], 120)
+    assert e.bus_events == [(12, "START"), (13, "STOP")]
+    assert (e.regs[1], e.start_e, e.stop_e) == (0b11, 12 - EDGE_LAT, 13 - EDGE_LAT)
+
+
+def test_a_bus_exit_restarts_tb_for_the_step_at_abort_pc():
+    """isa §4.7: a bus exit sets tb := now. P1 follows a long HOLD with ABORT; CS falls during it
+    (START: a bus exit), and the followed STOP at abort_pc, bounded by max 40, counts from the
+    exit: CS rises 30 cycles after it fell, inside the bound, and MEAS is stop_e - the exit."""
+    d = Description("bx", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    u = d.line("u", owner="a", idle=1)
+    d.bus("select", cs)
+    d.abort_to("top")
+    d.hold(u, 1, owner="a", prof=d.profile("LONG", nom=400, min=0, max=INF), abort=True)
+    d.halt()
+    d.label("top")
+    d.cond("stop", owner="a", prof=d.profile("W", nom=0, min=0, max=40), meas="r1")
+    d.halt()
+    e = follower(d, lambda t: [0 if 100 <= t < 130 else 1, 1], 300, check_levels=False)
+    assert kinds_of(e) == ["BUS"] and e.halted
+    bus = e.events[0]
+    stop = e.records[-1]
+    assert stop.op == "COND" and e.regs[1] == stop.tb - bus.cycle > 0
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_a_flag_set_after_a_timed_step_with_abort_is_no_bus_exit(fail):
+    """isa §4.7: a flag set during a timed step with ABORT is a bus exit; set during the untimed
+    instructions after it, it is not, whether the step completed or ended in a fatal abort. P1
+    follows a's HOLD with ABORT, which passes (or reads 0: LEVEL, ABORT), then runs a RAW DELAY
+    during which CS falls."""
+    d = Description("nx", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    u = d.line("u", owner="a", idle=1)
+    d.bus("select", cs)
+    d.abort_to("top")
+    d.hold(u, 1, owner="a", prof=d.profile("BIT", nom=P, min=P - 2, max=P + 2), abort=True)
+    d.label("top")
+    with d.only("b"):
+        d.raw_delay(60)
+    d.halt()
+    e = follower(d, lambda t: [0 if t >= 30 else 1, 0 if fail else 1], 120, check_levels=False)
+    assert kinds_of(e) == (["LEVEL", "ABORT"] if fail else [])
+    assert e.evt & 1 and e.halted
+
+
+# ---------------------------------------------------------------- the window anchor at RUN
+@pytest.mark.parametrize("rise", range(10, 26))
+def test_a_chk_edge_before_any_cond_is_checked_from_run(rise):
+    """isa §4.0: RUN sets the anchors to 0, so a CHK XFER after a HOLD at program start (A = nom,
+    legal by T2) checks its boundary-0 edge against the HOLD's [min, max] ± QUANT from 0. The line
+    is low from RUN and rises at `rise` (the engine sees the wire 2 cycles late: e = rise - 1)."""
+    d = Description("r0", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.xfer(4, ln, owner="a", prof=bit, src="ones", dst="r1", check=True)
+    d.halt()
+    e = follower(d, lambda t: [0 if t < rise else 1], 300, check_levels=False)
+    m = rise - 1
+    assert ("EDGE" in kinds_of(e)) == (not P - 2 - QUANT <= m <= P + 2 + QUANT)
+    assert e.regs[1] == 0xF
+
+
+# ---------------------------------------------------------------- owned COND
+@pytest.mark.parametrize("nom,head,want", [(0, False, []), (0, True, [("OVERRUN", 4)]),
+                                           (1, False, [("OVERRUN", 1)])])
+def test_a_done_cond_may_be_issue_late_only_at_offset_0(nom, head, want):
+    """isa §4.1: an owned action planned at its step's start (a COND with nom 0) may be up to
+    ISSUE late; any other is OVERRUN from one cycle late. Instruction 0 starts at now = 2 with
+    tb = 0, after an LI at 4."""
+    d = Description("l", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    if head:
+        d.li("r0", 0)
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=nom, min=0, max=nom + 10))
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,))
+    assert [(e.kind, e.measured) for e in t.engines[0].events] == want
+
+
+def test_a_done_cond_re_anchors_the_owners_chk_window():
+    """isa §4.3: a COND re-anchors the window, a done one too. P0 does a HOLD, a COND FALL and a
+    HOLD, then follows P1's CHK XFER of zeros, whose boundary-0 edge is one HOLD after the COND.
+    Checked from RUN instead, it would be the first HOLD and the COND's nom too late."""
+    d = Description("ra", parties=("a", "b"))
+    la = d.line("la", owner="a", idle=1)
+    lb = d.line("lb", owner="b", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    d.hold(la, 1, owner="a", prof=bit)
+    d.cond("fall", la, owner="a", prof=d.profile("W", nom=10, min=0, max=INF))
+    d.hold(la, 0, owner="a", prof=bit)
+    d.xfer(4, lb, owner="b", prof=bit, src="zero", dst="r1", check=True)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0, Role.P1))
+    assert not any(et.events for et in t.engines)
+    assert [r.mode for r in t.engines[0].records] == ["do", "do", "do", "follow"]
+
+
+def test_an_owned_cond_rise_on_a_plain_clock_completes_when_it_drives():
+    """isa §6: a done COND completes in its action cycle; only on a stretch lane's clock does a
+    RISE wait to read it (+E). A plain lane's clock is no stretch clock."""
+    d = Description("pc", parties=("a", "b"))
+    clk = d.line("c", owner="a", idle=0)
+    d.lane("L", d.line("d", owner="a", idle=1), clk=clk)
+    w = d.profile("W", nom=8, min=0, max=INF)
+    d.cond("rise", clk, owner="a", prof=w)
+    d.cond("fall", clk, owner="a", prof=w)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,))
+    assert [r.cycle - r.tb for r in t.engines[0].records] == [0, 0]
+
+
+# ---------------------------------------------------------------- followed COND
+def test_a_followed_cond_before_tb_is_early_with_min_1():
+    """m < 0 is below min - QUANT = 0 for min = 1, as for a followed START: the owner runs the
+    HOLD before the COND at half length, so the COND's edge comes before the follower's tb, and
+    MEAS clamps m to 0."""
+    d = Description("e1", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.hold(ln, 1, owner="a", prof=d.profile("H", nom=40, min=0, max=INF))
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=6, min=1, max=INF), meas="r1")
+    d.halt()
+    img = compile_desc(d, check_timing=False)
+    t = run_sys(img, images={0: img.with_profiles({"H": 0.5})}, roles=(Role.P0, Role.P1))
+    early = [e for e in t.engines[1].events if e.kind == "EARLY"]
+    assert len(early) == 1 and early[0].measured < 0 and t.engines[1].regs[1] == 0
+
+
+def test_a_followed_cond_timeout_counts_from_tb_and_re_anchors_at_tb_plus_nom():
+    """isa §4.2: TIMEOUT(m), m = now - EDGE_LAT - tb; without ABORT tb := tb + nom and the window
+    re-anchors there. A followed HOLD first, so tb = P when the COND starts."""
+    d = Description("t", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.hold(ln, 1, owner="a", prof=d.profile("BIT", nom=P, min=P - 2, max=P + 2))
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=20, min=0, max=30))
+    d.halt()
+    e = follower(d, lambda t: [1], 200)
+    (ev,) = e.events
+    assert ev.kind == "TIMEOUT" and ev.measured == 30 + QUANT + 1
+    assert e.tb == e.anchor == P + 20
+
+
+def test_a_fatal_abort_starts_abort_pc_on_the_next_own_cycle_plus_2_every_time():
+    """isa §4.0: abort_pc is fetched on the first own (even) cycle >= decision + 1 and starts 2
+    later; FZ_HANG_CYCLES is added only for an abort while the fuzz unit is armed. A bounded COND
+    with ABORT that is its own abort_pc times out again and again, each time as fast."""
+    d = Description("h", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.abort_to("top")
+    d.label("top")
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=4, min=0, max=6), abort=True)
+    d.halt()
+    e = follower(d, lambda t: [1], 200)
+    aborts = [ev.cycle for ev in e.events if ev.kind == "ABORT"]
+    starts = [now for _, now in e.starts]
+    assert len(aborts) >= 3
+    for c in aborts[:-1]:
+        fetch = c + 1 + ((c + 1) & 1)
+        assert min(s for s in starts if s > c) == fetch + 2
+
+
+# ---------------------------------------------------------------- stretch, COND RISE
+@pytest.mark.parametrize("abort", [False, True])
+def test_a_stretched_cond_rise_timeout_sets_to_or_aborts(abort):
+    """isa §4.3: a COND RISE done on a stretch clock is bounded by max from tb: TIMEOUT(m), m =
+    now - EDGE_LAT - tb, first past max + QUANT. Without ABORT `to` := 1, MEAS 0xFFFF, tb := now,
+    a re-anchor there, and the next instruction runs; with ABORT a fatal abort to abort_pc."""
+    from test_engine_clocked import HS, drive_cycles, stretch_img
+
+    def body(d, scl, sda, lane, prof):
+        d.cond("fall", scl, owner="a", prof=prof)
+        d.cond("rise", scl, owner="a", prof=prof, meas="r4", abort=abort)
+        d.li("r2", 7)
+    img = stretch_img(body=body, hi=HS + 4)
+    plain = run_sys(img)
+    s = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)],
+               glitches=[Glitch(0, drive_cycles(plain.wire_edges[0])[1] + 1, 60, 0)])
+    t = s.run(5000)
+    e = s.engines[0]
+    ev = t.engines[0].events[0]
+    assert ev.kind == "TIMEOUT" and ev.measured == HS + 4 + QUANT + 1
+    rise_pc = e.records[0].pc + 1
+    assert [pc for pc, _ in e.starts].count(rise_pc) == 1
+    if abort:
+        assert kinds(t, 0) == ["TIMEOUT", "ABORT"] and e.regs[2] == 0 and e.halted
+    else:
+        assert kinds(t, 0) == ["TIMEOUT"] and e.to and e.regs[4] == 0xFFFF and e.regs[2] == 7
+        assert e.tb == e.anchor == ev.cycle
+
+
+def test_a_cond_rise_on_a_stretch_clock_completes_edge_lat_after_its_release():
+    """isa §4.3: after a release at t the owner waits to read clk = 1 at c >= t + EDGE_LAT (§6:
+    +E). A RISE released 2 cycles after its FALL still reads the 1 from before the FALL then;
+    it waits for the real rise and completes EDGE_LAT after the release."""
+    from test_engine_clocked import stretch_img
+
+    def body(d, scl, sda, lane, prof):
+        d.cond("fall", scl, owner="a", prof=prof)
+        d.cond("rise", scl, owner="a", prof=d.profile("Z", nom=0, min=0, max=INF))
+    t = run_sys(stretch_img(body=body))
+    fall, rise = t.engines[0].records[:2]
+    assert rise.tb - fall.tb < EDGE_LAT and rise.cycle == rise.tb + EDGE_LAT
+
+
+# ---------------------------------------------------------------- unclocked XFER
+@pytest.mark.parametrize("lis,want", [(1, []), (2, [("OVERRUN", 2)])])
+def test_a_followed_hold_overruns_only_past_its_sample_cycle(lis, want):
+    """isa §4.3: a follower samples a HOLD at tb + nom//2 + EDGE_LAT; starting in that cycle is on
+    time, later is OVERRUN(now - planned). With nom 2 the sample is at 4: after one LI the HOLD
+    starts at 4, after two at 6."""
+    d = Description("h", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    for _ in range(lis):
+        d.li("r0", 0)
+    d.hold(ln, 1, owner="a", prof=d.profile("BIT", nom=2, min=1, max=3))
+    d.halt()
+    e = follower(d, lambda t: [1], 40)
+    assert [(ev.kind, ev.measured) for ev in e.events] == want
+
+
+def test_a_late_pp_owner_puts_each_bit_on_the_wire_for_a_cycle():
+    """isa §4.3: bit k goes out at max(now, tb + k·P), at most one bit per cycle, so an XFER
+    planned far in the past still shows every bit. Four LIs first: all three bits are late."""
+    d = Description("pp", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    for _ in range(3):
+        d.li("r0", 0)
+    d.li("r7", 0b010)
+    d.xfer(3, ln, owner="a", prof=d.profile("BIT", nom=2, min=1, max=3), src="r7", dst="discard")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,))
+    a, b, c = t.wire_edges[0]
+    assert (b - a, c - b) == (1, 1)
+
+
+def test_an_od_owner_drives_nothing_after_its_last_bit():
+    """An OD owner drives its n bits and reads each back; with P = 4 its last read comes after
+    the step's planned end, and it drives nothing more: ONES, so the line never falls."""
+    d = Description("od", parties=("a", "b"))
+    ln = d.line("l", "od", owner="a", idle=1)
+    d.xfer(2, ln, owner="a", prof=d.profile("BIT", nom=4, min=3, max=5), src="ones", dst="discard")
+    with d.only("a"):
+        d.raw_delay(20)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,))
+    assert t.wire_edges[0] == []
+
+
+def boundary_frame(n, value, **flags):
+    """LI r7 · COND fall · HOLD 0 · XFER n of r7 = value (flags), all a's."""
+    d = Description("bf", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    d.li("r7", value)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.xfer(n, ln, owner="a", prof=bit, src="r7", dst="r1", **flags)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("x", range(9, 14))
+def test_a_chk_edge_at_boundary_1_is_early_below_the_accumulated_min(x):
+    """isa §4.3: an edge seen before sample k sits at boundary k, checked against anchor + acc +
+    k·(min, max) ± QUANT. XFER 2 of 0b01 with CHK: the rise at boundary 0 is on time, the fall at
+    boundary 1 comes x after it (seen after sample 0 for x >= 9), so m = P + x from the COND:
+    EDGE below acc + min - QUANT = 2(P - 2) - QUANT."""
+    e = follower(boundary_frame(2, 0b01, check=True),
+                 lambda t: [0 if FALL <= t < FALL + P or t >= FALL + P + x else 1], 300)
+    assert ("EDGE" in kinds_of(e)) == (P + x < 2 * (P - 2) - QUANT)
+    assert e.regs[1] == 0b01
+
+
+def test_a_resync_at_boundary_2_ends_the_step_n_minus_2_bits_after_its_edge():
+    """isa §4.3: RESYNC re-anchors (a, ak) := (e, k) on an in-window edge, then tb := a + (n - ak)·P.
+    XFER 4 of 0b0011 with RESYNC: the fall at boundary 2 is 2 cycles late (in the window), so the
+    step ends 2 cycles late."""
+    e = follower(boundary_frame(4, 0b0011, resync=True),
+                 lambda t: [0 if FALL <= t < FALL + P or t >= FALL + 3 * P + 2 else 1], 300)
+    cond, hold, xfer = e.records
+    assert xfer.tb - cond.tb == 5 * P + 2 and e.regs[1] == 0b0011 and not e.events
+
+
+def test_an_xfer_accumulates_into_the_window_of_the_next_chk_xfer():
+    """isa §4.3: an unclocked XFER adds its n bits to the window as a HOLD adds one: COND fall ·
+    HOLD 0 · XFER 2 ONES · XFER 2 ZERO with CHK, whose boundary-0 fall is 3P after the COND."""
+    d = Description("ax", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=P, min=P - 2, max=P + 2)
+    d.cond("fall", ln, owner="a")
+    d.hold(ln, 0, owner="a", prof=bit)
+    d.xfer(2, ln, owner="a", prof=bit, src="ones", dst="r1")
+    d.xfer(2, ln, owner="a", prof=bit, src="zero", dst="r2", check=True)
+    d.halt()
+    e = follower(d, lambda t: [0 if FALL <= t < FALL + P or t >= FALL + 3 * P else 1], 300)
+    assert not e.events and (e.regs[1], e.regs[2]) == (0b11, 0)
+
+
+# ---------------------------------------------------------------- clocked XFER
+@pytest.mark.parametrize("h", [2, 3])
+def test_a_clock_owner_that_reads_back_makes_exactly_2n_edges(h):
+    """isa §4.3: a clocked XFER is 2n edges. An OD data owner reads its bits back, the last one
+    EDGE_LAT after the last trailing edge (cpha 1), so with H <= EDGE_LAT it waits past the last
+    edge, and makes no more: the clock ends at cpol."""
+    from test_engine_clocked import drive_cycles
+    d = Description("ce", parties=("a", "b"))
+    clk = d.line("c", owner="a", idle=0)
+    lane = d.lane("L", d.line("d", "od", owner="a", idle=1), clk=clk, cpol=0, cpha=1)
+    d.xfer(2, lane, owner="a", prof=d.profile("H", nom=h, min=h - 1, max=h + 1), src="ones", dst="r1")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), roles=(Role.P0,))
+    assert len(drive_cycles(t.wire_edges[0])) == 4 and t.engines[0].regs[1] == 0b11
+
+
+def test_a_stretch_timeout_lets_go_of_the_data_line_at_the_next_launching_edge():
+    """isa §4.3: a clocked XFER that times out lets go of the OD data line it drove as usual: it
+    keeps its last bit (a 0) until the lane's next launching edge, here the owner's COND FALL on
+    the clock after the timeout (cpha 1: the leading edge), and releases it there."""
+    from test_engine_clocked import HS, stretch_desc, trailing
+
+    def body(d, scl, sda, lane, prof):
+        d.xfer(8, lane, owner="a", prof=prof, src="zero", dst="r4")
+        d.cond("fall", scl, owner="a", prof=d.profile("W", nom=HS, min=0, max=INF))
+        with d.only("a"):
+            d.raw_delay(40)
+    kw = dict(check_timing=False, check_levels=False)
+    bounded = compile_desc(stretch_desc(hi=HS + 4, body=body), **kw)
+    free = compile_desc(stretch_desc(body=body), **kw)
+    s = System([EngineSpec(bounded, Role.P0), EngineSpec(free, Role.P1), EngineSpec(free, Role.MON)],
+               glitches=[Glitch(0, trailing(2) + 1, 40, 0)])
+    t = s.run(5000)
+    assert "TIMEOUT" in kinds(t, 0)
+    fall = next(r for r in t.engines[0].records if r.op == "COND")
+    assert fall.cycle + 1 in t.wire_edges[1]
+
+
+def test_a_let_go_follows_a_pp_clock_released_by_raw_rel():
+    """isa §4.3: the let-go runs whatever instruction is running and waits for the lane's next
+    launching edge as the clock owner drives it. With cpol 0, cpha 1 that is the clock going to 1,
+    here a RAW REL of the PP clock (the pull-up takes it to 1): the OD data's held 0 goes with it."""
+    d = Description("rr", parties=("a", "b"))
+    clk = d.line("c", owner="a", idle=0)
+    dat = d.line("d", "od", owner="a", idle=1)
+    lane = d.lane("L", dat, clk=clk, cpol=0, cpha=1)
+    d.xfer(2, lane, owner="a", prof=d.profile("H", nom=4, min=3, max=5), src="zero", dst="r1")
+    with d.only("a"):
+        d.raw_rel(clk)
+        d.raw_delay(40)
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False, check_levels=False), roles=(Role.P0,))
+    assert t.wire_edges[1][-1] == t.wire_edges[0][-1]

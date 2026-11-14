@@ -177,7 +177,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     planned at offset 0 (HOLD, XFER bit 0) then happens in its start cycle, and the timeline
     doesn't move. A COND instead sets `tb` to its action cycle, since followers anchor on its
     edge.
-  - Any other late action logs `OVERRUN(now − planned)` and happens immediately.
+  - Any other late action logs `OVERRUN(now − planned)` and happens as soon as it can (an XFER's
+    bits and samples still one per cycle, §4.3).
   - `IDLE` steps never overrun.
   - A clock owner's clocked XFER never overruns. Instead it sets `tb := max(tb, start − H)` for
     `cpha = 1`, and `tb := max(tb, start)` for `cpha = 0` (bit 0 at `max(start, tb)`, a full `H`
@@ -276,7 +277,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     checks at the step start, so the whole word is ONES.
 - Bit `k` is `value >> k` (LSB first) or `value >> (n−1−k)` (MSB).
 - **Unclocked lane** (`P = nom`):
-  - Do: bit `k` at `max(now, tb + k·P)`, then `tb := tb + n·P`.
+  - Do: bit `k` at the later of `tb + k·P` and one cycle after bit `k − 1` (bit 0: the later of
+    `tb` and the step's start), so a late bit still gets a cycle on the wire; then `tb := tb + n·P`.
   - Follow: sample bit `k` at `a + (k − ak)·P + P//2 + EDGE_LAT`, from the anchor `(a, ak)`
     (initially `(tb, 0)`).
   - At most one sample per cycle: bit `k` is sampled at the later of its planned cycle and one
@@ -318,7 +320,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 - **OD let-go.** After a clocked XFER in which it drove an OD data line `D` (also one that timed
   out after driving it):
   - the engine keeps the last bit until the lane's next launching edge as it sees it (the clock
-    owner: the cycle it drives that edge; others: the cycle they detect it). That is the next
+    owner: the cycle its drive of the clock goes to the launching level, a released clock
+    counting as 1, the pull-up; others: the cycle they detect it). That is the next
     leading edge with `cpha = 1`. With `cpha = 0` it is a trailing edge: for an XFER that ran to
     the end, its own last edge, because the next leading edge captures the next step's bit 0;
   - it releases `D` `ldelay` cycles after that edge (same rule as launch; after a stretched
