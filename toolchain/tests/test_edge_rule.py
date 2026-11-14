@@ -240,13 +240,71 @@ def H():
     return d
 
 
-@pytest.mark.parametrize("build", [A, B, C, D, E, F, G, H], ids=lambda f: f.__name__)
+# I: a timed step on another line opens the gate, so a RAW SET 0 on the gated line counts; the
+# others arrive after that fall (4 NOPs), so its owner's COND FALL makes no edge they see
+def I():
+    d = Description("I", parties=("a", "b"))
+    x = d.line("x", owner="a", idle=1)
+    g = d.line("g", owner="b", idle=1, gated=True)
+    d.cond("fall", x, owner="a", prof=d.profile("W0", nom=P, min=0, max=INF))
+    with d.only("b"):
+        d.raw_set(g, 0)
+    with d.only("a"):
+        for _ in range(4):
+            d.nop()
+    d.cond("fall", g, owner="b", prof=d.profile("W", nom=30, min=0, max=INF))
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("build", [A, B, C, D, E, F, G, H, I], ids=lambda f: f.__name__)
 def test_r2_edge_sees_every_partys_drive(build):
     """A: b still pulls a shared OD line low. B: a SHARED HOLD 0. C: a RAW SET 0 by the other party.
     D: a SELECT STOP releases a gated line. E: an I2C START with SCL low. F: the target's ACK
     let-go still holds SDA. G: an OD line with idle 0 starts released, at 1. H: RAW SET on a gated
-    line while its gate is shut does nothing."""
+    line while its gate is shut does nothing. I: once any timed step has opened the gate, it
+    drives the line."""
     assert "R2-edge" in rules(build())
+
+
+def gated_loop(set_level=None):
+    """b drives its gated line g low, then high (COND FALL, RISE), in a loop back to top. Reset
+    reaches top with the gate shut, the loop with g driven high. With `set_level`, b RAW SETs g
+    first, which the shut gate ignores on the first pass only."""
+    d = Description("gl", parties=("a", "b"))
+    g = d.line("g", owner="b", idle=1, gated=True)
+    w = d.profile("W", nom=P, min=0, max=INF)
+    d.label("top")
+    if set_level is not None:
+        with d.only("b"):
+            d.raw_set(g, set_level)
+    d.cond("fall", g, owner="b", prof=w)
+    d.cond("rise", g, owner="b", prof=w)
+    d.br("top")
+    return d
+
+
+@pytest.mark.parametrize("set_level,ok", [(None, True), (1, True), (0, False)])
+def test_a_gated_line_reads_1_where_a_shut_gate_meets_a_high_drive(set_level, ok):
+    """Released (gate shut) and driven high both read 1, so the loop's COND FALL is legal, and
+    after a RAW SET 1 too. A RAW SET 0 there is ignored on the first pass and drives g low on the
+    next ones: the level is unknown."""
+    d = gated_loop(set_level)
+    if not ok:
+        assert rules(d) == {"R2-edge"}
+        return
+    img = compile_desc(d)
+    from emu.model.engine import VIOLATIONS
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1)]).run(3000)
+    assert [e.kind for et in t.engines for e in et.events if e.kind in VIOLATIONS] == []
+    assert len([r for r in t.engines[0].records if r.op == "COND"]) > 100
+
+
+def test_a_timed_step_opens_the_gate_for_raw_set_on_the_model_too():
+    """I on the model: b's RAW SET drives g low, so b's COND FALL makes no edge and a waits."""
+    img = compile_desc(I(), check_levels=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1)]).run(50_000)
+    assert t.engines[1].halted and not t.engines[0].halted
 
 
 
