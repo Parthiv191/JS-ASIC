@@ -412,6 +412,7 @@ class _Step:
     n: int = 1
     clocked: bool = False
     clk_owner: Role | None = None
+    clk_line: int | None = None
     cpha: int = 0
     chk: bool = False
     abort: bool = False
@@ -459,7 +460,7 @@ def _steps(low: Lowered) -> dict[int, _Step]:
             lane = img.lanes[ins.line]
             kw["od"] = any(x is not None and img.lines[x].kind == "od" for x in (lane.data, lane.data2))
             if lane.clk is not None:
-                kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)),
+                kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)), clk_line=lane.clk,
                           ldelay=lane.ldelay, stretch=bool(lane.stretch), cpol=lane.cpol)
                 if lane.data2 is not None and img.lines[lane.data2].owner in (Owner.P0, Owner.P1):
                     kw["d2_owner"] = Role(int(img.lines[lane.data2].owner))
@@ -723,22 +724,40 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                                                   f"{confirm}, or it replaces that one's candidate")
             if s.owner_role is None:
                 continue  # SHARED steps: Phase 4 (ARB)
-            st = {}
-            for r in ROLES:
-                if nxt_pc in per_role[r]:
-                    lo, hi = per_role[r][nxt_pc]
-                    if prev is None:  # reset completes at 0, so instruction 0 starts at now = 2
-                        st[r] = (2 + lo, 2 + hi)
-                    else:             # the first own cycle >= c + 1: c + 1 or c + ISSUE (isa §4.0)
-                        c_lo, c_hi = completion(prev, r)
-                        st[r] = (c_lo + 1 + lo, c_hi + ISSUE + hi)
+            st = {r: _start(prev, r, *per_role[r][nxt_pc]) for r in ROLES if nxt_pc in per_role[r]}
             if s.owner_role not in st:
                 continue
+            clk = None  # the clock owner's start when it doesn't run s: its start of a lead block's S
+            if s.clocked and s.clk_owner not in st:
+                sp, succ = _lead_clock(low, steps, s)
+                if succ is not None and (prev is None or not sp.start <= prev.pc < sp.end)                         and sp.end in per_role[s.clk_owner]:
+                    clk = _start(prev, s.clk_owner, *per_role[s.clk_owner][sp.end])
             # anchor distance along this edge only (untimed instructions don't move it)
             a_edge = 0 if prev is None else max(
                 (_advance(prev, t)[0] for t in states.get(prev.pc, set())), default=0)
-            _pair_checks(s, st, a_edge, ppm, diags)
+            _pair_checks(s, st, a_edge, ppm, diags, clk)
     return diags.list()
+
+
+def _start(prev: _Step | None, r: Role, lo: int, hi: int) -> tuple[int, int]:
+    """r's (earliest, latest) start of a step, `lo`..`hi` untimed cycles after prev (isa §6, L)."""
+    if prev is None:  # reset completes at 0, so instruction 0 starts at now = 2
+        return 2 + lo, 2 + hi
+    c_lo, c_hi = completion(prev, r)  # the first own cycle >= c + 1: c + 1 or c + ISSUE (isa §4.0)
+    return c_lo + 1 + lo, c_hi + ISSUE + hi
+
+
+def _lead_clock(low: Lowered, steps: dict[int, _Step], s: _Step):
+    """(block, S) for a clocked step in a lead block whose clock the other party owns: that party
+    skips the block and clocks its fall-through successor S meanwhile, so S's edges are the
+    step's, if S is a clocked XFER on the same clock with the same half period (else S is None)."""
+    for sp in low.spans:
+        if sp.lead and sp.start <= s.pc < sp.end and s.clk_owner not in sp.roles:
+            succ = steps.get(sp.end)
+            same = (succ is not None and succ.clocked and succ.clk_line == s.clk_line
+                    and succ.prof.nom == s.prof.nom)
+            return sp, succ if same else None
+    return None, None
 
 
 def _reach(instrs: list[Instr], starts: list[int], role: Role) -> set[int]:
@@ -799,7 +818,10 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
                                               f"FIFO (or POP into a register before an unbounded COND)")
 
 
-def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int, diags: _Diags) -> None:
+def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int, diags: _Diags,
+                 clk: tuple[int, int] | None = None) -> None:
+    """The checks between a step and its predecessor, from each role's start (`st`). `clk` is the
+    clock owner's start when it doesn't run a clocked step itself (_lead_clock), else None."""
     p = s.prof
     pc = s.pc
     o = s.owner_role
@@ -844,7 +866,16 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             # A bounded clock follower counts its timeout from its own start, then from each edge
             # (isa §4.1). The clock owner re-bases to its start (cpha 0) or start - H (cpha 1), so
             # its first edge is at max(0, start) + H or max(H, start), seen EDGE_LAT later.
-            c_hi = st[s.clk_owner][1] if s.clk_owner in st else 0
+            c_start = st.get(s.clk_owner, clk)
+            if c_start is None:  # its edges may never come (it HALTed, or S gives no start)
+                for r in st:
+                    if not s.is_clk_owner(r):
+                        diags.add("T3-latency", pc, f"{r.name} may time out: the clock owner "
+                                                    f"{s.clk_owner.name} doesn't run this step; it clocks it "
+                                                    f"only as a lead block's successor on the same clock "
+                                                    f"with the same half period, after a step before the block")
+                return
+            c_hi = c_start[1]
             first = (max(0, c_hi) + p.nom if s.cpha == 0 else max(p.nom, c_hi)) + E
             for r in st:
                 if not s.is_clk_owner(r) and first + dr - st[r][0] > p.max + Q:
