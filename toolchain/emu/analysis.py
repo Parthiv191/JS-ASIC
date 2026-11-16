@@ -260,6 +260,9 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
 
     touched = {sp.role_if_pc: {(q, ln) for pc in range(sp.start, sp.end) for q, ln in drives(pc)}
                for sp in low.spans}
+    # a party that may HALT in a block another skips has released its lines (isa §4.1), or not
+    halted = {sp.role_if_pc: {q for pc in range(sp.start, sp.end) if instrs[pc].op == Op.HALT for q in runs(pc)}
+              for sp in low.spans}
 
     def wire(st, i):
         ln = lines[i]
@@ -399,17 +402,21 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                      f"({lines[bus_a].name}) after it: an SDA rise with SCL high is a STOP "
                                      f"to the others (isa §4.3, §4.7)")
 
-    def halt_sda(st, pc: int, r: Role) -> None:
-        """R1-bus on I2C: HALT releases r's lines (isa §4.1), so where SCL may be high (after r lets
-        go of it too), r's SDA must already be released, or the others see a STOP."""
+    def halt_sda(st, pc: int) -> None:
+        """R1-bus on I2C: HALT releases the lines of every party that runs it (isa §4.1), in any
+        order, so where SCL may be high once they let go, their SDA must already be released, or
+        the others see a STOP."""
+        qs = runs(pc)
         let_go = [list(row) for row in st]
-        let_go[int(r)][bus_a] = let_go[int(r)][scl] = 1
+        for q in qs:
+            let_go[int(q)][bus_a] = let_go[int(q)][scl] = 1
         sda_was = wire(st, bus_a)
-        if (st[int(r)][bus_a] != 1 and (sda_was is None or wire(let_go, bus_a) != sda_was)
+        if (any(st[int(q)][bus_a] != 1 for q in qs) and (sda_was is None or wire(let_go, bus_a) != sda_was)
                 and wire(let_go, scl) != 0):
-            diags.add("R1-bus", pc, f"HALT by {r.name} releases SDA ({lines[bus_a].name}), which it may "
-                                    f"still drive, where SCL ({lines[scl].name}) may be high: a STOP to the "
-                                    f"others that no COND STOP times (isa §4.1, §4.7)")
+            diags.add("R1-bus", pc, f"HALT by {' and '.join(q.name for q in qs)} releases SDA "
+                                    f"({lines[bus_a].name}), which it may still drive, where SCL "
+                                    f"({lines[scl].name}) may be high: a STOP to the others that no COND STOP "
+                                    f"times (isa §4.1, §4.7)")
 
     def step(st, pc: int) -> None:
         ins, ex = instrs[pc], runs(pc)
@@ -517,7 +524,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             if on_sda:
                 sda_was, scl_was = wire(st, bus_a), wire(st, scl)
             if ins.op == Op.HALT and scl is not None and r in runs(pc):
-                halt_sda(st, pc, r)
+                halt_sda(st, pc)
             step(st, pc)
             if on_sda and scl_was != 0 and (sda_was is None or wire(st, bus_a) != sda_was):
                 if ins.op == Op.HOLD:
@@ -536,6 +543,9 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             if sp is not None and r not in sp.roles:  # r skips it: what its parties drive there is unknown
                 for q, ln in touched[pc]:
                     st[int(q)][ln] = _join(st[int(q)][ln], None)
+                for q in halted[pc]:
+                    for i, ln in enumerate(lines):
+                        st[int(q)][i] = _join(st[int(q)][i], 1 if ln.kind == "od" else None)
             out = tuple(tuple(row) for row in st)
             for s in successors(instrs, pc, r):
                 old = state.get(s)

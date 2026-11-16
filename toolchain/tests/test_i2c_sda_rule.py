@@ -263,7 +263,8 @@ def test_a_halt_by_a_party_that_released_sda_is_no_edge():
 def test_a_halt_while_another_party_holds_sda_low_too_is_no_edge():
     """After the START the target pulls SDA low as well (no edge: it is low); the controller halts.
     Its release leaves SDA low, so no STOP. The target then drops SCL, lets SDA go with SCL low,
-    and lets SCL go."""
+    lets SCL go and halts in its own block (a HALT both run would count the controller as still
+    there: the walk doesn't know its block always halts); MON's HALT ends the program."""
     d = Description("hl", parties=("ctl", "tgt"))
     sda, scl, x, lane, half, w = bus(d)
     d.nop()
@@ -276,7 +277,88 @@ def test_a_halt_while_another_party_holds_sda_low_too_is_no_edge():
     d.cond("fall", scl, owner="tgt", prof=w)
     d.hold(sda, 1, owner="tgt", prof=d.profile("T1", nom=20))
     d.cond("rise", scl, owner="tgt", prof=w)
+    with d.only("tgt"):
+        d.halt()
     d.halt()
     assert diags(d) == []
     runs_clean(d)
 
+
+def target_holds_sda_with_scl_low(d):
+    """START, the controller's byte, SCL low, then the target pulls SDA low."""
+    sda, scl, x, lane, half, w = bus(d)
+    d.nop()
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(8, lane, owner="ctl", prof=half, src="ones")
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.cond("fall", sda, owner="tgt", prof=d.profile("C", nom=10, min=0, max=INF))
+    return sda, scl, x, lane, half, w
+
+
+def halts_in_its_own_block():
+    """The target halts in its own block with SCL low (its release is no edge then), but for the
+    controller, which skips that block, it may still hold SDA low: the controller's HOLD 0 and
+    HOLD 1 with SCL high are a START and a STOP (found by the re-review)."""
+    d = Description("h1", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = target_holds_sda_with_scl_low(d)
+    with d.only("tgt"):
+        d.halt()
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("A", nom=40))
+    d.hold(sda, 1, owner="ctl", prof=d.profile("B", nom=40))
+    d.cond("fall", x, owner="ctl", prof=w)
+    with d.only("ctl"):
+        d.halt()
+    d.halt()
+    return d
+
+
+def both_halt():
+    """Both halt in one block: the controller may let SCL go first, then the target SDA, a STOP
+    (found by the re-review)."""
+    d = Description("h2", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = target_holds_sda_with_scl_low(d)
+    d.cond("fall", x, owner="ctl", prof=w)
+    with d.only("ctl", "tgt"):
+        d.halt()
+    with d.only("mon"):
+        d.raw_delay(200)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("build", [halts_in_its_own_block, both_halt], ids=["one halts in its block", "both halt"])
+def test_a_halt_leaves_the_others_walk_its_lines_released_or_not(build):
+    assert said(build(), "HOLD 0") if build is halts_in_its_own_block else any(
+        r == "R1-bus" and "HALT by P0 and P1" in m for r, m in diags(build()))
+    img = compile_desc(build(), check_levels=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    assert "STOP" in [k for _, k in t.engines[2].bus_events]       # MON saw one; the program makes none
+
+
+def test_a_block_without_a_halt_leaves_the_skipped_partys_drive_known():
+    """After the START the target pulls SDA low too, then runs a block of its own with no HALT.
+    For the controller it still holds SDA low, so the controller's RAW REL of SDA with SCL high
+    changes nothing; then SCL low, the target lets go, SDA low again and the STOP."""
+    d = Description("nb", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    y = d.line("y", owner="tgt", idle=1)
+    d.nop()
+    d.cond("start", owner="ctl", prof=w)
+    d.cond("fall", y, owner="tgt", prof=w)
+    d.hold(sda, 0, owner="tgt", prof=d.profile("T0", nom=40))
+    with d.only("tgt"):
+        d.nop()
+    with d.only("ctl"):
+        d.raw_rel(sda)         # (a HOLD 1 would be followed and checked at 1: LEVEL, as SDA stays low)
+    d.cond("fall", x, owner="ctl", prof=w)
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.cond("rise", y, owner="tgt", prof=w)      # (a HOLD may not start late)
+    d.hold(sda, 1, owner="tgt", prof=d.profile("T1", nom=20))
+    d.cond("rise", x, owner="ctl", prof=w)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("C0", nom=20))
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    assert diags(d) == []
+    runs_clean(d)
