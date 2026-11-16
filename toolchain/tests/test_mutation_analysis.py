@@ -583,3 +583,112 @@ def test_t5_stall_looks_only_at_lead_blocks_the_staller_leads():
     d.cond("fall", ln, owner="b", prof=d.profile("G", nom=10, min=0, max=INF))
     d.halt()
     assert diags(d) == []
+
+
+# ---------------------------------------------------------------- R2-branch: what taints a register
+def alu_then_branch(ra: str, b) -> Description:
+    """Every register LI'd (the same in both roles) but r3, which a POPs in its own block; then
+    r1 := ra + b and a branch on r1 outside any block."""
+    d, ln = two_party()
+    for i in range(8):
+        d.li(f"r{i}", 0)
+    with d.only("a"):
+        d.pop("r3")
+    d.alu("add", "r1", ra, b)
+    d.br("x", cond="nz", reg="r1")
+    d.label("x")
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("ra,b,bad", [("r3", 0, True), ("r2", "r3", True), ("r2", "r4", False), ("r2", 3, False)])
+def test_r2_an_alu_result_is_tainted_by_its_register_operands_only(ra, b, bad):
+    """ra = r3, or a register b = r3, taints r1; a clean register b, or an immediate 3, doesn't."""
+    assert ("R2-branch" in rules(alu_then_branch(ra, b))) == bad
+
+
+def test_r2_every_register_may_differ_at_run():
+    """Registers keep their values across RUN (isa §1): a branch on r5 at pc 0 is on a register
+    that may differ between roles."""
+    d, ln = two_party()
+    d.br("x", cond="nz", reg="r5")
+    d.label("x")
+    d.halt()
+    assert "R2-branch" in rules(d)
+
+
+def test_r2_an_xfer_into_r0_on_an_od_lane_taints_it():
+    """On an OD line the wire can differ from what the owner sent, so what each role reads into r0
+    can too (r0 is the first register a dst names)."""
+    d = Description("x0", parties=("a", "b"))
+    s = d.line("s", "od", owner="a", idle=1)
+    bit = d.profile("B", nom=16, min=14, max=18)
+    d.li("r0", 0)
+    d.cond("fall", s, owner="a")
+    d.xfer(1, s, owner="a", prof=bit, src="ones", dst="r0")
+    d.br("x", cond="nz", reg="r0")
+    d.label("x")
+    d.halt()
+    assert "R2-branch" in rules(d)
+
+
+# ---------------------------------------------------------------- T3-latency: who may hold an OD let-go
+@pytest.mark.parametrize("owner,bad", [("a", False), ("shared", True)])
+def test_t3_latency_counts_the_other_party_only_where_it_may_drive_the_od_data_line(owner, bad):
+    """H 4 < EDGE_LAT + 1 + ldelay 0 + drift 1: too short for a party that drives data and follows
+    the clock. On a's own OD line only a drives, and a owns the clock; a shared one, b may drive."""
+    d = Description("od", parties=("a", "b"))
+    c = d.line("c", owner="a", idle=0)
+    dl = d.line("d", "od", owner=owner, idle=1)
+    lane = d.lane("L", dl, clk=c, cpol=0, cpha=1)
+    d.nop()
+    d.xfer(8, lane, owner="a", prof=d.profile("H", nom=4, min=0, max=INF), src="ones")
+    d.halt()
+    assert any("drives a data line" in m for m in msgs(d, "T3-latency")) == bad
+
+
+# ---------------------------------------------------------------- T1-unanchored: the 65th state
+def test_t1_unanchored_past_64_anchor_states_counts_the_65th():
+    """As above, 6 skippable HOLDs give 64 states at the last HOLD; a path around them with a HOLD
+    of 8 adds a 65th, past SET_CAP."""
+    d, ln = two_party(ppm=0)
+    hs = [d.profile(f"H{i}", nom=16 << i, min=(16 << i) - 1, max=(16 << i) + 1) for i in range(6)]
+    d.li("r0", 1)
+    d.cond("fall", ln, owner="a")
+    d.br("main", cond="nz", reg="r0")
+    d.hold(ln, 0, owner="a", prof=d.profile("H8", nom=8, min=7, max=9))
+    d.br("end")
+    d.label("main")
+    for i in range(6):
+        d.br(f"s{i}", cond="nz", reg="r0")
+        d.hold(ln, 0, owner="a", prof=hs[i])
+        d.label(f"s{i}")
+    d.label("end")
+    d.hold(ln, 1, owner="a", prof=hs[0])
+    d.halt()
+    assert "T1-unanchored" in rules(d)
+
+
+# ---------------------------------------------------------------- a COND on a stretch lane's clock
+@pytest.mark.parametrize("stretch", [True, False])
+def test_a_cond_on_a_stretch_clock_completes_where_the_model_does(stretch):
+    """isa §4.3, §6: the owner of a COND RISE on a stretch lane's clock waits to see the release, so
+    it completes EDGE_LAT after the edge; a FALL, or a COND off a stretch lane, at the edge. The
+    compiler's completion() matches the model in every role."""
+    from emu.analysis import _steps, completion
+    from emu.compiler import lower
+    from emu.isa import Op, Role
+    from simutil import run_sys
+    from test_engine_clocked import stretch_desc
+
+    def body(d, scl, sda, lane, prof):
+        d.cond("fall", scl, owner="a", prof=prof)
+        d.cond("rise", scl, owner="a", prof=prof)
+        d.cond("fall", scl, owner="a", prof=prof)
+    d = stretch_desc(stretch=stretch, body=body)
+    steps = _steps(lower(d))
+    conds = sorted(pc for pc, s in steps.items() if s.op == Op.COND)
+    t = run_sys(compile_desc(d, check_timing=False))
+    for i, r in enumerate((Role.P0, Role.P1, Role.MON)):
+        recs = [rec for rec in t.engines[i].records if rec.op == "COND"]
+        assert [rec.cycle - rec.tb for rec in recs] == [completion(steps[pc], r)[0] for pc in conds], r

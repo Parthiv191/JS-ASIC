@@ -171,12 +171,14 @@ def _rel(v) -> bool:
 
 def _join(x, y):
     """Two paths' drives: the same, a gated line that reads 1 on both, a let-go pending on one
-    and released (or pending) on the other, or unknown."""
+    and released (or pending) on the other, a let-go held (not yet taken) on one and taken or
+    released on the other (it may still be held: unknown would hide it from the SCL check), or
+    unknown."""
     if x == y:
         return x
     if _rel(x) and (_rel(y) or y == 1) or _rel(y) and x == 1:
         return ("REL", max(v[1] for v in (x, y) if _rel(v)))
-    if {x, y} <= {_LG, _LGX, 1} if not (_rel(x) or _rel(y)) else False:
+    if all(v in (_LG, _LGX, 1) or _rel(v) for v in (x, y)):
         return _LGX
     return _SHUT1 if x in _READS_1 and y in _READS_1 else None
 _PARTIES = (Role.P0, Role.P1)

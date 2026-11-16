@@ -429,12 +429,16 @@ def tgt_clocks(d, sda, scl, lane, half, w):
 
 def model_goes_wrong(d):
     """A violation, an engine that never halts, or a follower seeing a STOP no COND STOP made (the
-    program has one)."""
+    program has one, whose SDA rise is SDA's last edge): a second STOP, or one seen before that
+    edge (after a stray STOP the bus is idle, so the real one may not be reported)."""
     from emu.model.engine import VIOLATIONS
-    t = System([EngineSpec(compile_desc(d, check_levels=False), r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    img = compile_desc(d, check_levels=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
     bad = [e.kind for et in t.engines for e in et.events if e.kind in VIOLATIONS]
     stops = max([k for _, k in et.bus_events].count("STOP") for et in t.engines)
-    return bad or not all(et.halted for et in t.engines) or stops > 1
+    last_sda = max(t.wire_edges[img.bus.a], default=0) if img.bus.a is not None else 0
+    early = any(k == "STOP" and at < last_sda for et in t.engines for at, k in et.bus_events)
+    return bad or not all(et.halted for et in t.engines) or stops > 1 or early
 
 
 LATE_RELEASE = {
