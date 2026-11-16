@@ -404,10 +404,12 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
             la.stretch and la.clk is not None and la.clk.index == a["line"].index for la in desc.lanes):
         err("S-bus", s, f"HOLD 1 on stretch clock {lines[a['line'].index].name!r}: its followers would "
                         f"keep the unstretched timeline; release it with COND RISE")
-    if desc.bus_cfg is not None and desc.bus_cfg[0] == "select" and desc.bus_cfg[1].index in _drives(desc, s):
+    if (desc.bus_cfg is not None and desc.bus_cfg[0] == "select" and s.kind not in ("hold", "raw_set")
+            and desc.bus_cfg[1].index in _drives(desc, s)):
         # isa §5 R1-bus: every follower's detector takes any edge of CS as a START or STOP (§4.7),
-        # and only COND START/STOP are timed and tracked as one (a STOP releases the gated lines)
-        err("R1-bus", s, f"only COND START/STOP drive the SELECT line {lines[desc.bus_cfg[1].index].name!r}: "
+        # and only COND START/STOP are timed and tracked as one (a STOP releases the gated lines).
+        # A HOLD or RAW SET may keep CS at its level: check_levels checks that it does
+        err("R1-bus", s, f"only COND START/STOP change the SELECT line {lines[desc.bus_cfg[1].index].name!r}: "
                          f"any edge on it is a START or STOP to the others")
     if s.kind in ("raw_set", "raw_rel"):
         ln = lines[a["line"].index]

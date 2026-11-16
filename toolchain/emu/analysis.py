@@ -187,7 +187,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
     - anything else, and paths that disagree, leave a drive unknown.
 
     COND START/STOP are the edges on `bus_a` (START = FALL, STOP = RISE); on I2C, SCL must be high
-    too. The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
+    too. On SELECT, a HOLD or RAW SET by CS's owner must keep CS at its level (R1-bus). The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
     instrs = low.instrs
     diags = _Diags(desc, low)
     img = low.image
@@ -273,6 +273,16 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             diags.add("R2-edge", pc, f"COND {k.name} by {r.name}: {why}, so its drive makes no edge "
                                      f"and the others wait for one (isa §4.2)")
 
+    def check_cs(st, pc: int, ins: Instr, r: Role) -> None:
+        """R1-bus: a HOLD or RAW SET by CS's owner keeps a SELECT CS at the level it has."""
+        what = "HOLD" if ins.op == Op.HOLD else "RAW SET"
+        level = ins.operand & 1
+        if wire(st, bus_a) != level:
+            name = lines[bus_a].name
+            diags.add("R1-bus", pc, f"{what} {level} on the SELECT line {name!r} by {r.name}: {name} may "
+                                    f"not be at {level} here, so it may make an edge, a START or STOP to "
+                                    f"the others that no COND START/STOP times (isa §4.7)")
+
     def step(st, pc: int) -> None:
         ins, ex = instrs[pc], runs(pc)
         if ins.op in (Op.COND, Op.HOLD, Op.XFER):
@@ -347,6 +357,10 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             ins = instrs[pc]
             if ins.op == Op.COND and r in runs(pc) and does(ins.owner, r):
                 check(st, pc, ins, r)
+            if (kind == BusKind.SELECT and r in runs(pc) and int(lines[bus_a].owner) == int(r)
+                    and ((ins.op == Op.HOLD and ins.line == bus_a and does(ins.owner, r))
+                         or (ins.op == Op.RAW and ins.sub == RawOp.SET and ins.ra == bus_a))):
+                check_cs(st, pc, ins, r)
             step(st, pc)
             sp = block_at.get(pc)
             if sp is not None and r not in sp.roles:  # r skips it: what its parties drive there is unknown

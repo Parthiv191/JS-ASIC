@@ -524,14 +524,15 @@ def stops(t, i):
 CS_DRIVES = {
     "COND RISE": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.cond("rise", cs, owner="a", prof=p)),
     "COND FALL": lambda d, cs, p: d.cond("fall", cs, owner="a", prof=p),
-    "HOLD": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.hold(cs, 0, owner="a", prof=p)),
+    "HOLD 1 after START": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.hold(cs, 1, owner="a", prof=p)),
+    "HOLD 0 before START": lambda d, cs, p: d.hold(cs, 0, owner="a", prof=p),
     "XFER": lambda d, cs, p: d.xfer(1, cs, owner="a", prof=p, src="ones"),
     "XFER clocked by CS": lambda d, cs, p: d.xfer(
         1, d.lane("Lc", d.line("m", owner="a", idle=1), clk=cs, cpol=1), owner="a", prof=p, src="ones"),
     "XFER with CS as data2": lambda d, cs, p: d.xfer(
         1, d.lane("L2", d.line("s", owner="b", idle=0), clk=d.line("k", owner="b", idle=0), data2=cs),
         owner="b", prof=p, src="ones"),
-    "RAW SET": lambda d, cs, p: d.raw_set(cs, 1),
+    "RAW SET 0": lambda d, cs, p: d.raw_set(cs, 0),
     "RAW REL": lambda d, cs, p: d.raw_rel(cs),
 }
 
@@ -547,7 +548,43 @@ def test_on_select_only_start_and_stop_drive_cs(drive):
                 CS_DRIVES[drive](d, cs, p)
         else:
             CS_DRIVES[drive](d, cs, p)
-    with pytest.raises(CompileError, match=r"\[R1-bus\] .*only COND START/STOP drive the SELECT line 'cs'"):
+    with pytest.raises(CompileError, match=r"\[R1-bus\] .*the SELECT line 'cs'.* START or STOP to the others"):
+        select_desc(body)
+
+
+def cs_setup(d, cs, miso, x, p):
+    """devOps's RTL test (`test/test_bus.py`): a HOLD keeps CS low after the START as the setup time
+    before the first clock, and a RAW SET 1 and a HOLD 1 keep it high before the START."""
+    with d.only("a"):
+        d.raw_set(cs, 1)
+    d.hold(cs, 1, owner="a", prof=p)
+    d.cond("start", owner="a", prof=p)
+    d.hold(cs, 0, owner="a", prof=p)
+    d.hold(x, 0, owner="b", prof=p)
+    d.cond("stop", owner="a", prof=p)
+    d.hold(cs, 1, owner="a", prof=p)
+
+
+def test_a_hold_or_raw_set_that_keeps_cs_at_its_level_is_no_edge():
+    """isa §5 R1-bus: a HOLD or RAW SET on CS at the level it already has on every path makes no
+    edge, so it is allowed (a setup time after the START, say). The detectors see one START and
+    one STOP."""
+    t = run_sys(select_desc(cs_setup), roles=(Role.P0, Role.P1))
+    assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP"]
+    assert not t.engines[1].violations
+
+
+def test_a_hold_on_cs_at_a_level_it_has_on_only_some_paths_is_rejected():
+    """isa §5 R1-bus: CS low on one path into the HOLD 0 and high on the other: on the second the
+    HOLD makes a START no COND START timed."""
+    def body(d, cs, miso, x, p):
+        d.li("r1", 0)
+        d.br("skip", "z", "r1")
+        d.cond("start", owner="a", prof=p)
+        d.label("skip")
+        d.hold(cs, 0, owner="a", prof=p)
+        d.cond("stop", owner="a", prof=p)
+    with pytest.raises(CompileError, match=r"\[R1-bus\] .*HOLD 0 on the SELECT line 'cs'.*may not be at 0"):
         select_desc(body)
 
 
