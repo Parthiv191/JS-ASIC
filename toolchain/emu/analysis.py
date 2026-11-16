@@ -502,6 +502,11 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 tick(st, nom_of(ins))      # a COND acts at least nom after the previous step
             if ins.op == Op.COND and mine:
                 check(st, pc, ins, r)
+            if (ins.op == Op.HOLD and mine and ins.operand & 1 and lines[ins.line].kind == "od"
+                    and not all(st[int(q)][ins.line] == 1 for q in _PARTIES if not does(ins.owner, q))):
+                # its followers check the line at its level (isa §4.2): released, but held low by another
+                diags.add("R2-edge", pc, f"HOLD 1 on {lines[ins.line].name} by {r.name}: another party may hold "
+                                         f"it low here, so the HOLD's followers read 0, not its level (isa §4.2)")
             if ins.op == Op.XFER and r in runs(pc):
                 la = lanes[ins.line]
                 if la.clk is not None and int(lines[la.clk].owner) == int(r) and st[int(r)][la.clk] != la.cpol:
@@ -919,7 +924,16 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                                                   f"one: it needs nom - drift - QUANT >= bus_confirm "
                                                   f"{confirm}, or it replaces that one's candidate")
             if s.owner_role is None:
-                continue  # SHARED steps: Phase 4 (ARB)
+                # a SHARED step: both parties do it. Each drives a HOLD when it starts, so each
+                # starts by ISSUE (T5-overrun); the rest of a SHARED step's checks wait for ARB (open)
+                if s.op == Op.HOLD:
+                    for r in (Role.P0, Role.P1):
+                        if nxt_pc in per_role[r]:
+                            hi = _start(prev, r, *per_role[r][nxt_pc])[1]
+                            if hi > ISSUE:
+                                diags.add("T5-overrun", nxt_pc, f"{r.name}, an owner of this SHARED HOLD, starts "
+                                                                f"at {hi}, more than ISSUE after the step start")
+                continue
             st = {r: _start(prev, r, *per_role[r][nxt_pc]) for r in ROLES if nxt_pc in per_role[r]}
             if s.owner_role not in st:
                 continue
