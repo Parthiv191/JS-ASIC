@@ -13,7 +13,7 @@ from harness import GATES, CosimMismatch, cosim
 from emu.compiler import compile_desc
 from emu.cosim import Kind, pulse, replay
 from emu.desc import Description
-from emu.isa import Instr, Op, Role, encode
+from emu.isa import INF, Instr, Op, Role, decode, encode
 from emu.model.system import EngineSpec, Glitch
 from emu.protocols import get, slack
 
@@ -22,14 +22,14 @@ P = 20        # bit cycles: UART at 2% needs P >= 19 (isa §6)
 DATA = 0xA4   # reads 0x25 reversed, so the bit order shows on the wire (0xA5 and 0x5A read the same)
 
 
-def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=(), host=None):
+def model(img, role, peer_clock=(1, 1), peer_phase=0, peers=True, glitches=(), host=None, max_ticks=50_000):
     """The RTL plays `role`; the model also runs every other role (unless `peers` is False).
     `host` maps a party role to its host's TX words (the RTL's are written before RUN)."""
     specs = [EngineSpec(img, role)]
     if peers:
         specs += [EngineSpec(img, r, clock=peer_clock, phase=peer_phase) for r in Role if r != role]
     tx = {i: (host or {}).get(s.role, []) for i, s in enumerate(specs) if s.role != Role.MON}
-    return replay(specs, 0, glitches=glitches, tx=tx)
+    return replay(specs, 0, glitches=glitches, tx=tx, max_ticks=max_ticks)
 
 
 def kinds(rep):
@@ -39,7 +39,8 @@ def kinds(rep):
 @cocotb.test()
 async def test_untimed(dut):
     """LI, every ALU op (each result folded into r2 as r2 := 3·r2 ^ result, so all of them reach
-    the register readback), a BR NZ loop of 3, MARK, RAW DELAY and GET, NOP, HALT on P0 alone."""
+    the register readback), a BR NZ loop of 3, MARK, RAW DELAY 1, 2, 3 and 5 (rounded up to
+    U = 2: 2, 2, 4, 6 cycles), GET, NOP, HALT on P0 alone."""
     d = Description("untimed", parties=("a", "b"))
     ln = d.line("l", owner="a", idle=1)
     d.li("r5", 0xBEEF)
@@ -53,11 +54,17 @@ async def test_untimed(dut):
     d.alu("sub", "r0", "r0", 1)
     d.br("loop", cond="nz", reg="r0")
     d.mark(5)
-    d.raw_delay(5)
+    for n in (1, 2, 3, 5):
+        d.raw_delay(n)
     d.raw_get("r4", ln)
     d.nop()
     d.halt()
-    await cosim(dut, model(compile_desc(d), Role.P0, peers=False), Role.P0)
+    img = compile_desc(d)
+    rep = model(img, Role.P0, peers=False)
+    starts = rep.trace.engines[0].starts
+    gaps = [b[1] - a[1] for a, b in zip(starts, starts[1:]) if decode(img.words[a[0]]).op == Op.RAW]
+    assert gaps == [2, 2, 4, 6, 2]  # the four DELAYs, then GET
+    await cosim(dut, rep, Role.P0)
 
 
 @cocotb.test()
@@ -130,6 +137,48 @@ async def test_cond_early(dut):
     await cosim(dut, rep, Role.P1)
 
 
+def meas(timeout_only=False):
+    """HOLD 1 · COND fall (unbounded), MEAS r2 · HOLD 0 · COND rise (bounded), MEAS r3 · HALT:
+    tb moves before each COND. `timeout_only`: COND fall (bounded), MEAS r2 · HALT."""
+    d = Description("meas", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    bit = d.profile("BIT", nom=16, min=14, max=18)
+    win = d.profile("W", nom=20, min=0, max=40)
+    if timeout_only:
+        d.cond("fall", ln, owner="a", prof=win, meas="r2")
+    else:
+        d.hold(ln, 1, owner="a", prof=bit)
+        d.cond("fall", ln, owner="a", prof=d.profile("U", nom=20, min=0, max=INF), meas="r2")
+        d.hold(ln, 0, owner="a", prof=bit)
+        d.cond("rise", ln, owner="a", prof=win, meas="r3")
+    d.halt()
+    return compile_desc(d)
+
+
+def cond_values(rep):
+    return [r.value for r in rep.trace.engines[0].records if r.op == "COND"]
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], peer_clock=[(1, 1), (49, 50)])
+async def test_cond_meas(dut, role, peer_clock):
+    """A COND's trace value is what MEAS writes (architecture §5), and the registers match: the
+    model had none for every COND, and no co-sim test had MEAS, so that gap passed (#50)."""
+    rep = model(meas(), role, peer_clock=peer_clock)
+    e = rep.trace.engines[0]
+    conds = [r for r in e.records if r.op == "COND"]
+    assert cond_values(rep) == [e.regs[2], e.regs[3]] and all(r.value != r.tb for r in conds)
+    await cosim(dut, rep, role)
+
+
+@cocotb.test()
+async def test_cond_meas_timeout(dut):
+    """No owner: the COND times out (no ABORT), so its value and register are 0xFFFF."""
+    rep = model(meas(timeout_only=True), Role.P1, peers=False)
+    assert "TIMEOUT" in kinds(rep) and cond_values(rep) == [0xFFFF] == [rep.trace.engines[0].regs[2]]
+    await cosim(dut, rep, Role.P1)
+
+
 def frame(msb=False, check=True, resync=False, kind="pp"):
     """A UART frame with register src/dst: LI r0 · COND fall · HOLD 0 · XFER 8 · HOLD 1 · MARK · HALT."""
     d = Description("frame", parties=("a", "b"))
@@ -189,6 +238,69 @@ async def test_uart_protocol(dut, role, peer_clock):
     et = rep.trace.engines[0]
     assert et.rx == ([] if role == Role.P0 else UART_WORDS) and et.tx_left == 0 and not et.events
     assert rep.tx == (UART_WORDS if role == Role.P0 else [])
+    await cosim(dut, rep, role)
+
+
+SPI_CTL = [0, 0xA4, 0x3C]  # the frame token, then the frame's two bytes
+SPI_PER = [0x5A, 0xC3]
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1, Role.MON], mode=[(0, 0), (0, 1), (1, 0), (1, 1)])
+async def test_spi_protocol(dut, role, mode):
+    """The library SPI (emu/protocols/spi.py), one 2-byte frame in each mode, as ctl, per and mon
+    against peers 2% slow: the SELECT bus, the gated MISO and duplex XFERs from and to the FIFOs.
+    Every role pushes (MISO << 8) | MOSI. MON samples both data lines, the second on tr_sample2."""
+    img = compile_desc(get("spi").build(cpol=mode[0], cpha=mode[1], words=2))
+    rep = model(img, role, (49, 50), host={Role.P0: SPI_CTL, Role.P1: SPI_PER})
+    et = rep.trace.engines[0]
+    assert et.rx == [0x5AA4, 0xC33C] and et.tx_left == 0 and not et.events
+    names = [ln.name for ln in img.lines]
+    mosi, miso = names.index("mosi"), names.index("miso")
+    sampled = {p.fields[0] for p in rep.expected if p.kind == Kind.SAMPLE}
+    assert sampled == {Role.P0: {miso}, Role.P1: {mosi}, Role.MON: {mosi, miso}}[role]
+    await cosim(dut, rep, role, sample2=True)
+
+
+I2C_HOST = {  # the controller's host words: the address byte, then the transaction's two data bytes
+    "ack": [0x5A << 1, 0xA4, 0x3C],
+    "nack": [0x50 << 1, 0xA4, 0x3C],   # not the target's address
+}
+I2C_RX = {  # what each role pushes into RX, and the events it logs
+    "ack": {Role.P0: ([], set()), Role.P1: ([0xA4, 0x3C], set()), Role.MON: ([0xA4, 0x3C], set())},
+    "nack": {Role.P0: ([1], set()), Role.P1: ([], set()), Role.MON: ([], {"BUS"})},
+}
+
+
+def i2c(role, case="ack", peer_clock=(49, 50), ldelay=12):
+    img = compile_desc(get("i2c").build(data_bytes=2, ldelay=ldelay))
+    return model(img, role, peer_clock, host={Role.P0: I2C_HOST[case]})
+
+
+@cocotb.test()
+@cocotb.parametrize(case=list(I2C_HOST), role=[Role.P0, Role.P1, Role.MON], peer_clock=[(1, 1), (49, 50)])
+async def test_i2c_protocol(dut, case, role, peer_clock):
+    """The library I2C write (emu/protocols/i2c.py) with two data bytes, as ctl, tgt and mon,
+    against peers up to 2% slow: COND START and STOP, OD lanes and their lets-go, the lead blocks.
+    ack: the target ACKs its address and the data, and it and MON push the bytes. nack: the
+    controller ends the transaction and pushes 1; MON follows the data byte speculatively, and the
+    STOP makes that a bus exit."""
+    rep = i2c(role, case, peer_clock)
+    et = rep.trace.engines[0]
+    rx, events = I2C_RX[case][role]
+    assert et.rx == rx and et.tx_left == 0 and {ev.kind for ev in et.events} == events
+    await cosim(dut, rep, role)
+
+
+@cocotb.test()
+@cocotb.parametrize(role=[Role.P0, Role.P1], ldelay=[1, 4])
+async def test_i2c_short_ldelay(dut, role, ldelay):
+    """I2C with SDA moving 1 or 4 cycles after SCL falls (isa §4.3): the let-go's release counts
+    ldelay from the owner's edge, or ldelay - EDGE_LAT from a detected one, down to 0."""
+    rep = i2c(role, ldelay=ldelay)
+    et = rep.trace.engines[0]
+    assert et.rx == I2C_RX["ack"][role][0] and not et.events
+    assert et.drives != i2c(role).trace.engines[0].drives, "ldelay changes this role's drives"
     await cosim(dut, rep, role)
 
 
@@ -320,6 +432,47 @@ async def test_role_branches(dut):
     rep = model(compile_desc(d), Role.P0, peers=False)
     assert [p.pc for p in rep.expected if p.kind == Kind.BR] == [0, 1]   # ROLE_IF, then RAW JPIN
     await cosim(dut, rep, Role.P0)
+
+
+# ---------------------------------------------------------------- random programs (emu/gen)
+RANDOM_RUNS = int(os.environ.get("COSIM_RANDOM", "24"))
+
+
+def random_case(k: int):
+    """The k-th random program for co-sim: the first recipe from seed 1000 + 100 k that the
+    compiler accepts and whose RTL party needs at most 4 host words (all the harness writes before
+    RUN), the RTL in role k mod 3, the peers at a tolerance corner (slow on odd k)."""
+    from emu.gen.check import compile_recipe
+    from emu.gen.randdesc import random_recipe
+    role = (Role.P0, Role.P1, Role.MON)[k % 3]
+    party = {Role.P0: "a", Role.P1: "b"}.get(role)
+
+    def words_needed(r) -> int:  # an upper bound: every frame runs, every loop
+        return r.loops * sum(sum(p[0] == "pop" for p in f.prep) + (f.src == "fifo")
+                             for f in r.frames if f.owner == party)
+    seed = 1000 + 100 * k
+    while True:
+        r = random_recipe(seed)
+        img, rejected = compile_recipe(r)
+        if rejected is None and words_needed(r) <= 4:
+            break
+        seed += 1
+    lo = 1000 - r.ppm // 1000
+    peer = (lo, 1000) if k % 2 else (1, 1)
+    words = {p: [(seed * 7919 + 31 * i) & 0xFFFF for i in range(4 if p == role else 24)] for p in (Role.P0, Role.P1)}
+    return r, model(img, role, peer, host=words, max_ticks=400_000), role
+
+
+@cocotb.test()
+@cocotb.parametrize(k=list(range(RANDOM_RUNS)))
+async def test_random_program(dut, k):
+    """A random program from the compiler (verification.md layer 4) in one role against the model's
+    peers: what the oracles on the model can't see, such as a latency every model role shares, shows
+    here. COSIM_RANDOM sets the count."""
+    r, rep, role = random_case(k)
+    assert rep.expected, f"recipe {r.seed}: nothing to compare"
+    assert not rep.trace.contention, f"recipe {r.seed}: contention on the model"
+    await cosim(dut, rep, role)
 
 
 # ---------------------------------------------------------------- known gaps (README §3): none open

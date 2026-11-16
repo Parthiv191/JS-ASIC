@@ -44,9 +44,9 @@ The chip reports its sizes (architecture §4). The compiler rejects images that 
 - **Line config:** `kind ∈ {PP (push-pull), OD (open-drain)}`, `owner ∈ {P0, P1, SHARED (OD only), SWITCHED (reserved,
   for bidirectional PP lines)}`, `idle ∈ {0, 1}`, `gated`, and `pin`: the uio pin it maps to (default: its
   index). Each line has its own pin; the image rejects two lines on one pin.
-  - `gated` (PP, idle 1): the owner drives the line only from the first step that drives it
-    until the next STOP on a SELECT bus, or an abort; otherwise the line is released and reads
-    the pull-up. For example, SPI MISO on a shared bus.
+  - `gated` (PP, idle 1): the owner drives the line only while its gate is open (below): from
+    the start of a timed step until the next STOP on a SELECT bus, or an abort; otherwise the
+    line is released and reads the pull-up. For example, SPI MISO on a shared bus.
     - Each engine has one gate for its gated lines. It is shut at RUN, and opens at the start of
       each timed step. While it is shut, drives to gated lines (RAW SET too) do nothing.
     - The gate shuts, and the engine's gated lines are released, when its own detector confirms
@@ -107,7 +107,7 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 | `ROLE_IF` | 7 | U | operand `[2:0]` role mask (P0, P1, MON) · `[11:3]` count |
 | `PUSH` / `POP` | 8 / 9 | U | PUSH ra → RX FIFO (full: §4.9) · POP rd ← TX FIFO (stalls while empty) |
 | `MARK` | 10 | U | operand = id · IRQ |
-| `RAW` | 11 | U | sub = SET 0 / REL 1 / GET 2 / DELAY 3 / JPIN 4 / EVT 5 · line in `[23:21]` · rd for GET/EVT · operand: SET `[0]` level · DELAY n (≥ U) · JPIN `[11]` level, `[10:0]` target · EVT `[5:0]` clear mask |
+| `RAW` | 11 | U | sub = SET 0 / REL 1 / GET 2 / DELAY 3 / JPIN 4 / EVT 5 · line in `[23:21]` · rd for GET/EVT · operand: SET `[0]` level · DELAY n (1–4095) · JPIN `[11]` level, `[10:0]` target · EVT `[5:0]` clear mask |
 | `HALT` | 12 | U | – |
 | `CRC` | 13 | U | sub = RESET 0 / FEED 1 / GET 2 · ra (FEED) / rd (GET) · FEED operand `[3:0]` n−1 |
 | `FZ` | 14 | U | sub = NEXT 0 / TOK 1 / END 2 · rd / ra (`bus-fuzzer.md`) |
@@ -146,10 +146,11 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
   - The successor starts on the first own cycle ≥ max(predecessor completion + 1, word arrival).
 - **Costs that follow:**
   - **Untimed instructions, taken branches included:** exactly `U` cycles, except FZ ops, which
-    have fixed totals (`bus-fuzzer.md` §3). `ROLE_IF` costs `U`
+    have fixed totals (§4.6). `ROLE_IF` costs `U`
     whether or not it skips; a skip continues at `pc + 1 + count`, and the skipped words take no
     time. Role blocks don't nest.
-  - **`RAW DELAY n`:** `n` cycles, rounded up to a multiple of `U`.
+  - **`RAW DELAY n`:** `n` cycles, rounded up to a multiple of `U`, so `n = 1` takes `U` (as does `0`, which
+    the compiler doesn't emit).
   - **Timed step** started at `t`, completing at `c`: its successor starts on the first own cycle
     ≥ max(c + 1, t + 2), so `ISSUE` ≤ 2.
   - **Effects:** an untimed instruction acts in its start cycle. That covers RAW SET's drive,
@@ -177,7 +178,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     planned at offset 0 (HOLD, XFER bit 0) then happens in its start cycle, and the timeline
     doesn't move. A COND instead sets `tb` to its action cycle, since followers anchor on its
     edge.
-  - Any other late action logs `OVERRUN(now − planned)` and happens immediately.
+  - Any other late action logs `OVERRUN(now − planned)` and happens as soon as it can (an XFER's
+    bits and samples still one per cycle, §4.3).
   - `IDLE` steps never overrun.
   - A clock owner's clocked XFER never overruns. Instead it sets `tb := max(tb, start − H)` for
     `cpha = 1`, and `tb := max(tb, start)` for `cpha = 0` (bit 0 at `max(start, tb)`, a full `H`
@@ -276,7 +278,8 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
     checks at the step start, so the whole word is ONES.
 - Bit `k` is `value >> k` (LSB first) or `value >> (n−1−k)` (MSB).
 - **Unclocked lane** (`P = nom`):
-  - Do: bit `k` at `max(now, tb + k·P)`, then `tb := tb + n·P`.
+  - Do: bit `k` at the later of `tb + k·P` and one cycle after bit `k − 1` (bit 0: the later of
+    `tb` and the step's start), so a late bit still gets a cycle on the wire; then `tb := tb + n·P`.
   - Follow: sample bit `k` at `a + (k − ak)·P + P//2 + EDGE_LAT`, from the anchor `(a, ak)`
     (initially `(tb, 0)`).
   - At most one sample per cycle: bit `k` is sampled at the later of its planned cycle and one
@@ -318,14 +321,22 @@ Flags: `CHK = 1<<0`, `RESYNC = 1<<1`, `ABORT = 1<<2`, `MSB = 1<<3` (XFER only), 
 - **OD let-go.** After a clocked XFER in which it drove an OD data line `D` (also one that timed
   out after driving it):
   - the engine keeps the last bit until the lane's next launching edge as it sees it (the clock
-    owner: the cycle it drives that edge; others: the cycle they detect it). That is the next
+    owner: the cycle its drive of the clock goes to the launching level, a released clock
+    counting as 1, the pull-up; others: the cycle they detect it). That is the next
     leading edge with `cpha = 1`. With `cpha = 0` it is a trailing edge: for an XFER that ran to
     the end, its own last edge, because the next leading edge captures the next step's bit 0;
-  - it releases `D` `ldelay` cycles after that edge (same rule as launch), unless it launches a
-    new bit on `D` then;
+  - it releases `D` `ldelay` cycles after that edge (same rule as launch; after a stretched
+    edge, from its real rise), unless it launches a new bit on `D` then. The let-go is taken the cycle after the XFER completes, so the release
+    is at the later of that cycle and the time above (it matters with `cpha = 0`, whose edge is
+    the step's own last one);
   - any explicit drive of `D` cancels the pending release;
-  - a per-lane tracker watches the clock every cycle, whatever instruction is running, so a
-    release can happen during later HOLD, COND or untimed instructions.
+  - one tracker per engine, for the lane of its last let-go, watches that lane's clock every
+    cycle, whatever instruction is running, so a release can happen during later HOLD, COND or
+    untimed instructions. Taking a new let-go releases at once every line the old one held that
+    the new one doesn't. `R1-od-lane` allows one clocked lane with OD data per description, and
+    on one lane the lane's own edges release the old let-go before a new XFER completes (except
+    after a TIMEOUT before its first launching edge). So the tracker behaves as per-line ones
+    would; across two lanes, a taken let-go could release SDA while SCL is high.
   - With I2C (cpol 1, cpha 1) a release never happens while SCL is high.
 - **Clock stretching (lanes with `stretch`).**
   - After each release of `clk` (an edge it drives to 1) planned at `t`, the clock owner waits
@@ -360,9 +371,45 @@ Logs `MARK(id)`. With IRQ it logs `IRQ(id)` instead, latches `id` and raises the
 host clears it.
 
 ### 4.6 `FZ` and `src = FZ`
-- Costs and semantics: `bus-fuzzer.md`. `FZ` is legal only in a single-party role block
-  (`R3-fz`), and only on engine 0.
-- `src = FZ` sends the next staged byte (0 when exhausted).
+The fuzz unit is attached to engine 0. Its algorithm is in `bus-fuzzer.md` §2–3; this is what a
+program sees.
+
+| Op | Effect | Cycles (total, `U` included) |
+|---|---|---|
+| `fz.next rd` | pick and mutate a seed into staging, rewind the read pointer, arm; `rd :=` the length (1–32) | 48 |
+| `fz.tok ra` | queue `ra[7:0]` as a token; nothing while disarmed | 2 |
+| `fz.end rd` | finish the fingerprint; `rd := 1` if it is new, else 0; disarm. While disarmed: `rd := 0` | 40 |
+
+- The cycles are fixed whatever the outcome, and the compiler counts them as untimed cycles (§6).
+- `FZ` is legal only in a role block for one party, the same party everywhere (`R3-fz`). On
+  engine 1 it is ILLEGAL. On engine 0 with the unit not enabled (`MEM2_MODE` ≠ 0, or
+  `FZ_STATUS.ready` 0), each op takes its cycles and does nothing else, and `rd := 0`, so a
+  `fz.next` length of 0 means the unit is off.
+- `src = FZ` sends the next staged byte, one per XFER, taken when the step takes its source:
+  an XFER with `n` < 8 sends its low `n` bits, and one with `n` > 8 sends the byte
+  zero-extended. In wire mode the length comes first. It reads 0 once the message is exhausted,
+  and always 0 without a unit (engine 1 included). The fuzzing party sends in every `src = FZ`
+  XFER (`R3-fz`): as its owner, or as the owner of a duplex lane's data2. Any other sender
+  reads 0.
+- **While the unit is armed**, engine 0:
+  - queues a step's tokens when it completes: what the engine received from the other party.
+    - An XFER gives the bits of each data line the engine follows. On one data line that is
+      `value[7:0]`, then `value[15:8]` if `n` > 8, and nothing for the line's owner. On a duplex
+      lane (`dst` = `(v2 << n) | v1`), the data line's `n` bits, then data2's: so the data owner
+      (an SPI controller) gets the reply on data2, and data2's owner gets the request. An XFER
+      that ends with no value (a TIMEOUT without ABORT) gives none.
+    - A followed COND gives `0x40 + bucket(m)`, with `m` = `tb` after the step minus `tb` before
+      it, clamped to 0–0xFFFF as MEAS is (a followed edge can come before `tb` under drift), or
+      0xFFFF on a TIMEOUT. A COND it does gives none.
+  - sets the bit of every event kind it logs (§7, bus exits included) in the unit's event mask.
+  - on a fatal abort (§4.1): the unit saves staging as a hang and disarms, and the abort takes
+    `FZ_HANG_CYCLES` = 12 cycles more. A bus exit is not a hang: the unit stays armed, and the
+    program ends the iteration later. Not with `fz.next` or `fz.end` between `abort_pc` and the
+    first timed step there (`T5-abort`): the timing rules don't time that path yet (§6).
+- While disarmed (after `fz.end` or a hang), `src = FZ` keeps reading the last staging.
+- The model never loses a token. A step queues at most 2, an XFER that queues 2 takes many
+  cycles, and the queue drains one a cycle (`bus-fuzzer.md` §2), so at most 3 wait at once and
+  `FZ_STATUS.token_lost` stays 0. The RTL must keep up as well.
 
 ### 4.7 The bus: detector and bus events
 - **The detector** runs every engine cycle, in every role except the owner of the bus's
@@ -429,39 +476,47 @@ host clears it.
 |---|---|
 | `R1-owner` | A timed step's owner field is the owner of its data line: COND/HOLD's line, XFER's lane `data`. It is a party, or `shared` on OD; on a SHARED OD line the owner field may be either party or `shared`. The clock and `data2` drivers come from their line owners. A lane's clock has a party owner. A duplex step has a party owner, and `data2` belongs to the other party. |
 | `R1-shared` | `shared` only on OD lines |
-| `R1-bus` | COND START/STOP is owned by the master line's owner (I2C: the `bus_b` owner; SELECT: the `bus_a` owner). It is follow-only for SE0. |
+| `R1-od-lane` | At most one clocked lane with an OD data line (`data` or `data2`) per description: the engine has one OD let-go tracker (§4.3) |
+| `R1-bus` | COND START/STOP is owned by the master line's owner (I2C: the `bus_b` owner; SELECT: the `bus_a` owner). It is follow-only for SE0. On SELECT nothing else changes `bus_a`: no COND FALL/RISE or RAW REL on it and no XFER on a lane that uses it, and a HOLD or RAW SET on it keeps it at the level it has on every path its owner can take (a setup time after the START, say). Paths into `abort_pc` count, with CS at either level once a step has ABORT: an abort may come mid-frame. Every follower's detector takes any edge of it as a START or STOP (§4.7), and only COND START/STOP are timed and tracked as one (a STOP releases the gated lines, §2). |
 | `R2-branch` | Outside role blocks, `BR Z/NZ` tests only clean registers: written by `XFER dst`, `LI`, `ALU` on clean inputs, or `CRC GET` of a clean state. Taints: `POP`, `RAW GET/EVT`, `COND meas`, `XFER dst` on a lane with an OD data line (`data` or `data2`; the wire can differ from what was sent), any write in a role block, and every register at program entry (until written; §1) and at `abort_pc`. The CRC state is a ninth taint slot; it's a forward dataflow analysis. **Inside a role block any branch is allowed.** `RAW JPIN` and `BR TO` are only legal in role blocks. `BR ROLE` is a role split like `ROLE_IF`: the analysis follows each role's path, and `R3-escape` applies to its target. |
+| `R2-edge` | A COND FALL or RISE that its owner does comes where the wire is at the pre-edge level (1 before FALL, 0 before RISE) on every path its owner can take; START and STOP likewise on `bus_a`, and on I2C with SCL high. A COND do drives the post-edge level (§4.2), so without it there is no edge and the others wait for one. The compiler tracks every party's drive: a PP line is its owner's, an OD line the wired-AND of all (it starts released, whatever its idle), and an OD RISE needs everyone else released. A drive is known from the idle level at reset, a HOLD, a COND, an XFER from ZERO or ONES (a PP data line keeps its last bit; a clocked OD one holds it until the lane's next clock edge, the let-go), a lane's clock at its idle level after a clocked XFER, or RAW SET/REL. A gated line is released while its gate is shut (from RUN, and from a SELECT STOP, until its engine's next timed step), and RAW SET does nothing then; where a path with the gate shut meets one with the line high, it reads 1. A role block a party skips leaves unknown what its parties may drive in it. The paths from an abort or bus exit into `abort_pc` aren't checked yet (open, as in §6) |
 | `R3-timed-in-role` | Role blocks contain no timed steps, except lead blocks |
-| `R3-lead` | `lead(party)`: one party. Every timed step in it is owned by that party, or uses a lane whose clock that party owns; a bus COND START/STOP, owned by the master line's owner (`R1-bus`), is also allowed. It leaves either by its fall-through exit (the leader carries on with the next step; no timed step may lie on that path) or by a path that runs a bus COND START/STOP and then branches to `abort_pc`; no path halts. The block's CFG fall-through successor S is a timed step with ABORT, which the other roles follow speculatively. It may not have CHK, and its profile `max` must be INF. When S's events come from the leader (it clocks S, or owns S), the others wait in S for the exit's bus COND, so no exit path may complete S first: before its bus COND the leader makes fewer edges on S's clock than S needs (2n), or none on a COND S's line (which may not be `bus_a`); a COND START S needs a STOP exit, and from `abort_pc` the leader reaches S before any other START. Such an S is not a COND STOP, HOLD or unclocked XFER, which would complete without the leader. Nothing timed lies between the exit's bus COND and its branch to `abort_pc`. |
+| `R3-lead` | `lead(party)`: one party. Every timed step in it is owned by that party, or uses a lane whose clock that party owns; a bus COND START/STOP, owned by the master line's owner (`R1-bus`), is also allowed. It leaves either by its fall-through exit (the leader carries on with the next step; no timed step may lie on that path) or by a path that runs a bus COND START/STOP and then branches to `abort_pc`; no path halts. The block's CFG fall-through successor S is a timed step with ABORT, which the other roles follow speculatively. It may not have CHK, and its profile `max` must be INF. When S's events come from the leader (it clocks S, or owns S), the others wait in S for the exit's bus COND, so no exit path may complete S first: before its bus COND the leader makes fewer edges on S's clock than S needs (2n), or none on a COND S's line (which may not be `bus_a`); a COND START S needs a STOP exit, and from `abort_pc` the leader reaches S before any other START. Such an S is not a COND STOP, HOLD or unclocked XFER, which would complete without the leader. Nothing timed lies between the exit's bus COND and its branch to `abort_pc`. An exit's bus COND that the leader follows has max INF: its owner makes it from S, whenever its own path gets there. |
 | `R3-raw-drive` | `RAW SET/REL` only in a role block without MON; on a PP line, also only if the block's mask ⊆ {line owner} |
 | `R3-escape` | No branch into a role block from outside. A branch out of a role block may go only to its exit, or from a lead block to `abort_pc` (the `abort_to` target, under `R3-lead`). `abort_pc` is not inside a block body. |
-| `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere |
-| `S-*` | Names resolve (`S-label`); fields in range and program ≤ 512 (`S-range`); tables fit the chip's sizes (`S-table`); `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY n ≥ U`; `BR ROLE` mask ≠ 0; `gated` only on PP lines with idle 1, and not on a line the SELECT master owns (`S-line`) |
-| `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line. COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
+| `R3-fz` | `FZ` only in a block for exactly one party, the same party everywhere; that party sends in every `XFER src = FZ` (its owner, or a duplex lane's data2 owner) |
+| `S-*` | Names resolve (`S-label`); fields in range and program ≤ 512 (`S-range`); no role's path runs past the last word, by falling through it or by skipping a role block at the end, and the program isn't empty (`S-end`: the chip has no program length and would run what the SRAM holds next; the model halts there); tables fit the chip's sizes (`S-table`); `data2` only on a clocked lane (or a CODEC lane with `d2_comp`); duplex `n ≤ 8`; a clocked lane's clock line idles at `cpol` (an OD clock rests released, so at 1), and its `data`, `clk` and `data2` are distinct lines (`S-lane`); CRC config valid; unclocked ABORT only with CHK or an active bus (`S-flags`); immediate shift < 16; `PROF` p = 7; `RAW DELAY` 1 ≤ n ≤ 4095; `BR ROLE` mask ≠ 0; `gated` only on PP lines with idle 1, and not on a line the SELECT master owns (`S-line`) |
+| `S-bus` | I2C: `bus_a` and `bus_b` are two OD lines, used with a cpol 1, cpha 1 lane on (`bus_a`, `bus_b`). The master line (I2C `bus_b`, SELECT `bus_a`) has a party owner: only its owner runs no detector. SELECT: `bus_a` is a PP line idling at 1 (CS is active low; an idle-0 CS would fall at start-up, a START no COND START made). COND START/STOP need `bus_kind ≠ NONE` and line field 0. `stretch` needs an OD `clk`, and its clock is released with COND RISE, not HOLD 1. |
 
 ## 6. Timing rules (compiler)
 
 `d = tolerance_ppm / 1e6`. `A` = nominal cycles since the last guaranteed anchor, the max over CFG
-paths. Anchors are a followed COND (START/STOP included), a clocked XFER, and an exit into
-`abort_pc` from a bus event or a lead block. HOLD and unclocked XFER add their duration. `A`
-unbounded around a loop fails `T1-unanchored`.
+paths. Anchors are reset, a followed COND (START/STOP included), a clocked XFER, and an exit into
+`abort_pc` from a bus event or a lead block. Code that only an abort or a bus exit reaches (after a
+HALT) is checked from `abort_pc` at `A = 0`, when a step has ABORT: a fatal abort's restart isn't
+synced to the owner, but T5-abort makes the first timed step there re-anchor. HOLD and unclocked
+XFER add their duration. `A` unbounded around a loop fails `T1-unanchored`, as does `A` past 2^22
+(the 24-bit clamp, §4.1) or more than 64 distinct `(A, window)` states at one step (the checker's limit).
 
 `L` (used in T3) = the start cycle of a step relative to its `tb`. That is the predecessor's
 completion offset + `ISSUE` + `U` × (untimed instructions between them), worst case over paths,
 with `RAW DELAY n` counted as `n` rounded up to a multiple of `U` and FZ ops at their fixed
-costs. `POP` counts `U` (a stall is covered by `T5-stall`). `A` and `L` are computed per role.
+costs. `POP` counts `U` (a stall is covered by `T5-stall`). A loop with no timed step, or more than
+4096 paths between the two steps (the checker's limit), makes the worst case unbounded: the checker
+doesn't track register values. `A` and `L` are computed per role.
 
 | Rule | Check |
 |---|---|
 | `T1-sample` | Follower sample of slot `k`: `ceil(d·(A + (k+1)·P)) + QUANT + ISSUE < P//2` |
-| `T2-window` | A bounded COND, and the accumulated CHK windows: `min ≤ nom − ceil(d·(A + nom)) − QUANT` (COND: only if `min > 0`) and (`max = INF` or) `max ≥ nom + ceil(d·(A + nom)) + QUANT`. The anchor rule: a CHK unclocked XFER at `A = 0` is rejected; drop `check` or put a timed step first. |
-| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner (of `data` or `data2`), or a party that may drive an OD data line of the lane (it can hold a let-go into this step), that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. A bounded clock follower: the first edge, seen at `F = (cpha 0: max(0, L_clk) + H; cpha 1: max(H, L_clk)) + EDGE_LAT`, needs `F + ceil(d·(A + H)) − L_lo ≤ max + QUANT`, where `L_clk` is the clock owner's latest start and `L_lo` the follower's earliest; and `H + ceil(d·H) ≤ max + QUANT`. |
+| `T2-window` | A bounded COND, and the accumulated CHK windows: `min ≤ t_lo − ceil(d·(A + nom)) − QUANT` (COND: only if `min > 0`) and (`max = INF` or) `max ≥ t_hi + ceil(d·(A + nom)) + QUANT`. For a COND the owner acts at `t = max(nom, its start)`: `t_lo` from its earliest start, `t_hi` from its latest (they differ from `nom` only when `nom < ISSUE`, T5-overrun). For a CHK window `t_lo = t_hi = nom`. The anchor rule: a CHK unclocked XFER at `A = 0` is rejected; drop `check` or put a timed step first. |
+| `T3-latency` | Clocked, clock followers: `H − ceil(d·H) ≥ 2`. A data owner (of `data` or `data2`), or a party that may drive an OD data line of the lane (it can hold a let-go into this step), that isn't the clock owner: `H ≥ EDGE_LAT + 1 + ldelay + ceil(d·2H)`. Its bit 0 with `cpha = 0`: `H ≥ L + 1 + ceil(d·(A + H))`. A bounded clock follower: the first edge, seen at `F = (cpha 0: max(0, L_clk) + H; cpha 1: max(H, L_clk)) + EDGE_LAT`, needs `F + ceil(d·(A + F)) − L_lo ≤ max + QUANT` (the follower's timeout runs until that edge), where `L_clk` is the clock owner's latest start and `L_lo` the follower's earliest; and `H + ceil(d·H) ≤ max + QUANT`. A clock owner that skips the lead block holding the step clocks the block's successor S meanwhile (`R3-lead`), so the step gets S's edges: after a step before the block, `L_clk` is its latest start of S, when S is a clocked XFER on the same clock with the same `H` and cpha, and at least as many bits. With no start for the step (the clock owner doesn't run it, and S gives none), a bounded clock follower fails: its edges may never come. |
 | `T4-profile` | `0 ≤ min ≤ nom ≤ max ≤ INF`. `nom ≥ 1` for HOLD and XFER. `H ≥ 2`. Stretch lanes: `H ≥ EDGE_LAT + 2`. A lane with an `ldelay`: `ldelay ≤ H − EDGE_LAT − 2`. |
-| `T5-watch` | `L + ceil(d·(A + obs)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `nom` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample). A followed COND START/STOP adds `bus_confirm + 1` to the right side: the detector runs every cycle and its flag is sticky, so the follower only has to be waiting by the confirm. A COND START/STOP right after another (no timed step between) needs `nom − ceil(d·nom) − QUANT ≥ bus_confirm`: an edge inside the previous one's confirm window would replace its candidate (§4.7) |
+| `T5-watch` | `L + ceil(d·(A + nom)) ≤ obs + EDGE_LAT`, where `obs` is the owner's planned offset of the first observable event: `max(nom, the owner's earliest start)` (COND), `H` (clocked XFER first edge), `nom//2` (HOLD / unclocked XFER first sample). The drift is taken over the step's whole `nom`, a cycle more at most than up to `obs`. A followed COND START/STOP adds `bus_confirm + 1` to the right side: the detector runs every cycle and its flag is sticky, so the follower only has to be waiting by the confirm. A COND START/STOP right after another (no timed step between) needs `nom − ceil(d·nom) − QUANT ≥ bus_confirm`: an edge inside the previous one's confirm window would replace its candidate (§4.7) |
 | `T5-overrun` | Owner start ≤ planned offset if it is > 0, or ≤ `ISSUE` if it is 0. Planned offset: `nom` for COND, 0 for HOLD and unclocked XFER. Clocked XFER is exempt (§4.1). |
 | `T5-timeout` | A bounded COND without ABORT is followed only by an unbounded COND |
-| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows, or a COND START/STOP it does (on a bus the others exit on it; any other edge of its own could land mid-frame). On a bus it has ABORT only if it is a followed COND START/STOP: a bus exit leaves its flag set, so any other ABORT step there would exit again at once, forever. |
-| `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block whose successor is one of those for it (the others wait in it). MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
+| `T5-abort` | The first timed step a role can reach from `abort_pc` is an unbounded COND that it follows, or a COND START/STOP it does (on a bus the others exit on it; any other edge of its own could land mid-frame). On a bus it has ABORT only if it is a followed COND START/STOP: a bus exit leaves its flag set, so any other ABORT step there would exit again at once, forever. No `fz.next` or `fz.end` lies between `abort_pc` and that step for a role that can abort or exit: the timing rules don't time the path from an abort or a bus exit into `abort_pc` (open), and their 40–48 cycles could miss the re-sync. |
+| `T5-stall` | After an owner's possible stall (`POP`), its next timed step on every path must be its own and make the others wait for it: an unbounded COND it does, an unbounded clocked XFER it clocks (whoever owns the data), or a step inside a lead block whose successor is one of those for it (the others wait in it). Not the successor of another party's lead block that holds a bounded step on its clock: that step gets the successor's edges, and times out while it stalls. MON owns no step, so nothing may follow a POP in MON. An owned `src = FIFO` XFER waits inside the step, so it must itself be one of those: on an unclocked lane, only inside a lead block |
+| `T5-startup` | Instruction 0 is not a COND RISE or a clocked XFER on an idle-0 line or clock, nor a COND FALL on an idle-0 PP line. It starts at `now = 2`, when every engine sees the line's start-up 1 (§2) as a rise and a PP one falling back to idle at `now = 3`, and would take that edge as the other party's: a clock follower miscounts its bits, with no violation. An untimed instruction first (2 cycles) avoids it |
 
 - Completion offsets relative to the step's end `tb`:
   - COND: do 0, follow `E` (START/STOP: `E + bus_confirm + 1`).

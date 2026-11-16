@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from .compiler import Diagnostic, Lowered
 from .image import Profile
 from .isa import (
-    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, Dst, Instr, Op, Owner,
-    CondKind, RawOp, Role, Src,
+    EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, BusKind, Dst, Instr, Op, Owner,
+    CondKind, FzOp, RawOp, Role, Src, FZ_END_CYCLES, FZ_NEXT_CYCLES, FZ_TOK_CYCLES,
     reg_of, unpack_cond, unpack_role_if, unpack_xfer,
 )
 
@@ -48,6 +48,53 @@ def successors(instrs: list[Instr], pc: int, role: Role | None = None) -> list[i
             return nxt + [s for s in skip_l if s not in nxt]
         return nxt if mask >> int(role) & 1 else skip_l
     return nxt
+
+
+def _role_successors(instrs: list[Instr], pc: int, role: Role) -> list[int]:
+    """Where `role` can go from pc, a pc past the last word included: ROLE_IF follows the role's
+    own path (descriptions have no BR ROLE)."""
+    ins = instrs[pc]
+    if ins.op == Op.HALT:
+        return []
+    if ins.op == Op.BR:
+        return [ins.operand] if BrCond(ins.sub) == BrCond.ALWAYS else [pc + 1, ins.operand]
+    if ins.op == Op.RAW and ins.sub == RawOp.JPIN:
+        return [pc + 1, ins.operand & 0x7FF]
+    if ins.op == Op.ROLE_IF:
+        mask, count = unpack_role_if(ins.operand)
+        return [pc + 1] if mask >> int(role) & 1 else [pc + 1 + count]
+    return [pc + 1]
+
+
+def check_end(desc, low: Lowered) -> list[Diagnostic]:
+    """S-end (isa §5): no role's path runs past the last word, by falling through it or by skipping
+    a role block at the end. The model halts there; the chip has no program length and runs
+    whatever the SRAM holds next (NOP is opcode 0). A label at the end names no step, so no branch
+    or abort_pc gets there (S-label); a bus exit goes to abort_pc only from a step with ABORT."""
+    instrs, diags = low.instrs, _Diags(desc, low)
+    n = len(instrs)
+    if not n:
+        diags.add("S-end", 0, "the program is empty: the chip would run whatever the SRAM holds")
+        return diags.list()
+    entry = [0] + ([low.image.abort_pc] if any(_aborts(ins) for ins in instrs) else [])
+    for role in ROLES:
+        seen: set[int] = set()
+        work = list(entry)  # abort_pc names a step, so it is < n
+        while work:
+            pc = work.pop()
+            if pc in seen:
+                continue
+            seen.add(pc)
+            for s in _role_successors(instrs, pc, role):
+                if s < n:
+                    work.append(s)
+                elif instrs[pc].op == Op.ROLE_IF:
+                    diags.add("S-end", pc, f"{role.name} skips this role block, the program's last, "
+                                           f"and runs past the end: put a step (halt) after it")
+                else:
+                    diags.add("S-end", pc, f"{role.name} runs past the program's last word here, where "
+                                           f"the chip runs whatever the SRAM holds: end with halt or a branch")
+    return diags.list()
 
 
 def _in_block(low: Lowered, pc: int) -> bool:
@@ -108,8 +155,260 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
     return diags.list()
 
 
+# ----------------------------------------------------------------------------- R2-edge
+_LG, _SHUT = "LG", "SHUT"   # a pending OD let-go (low until the lane's next clock edge); a shut gate
+_SHUT1 = "SHUT?"            # a gated line shut on some paths, released or driven 1 on the others
+_READS_1 = (_SHUT, _SHUT1, 1)
+
+
+def _join(x, y):
+    """Two paths' drives: the same, a gated line that reads 1 on both, or unknown."""
+    if x == y:
+        return x
+    return _SHUT1 if x in _READS_1 and y in _READS_1 else None
+_PARTIES = (Role.P0, Role.P1)
+
+
+def check_levels(desc, low: Lowered) -> list[Diagnostic]:
+    """R2-edge (isa §5). A COND its owner does drives the post-edge level (isa §4.2): if the wire is
+    already there, there is no edge and the others wait for one that never comes. So on every path
+    the owner can take, the wire is at the pre-edge level before the COND.
+
+    The walk, once per party r along r's paths, tracks every party's drive on every line:
+    - a PP line is its owner's drive. It is the idle level from reset, unless the line is gated;
+    - an OD line is the wired-AND of every party's drive. It starts released (1), whatever its idle;
+    - a drive comes from a HOLD, a COND's post-edge level, an XFER from ZERO or ONES (a PP data line
+      keeps its last bit; a clocked OD one holds it until the lane's next clock edge, the let-go),
+      a lane's clock at its idle level after a clocked XFER, or RAW SET/REL;
+    - a gated line is released while its gate is shut: at RUN and after a SELECT STOP, until the
+      next timed step its engine runs. RAW SET does nothing then (isa §2). Where a path with the
+      gate shut meets one where the line is released or 1, it reads 1 (_SHUT1);
+    - a role block r skips leaves unknown whatever its parties may drive in it;
+    - anything else, and paths that disagree, leave a drive unknown.
+
+    COND START/STOP are the edges on `bus_a` (START = FALL, STOP = RISE); on I2C, SCL must be high
+    too. On SELECT, a HOLD or RAW SET by CS's owner must keep CS at its level (R1-bus, its own
+    walk, which also starts at abort_pc). The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
+    instrs = low.instrs
+    diags = _Diags(desc, low)
+    img = low.image
+    if not instrs:
+        return []
+    lines, lanes = img.lines, img.lanes
+    kind = img.bus.kind
+    bus_a = img.bus.a if kind in (BusKind.I2C, BusKind.SELECT) else None
+    scl = img.bus.b if kind == BusKind.I2C else None
+    span_at = {pc: sp for sp in low.spans for pc in range(sp.start, sp.end)}
+    block_at = {sp.role_if_pc: sp for sp in low.spans}
+
+    def runs(pc: int) -> tuple:
+        sp = span_at.get(pc)
+        return _PARTIES if sp is None else tuple(q for q in _PARTIES if q in sp.roles)
+
+    def does(owner, q) -> bool:
+        return owner == Owner.SHARED or int(owner) == int(q)
+
+    def edge_line(ins: Instr):
+        """(kind, line) of a COND: START/STOP are on bus_a."""
+        k = CondKind(unpack_cond(ins.operand)[0])
+        return k, (bus_a if k in (CondKind.START, CondKind.STOP) else ins.line)
+
+    def drives(pc: int) -> list[tuple[Role, int]]:
+        """(party, line) pairs the instruction at pc may drive."""
+        ins, ex = instrs[pc], runs(pc)
+        out: list[tuple[Role, int]] = []
+        if ins.op in (Op.COND, Op.HOLD):
+            line = edge_line(ins)[1] if ins.op == Op.COND else ins.line
+            if line is not None:
+                out += [(q, line) for q in ex if does(ins.owner, q)]
+        elif ins.op == Op.XFER:
+            la = lanes[ins.line]
+            out += [(q, la.data) for q in ex if does(ins.owner, q)]
+            for ln in (la.data2, la.clk):
+                if ln is not None:
+                    out += [(q, ln) for q in ex if does(lines[ln].owner, q)]
+        elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
+            out += [(q, ins.ra) for q in ex]
+        return out
+
+    touched = {sp.role_if_pc: {(q, ln) for pc in range(sp.start, sp.end) for q, ln in drives(pc)}
+               for sp in low.spans}
+
+    def wire(st, i):
+        ln = lines[i]
+        if ln.kind == "pp":
+            v = st[int(ln.owner)][i]
+            return 1 if v in (_SHUT, _SHUT1) else v
+        vals = [st[int(q)][i] for q in _PARTIES]
+        if any(v in (0, _LG) for v in vals):
+            return 0
+        return None if any(v is None for v in vals) else 1
+
+    def edge_on(st, clk: int) -> None:
+        """An edge on a lane's clock: that lane's let-go is taken (isa §4.3)."""
+        for la in lanes:
+            if la.clk == clk:
+                for dl in (la.data, la.data2):
+                    if dl is not None:
+                        for q in _PARTIES:
+                            if st[int(q)][dl] == _LG:
+                                st[int(q)][dl] = 1
+
+    def check(st, pc: int, ins: Instr, r: Role) -> None:
+        k, line = edge_line(ins)
+        if line is None:
+            return
+        name = lines[line].name
+        if k in (CondKind.FALL, CondKind.START):
+            ok, why = wire(st, line) == 1, f"{name} may not be high here"
+        elif lines[line].kind == "pp":
+            ok, why = wire(st, line) == 0, f"{name} may not be low here"
+        else:  # an OD RISE: the doers' release lets it up only if nobody else holds it low
+            mine = [st[int(q)][line] for q in _PARTIES if does(ins.owner, q)]
+            others = [st[int(q)][line] for q in _PARTIES if not does(ins.owner, q)]
+            ok = any(v in (0, _LG) for v in mine) and all(v == 1 for v in others)
+            why = f"{name} may not be low by the doer's drive alone here"
+        if scl is not None and k in (CondKind.START, CondKind.STOP) and wire(st, scl) != 1:
+            ok, why = False, f"SCL ({lines[scl].name}) may not be high here"
+        if not ok:
+            diags.add("R2-edge", pc, f"COND {k.name} by {r.name}: {why}, so its drive makes no edge "
+                                     f"and the others wait for one (isa §4.2)")
+
+
+    def check_cs() -> None:
+        """R1-bus: a HOLD or RAW SET by CS's owner keeps a SELECT CS at the level it has. Only
+        its owner's COND START/STOP change CS (the rest is rejected outright), so this walks CS's
+        level alone, along its owner's paths: from pc 0 at idle (1), and from abort_pc at either
+        level once a step has ABORT, since an abort may come in the middle of a frame (the walk
+        above doesn't take those paths)."""
+        r = next(q for q in _PARTIES if int(q) == int(lines[bus_a].owner))
+        name = lines[bus_a].name
+        state: dict[int, int | None] = {0: lines[bus_a].idle}
+        if any(_aborts(ins) for ins in instrs):
+            state[img.abort_pc] = None
+        work = list(state)
+        while work:
+            pc = work.pop()
+            v, ins = state[pc], instrs[pc]
+            if r in runs(pc):
+                if ins.op == Op.COND and edge_line(ins)[1] == bus_a:
+                    v = 0 if edge_line(ins)[0] in (CondKind.FALL, CondKind.START) else 1
+                elif ((ins.op == Op.HOLD and ins.line == bus_a and does(ins.owner, r))
+                      or (ins.op == Op.RAW and ins.sub == RawOp.SET and ins.ra == bus_a)):
+                    what, level = ("HOLD" if ins.op == Op.HOLD else "RAW SET"), ins.operand & 1
+                    if v != level:
+                        diags.add("R1-bus", pc, f"{what} {level} on the SELECT line {name!r} by {r.name}: "
+                                                f"{name} may not be at {level} here, so it may make an edge, "
+                                                f"a START or STOP to the others that no COND START/STOP "
+                                                f"times (isa §4.7)")
+                    v = level
+            for s in successors(instrs, pc, r):
+                new = v if s not in state else (state[s] if state[s] == v else None)
+                if s not in state or new != state[s]:
+                    state[s] = new
+                    work.append(s)
+
+    def step(st, pc: int) -> None:
+        ins, ex = instrs[pc], runs(pc)
+        if ins.op in (Op.COND, Op.HOLD, Op.XFER):
+            # a timed step opens the gate of every engine that runs it (isa §2): its gated lines
+            # stay released, at the pull-up, but a RAW SET now drives them
+            for q in ex:
+                for i, ln in enumerate(lines):
+                    if ln.gated and int(ln.owner) == int(q) and st[int(q)][i] in (_SHUT, _SHUT1):
+                        st[int(q)][i] = 1
+        if ins.op in (Op.COND, Op.HOLD):
+            if ins.op == Op.COND:
+                k, line = edge_line(ins)
+                level = 0 if k in (CondKind.FALL, CondKind.START) else 1
+            else:
+                k, line, level = None, ins.line, ins.operand & 1
+            if line is None:
+                return
+            for q in ex:
+                if does(ins.owner, q):
+                    st[int(q)][line] = level
+            edge_on(st, line)
+            # the STOP shuts the gate it opened: for a follower that holds only because T5-watch
+            # has it start the COND STOP by the confirm cycle (a later start would reopen it)
+            if k == CondKind.STOP and kind == BusKind.SELECT:
+                for i, ln in enumerate(lines):
+                    if ln.gated:
+                        st[int(ln.owner)][i] = _SHUT
+        elif ins.op == Op.XFER:
+            la = lanes[ins.line]
+            if la.clk is not None:
+                edge_on(st, la.clk)
+            const = {Src.ZERO: 0, Src.ONES: 1}.get(unpack_xfer(ins.operand)[1])
+            for q, dl in drives(pc):
+                if dl == la.clk:
+                    st[int(q)][dl] = la.cpol
+                elif lines[dl].kind == "pp" or const == 1:
+                    st[int(q)][dl] = const
+                else:
+                    st[int(q)][dl] = _LG if la.clk is not None and const == 0 else None
+        elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
+            od = lines[ins.ra].kind == "od"
+            for q in ex:
+                cur = st[int(q)][ins.ra]
+                if cur == _SHUT:
+                    continue  # a shut gate ignores RAW (isa §2)
+                if lines[ins.ra].gated and cur is None:
+                    st[int(q)][ins.ra] = None
+                elif cur == _SHUT1:  # ignored where the gate is shut, driven where it is open
+                    st[int(q)][ins.ra] = _SHUT1 if ins.sub == RawOp.SET and ins.operand & 1 else None
+                elif ins.sub == RawOp.SET:
+                    st[int(q)][ins.ra] = ins.operand & 1
+                else:
+                    st[int(q)][ins.ra] = 1 if od else None
+
+    init = []
+    for q in _PARTIES:
+        row = []
+        for ln in lines:
+            if ln.kind == "od":
+                row.append(1)
+            elif ln.gated:
+                row.append(_SHUT if int(ln.owner) == int(q) else 1)
+            else:
+                row.append(ln.idle)
+        init.append(tuple(row))
+    for r in _PARTIES:
+        state: dict[int, tuple] = {0: tuple(init)}
+        work = [0]
+        while work:
+            pc = work.pop()
+            st = [list(row) for row in state[pc]]
+            ins = instrs[pc]
+            if ins.op == Op.COND and r in runs(pc) and does(ins.owner, r):
+                check(st, pc, ins, r)
+            step(st, pc)
+            sp = block_at.get(pc)
+            if sp is not None and r not in sp.roles:  # r skips it: what its parties drive there is unknown
+                for q, ln in touched[pc]:
+                    st[int(q)][ln] = None
+            out = tuple(tuple(row) for row in st)
+            for s in successors(instrs, pc, r):
+                old = state.get(s)
+                new = out if old is None else tuple(tuple(_join(x, y) for x, y in zip(o, n))
+                                                    for o, n in zip(old, out))
+                if new != old:
+                    state[s] = new
+                    work.append(s)
+    if kind == BusKind.SELECT:
+        check_cs()
+    return diags.list()
+
+
 def _aborts(ins: Instr) -> bool:
     return ins.op in (Op.COND, Op.HOLD, Op.XFER) and bool(ins.flags & F_ABORT)
+
+
+def _entries(low: Lowered) -> list[int]:
+    """Where a run can start: pc 0, and abort_pc once a step has ABORT (an abort or a bus exit
+    restarts there; with none, nothing jumps to it)."""
+    apc = low.image.abort_pc
+    return [0] + ([apc] if apc and any(_aborts(ins) for ins in low.instrs) else [])
 
 
 def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int] = frozenset()) -> int:
@@ -130,6 +429,8 @@ def _taint(ins: Instr, t: int, inblock: bool, od_lanes: frozenset[int] | set[int
         return t
     if ins.op == Op.RAW and ins.sub in (RawOp.GET, RawOp.EVT):
         return put(ins.rd, True)
+    if ins.op == Op.FZ and ins.sub in (FzOp.NEXT, FzOp.END):  # the fuzzing party's alone
+        return put(ins.rd, True)
     if ins.op == Op.XFER:
         dst = unpack_xfer(ins.operand)[2]
         if dst >= Dst.R0:
@@ -148,6 +449,7 @@ class _Step:
     n: int = 1
     clocked: bool = False
     clk_owner: Role | None = None
+    clk_line: int | None = None
     cpha: int = 0
     chk: bool = False
     abort: bool = False
@@ -156,7 +458,7 @@ class _Step:
     od_drivers: frozenset = frozenset()  # parties that may drive an OD data line of the lane
     stretch: bool = False   # a clocked XFER on a stretch lane
     cpol: int = 0
-    stretch_wait: bool = False  # a HOLD 1 / COND RISE on a stretch lane's clock: its owner waits
+    stretch_wait: bool = False  # a COND RISE on a stretch lane's clock (never HOLD 1, S-bus): its owner waits
     bus_wait: int = 0  # COND START/STOP: a follower completes bus_confirm + 1 after the edge is seen
     ldelay: int = 0
 
@@ -195,7 +497,7 @@ def _steps(low: Lowered) -> dict[int, _Step]:
             lane = img.lanes[ins.line]
             kw["od"] = any(x is not None and img.lines[x].kind == "od" for x in (lane.data, lane.data2))
             if lane.clk is not None:
-                kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)),
+                kw.update(clocked=True, cpha=lane.cpha, clk_owner=Role(int(img.lines[lane.clk].owner)), clk_line=lane.clk,
                           ldelay=lane.ldelay, stretch=bool(lane.stretch), cpol=lane.cpol)
                 if lane.data2 is not None and img.lines[lane.data2].owner in (Owner.P0, Owner.P1):
                     kw["d2_owner"] = Role(int(img.lines[lane.data2].owner))
@@ -240,11 +542,16 @@ def completion(s: _Step, r: Role) -> tuple[int, int]:
     return E, E
 
 
+FZ_CYCLES = {FzOp.NEXT: FZ_NEXT_CYCLES, FzOp.TOK: FZ_TOK_CYCLES, FzOp.END: FZ_END_CYCLES}
+
+
 def _cost(ins: Instr) -> int:
-    """Cycles an untimed instruction adds to `L` (isa §4.0, §6): U, and RAW DELAY n rounded up to a
-    multiple of U. POP counts U; a stall is T5-stall's job."""
+    """Cycles an untimed instruction adds to `L` (isa §4.0, §6): U, RAW DELAY n rounded up to a
+    multiple of U, and an FZ op's fixed total (isa §4.6). POP counts U; a stall is T5-stall's job."""
     if ins.op == Op.RAW and ins.sub == RawOp.DELAY:
         return -(-max(1, ins.operand) // U) * U
+    if ins.op == Op.FZ:
+        return FZ_CYCLES.get(ins.sub, U)
     return U
 
 
@@ -278,22 +585,32 @@ def gaps(instrs: list[Instr], timed: set[int], start: int, role: Role) -> dict[i
 
 def _anchor_states(low: Lowered, steps: dict[int, _Step], diags: _Diags) -> dict[int, set[tuple[int, int, int]]]:
     instrs = low.instrs
-    state: dict[int, set[tuple[int, int, int]]] = {0: {(0, 0, 0)}}
-    work = [0]
-    while work:
-        pc = work.pop()
-        out = {_advance(steps.get(pc), t) for t in state[pc]}
-        for s in successors(instrs, pc):
-            cur = state.setdefault(s, set())
-            new = out - cur
-            if not new:
-                continue
-            if any(t[0] > A_CAP for t in new) or len(cur) + len(new) > SET_CAP:
-                diags.add("T1-unanchored", s, "the timeline is never re-anchored around this loop; "
-                                              "add a followed COND or a clocked XFER")
-                continue
-            cur |= new
-            work.append(s)
+    state: dict[int, set[tuple[int, int, int]]] = {}
+
+    def walk(start: int) -> None:
+        state[start] = {(0, 0, 0)}
+        work = [start]
+        while work:
+            pc = work.pop()
+            out = {_advance(steps.get(pc), t) for t in state[pc]}
+            for s in successors(instrs, pc):
+                cur = state.setdefault(s, set())
+                new = out - cur
+                if not new:
+                    continue
+                if any(t[0] > A_CAP for t in new) or len(cur | new) > SET_CAP:
+                    diags.add("T1-unanchored", s, "the timeline is never re-anchored here (the anchor distance "
+                                                  "passes 2^22, or more than 64 anchor states meet): add a "
+                                                  "followed COND or a clocked XFER")
+                    continue
+                cur |= new
+                work.append(s)
+
+    # an abort or a bus exit restarts at abort_pc, whose first timed step re-anchors (T5-abort):
+    # code that only they reach is checked from there (S-label: abort_pc names a step)
+    for start in _entries(low):
+        if start not in state:
+            walk(start)
     return state
 
 
@@ -317,6 +634,23 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     steps = _steps(low)
     states = _anchor_states(low, steps, diags)
     timed = set(steps)
+
+    # T5-startup: instruction 0 starts at now = 2, when every engine sees an idle-0 line's start-up 1
+    # (isa §2) as a rise, and a PP one falling back to idle at now = 3: a step there that watches
+    # for that edge takes it as the other party's
+    i0, img = instrs[0], low.image
+    watched = []
+    if i0.op == Op.COND:
+        k = CondKind(unpack_cond(i0.operand)[0])
+        if k == CondKind.RISE or (k == CondKind.FALL and img.lines[i0.line].kind == "pp"):
+            watched.append(i0.line)
+    elif i0.op == Op.XFER and img.lanes[i0.line].clk is not None:
+        watched.append(img.lanes[i0.line].clk)
+    for ln in watched:
+        if img.lines[ln].idle == 0:
+            diags.add("T5-startup", 0, f"instruction 0 watches {img.lines[ln].name}, an idle-0 line: it starts at "
+                                       f"now = 2, when every engine sees the line's start-up 1 (isa §2) as a rise; "
+                                       f"put an untimed instruction first")
 
     for pc, s in steps.items():
         p = s.prof
@@ -377,7 +711,16 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}
     apc = low.image.abort_pc
     bus_on = int(low.image.bus.kind) != 0
+    # FZ ops that cost more than U on the way to that step: the timing rules don't time the path
+    # from an abort or a bus exit into abort_pc, so its 40-48 cycles could miss the re-sync
+    no_fz = [Instr(Op.NOP) if ins.op == Op.FZ else ins for ins in instrs]
     for r in sorted(aborting):
+        plain = gaps(no_fz, timed, apc, r)
+        for pc, (_, hi) in gaps(instrs, timed, apc, r).items():
+            if hi != plain[pc][1]:
+                diags.add("T5-abort", pc, f"{r.name} can run fz.next or fz.end between abort_pc {apc} and "
+                                          f"this step: the timing rules don't time that path, so it "
+                                          f"could miss the re-sync (isa §6); end the iteration after it")
         for pc in gaps(instrs, timed, apc, r):
             s = steps[pc]
             # it follows the COND, or does a COND START/STOP (on a bus the others exit on it)
@@ -395,8 +738,7 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
 
     # pairwise checks: predecessor timed step (or reset) -> next timed step
     preds: list[tuple[_Step | None, int]] = [(None, 0)] + [(s, pc + 1) for pc, s in steps.items()]
-    starts = [0] + ([apc] if apc else [])
-    runs = {r: _reach(instrs, starts, r) for r in ROLES}
+    runs = {r: _reach(instrs, _entries(low), r) for r in ROLES}
     for prev, start in preds:
         # only the roles that can run prev (a step in a lead block is the leader's alone)
         per_role = {r: gaps(instrs, timed, start, r) if prev is None or prev.pc in runs[r] else {}
@@ -419,22 +761,41 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                                                   f"{confirm}, or it replaces that one's candidate")
             if s.owner_role is None:
                 continue  # SHARED steps: Phase 4 (ARB)
-            st = {}
-            for r in ROLES:
-                if nxt_pc in per_role[r]:
-                    lo, hi = per_role[r][nxt_pc]
-                    if prev is None:  # reset completes at 0, so instruction 0 starts at now = 2
-                        st[r] = (2 + lo, 2 + hi)
-                    else:             # the first own cycle >= c + 1: c + 1 or c + ISSUE (isa §4.0)
-                        c_lo, c_hi = completion(prev, r)
-                        st[r] = (c_lo + 1 + lo, c_hi + ISSUE + hi)
+            st = {r: _start(prev, r, *per_role[r][nxt_pc]) for r in ROLES if nxt_pc in per_role[r]}
             if s.owner_role not in st:
                 continue
+            clk = None  # the clock owner's start when it doesn't run s: its start of a lead block's S
+            if s.clocked and s.clk_owner not in st:
+                sp, succ = _lead_clock(low, steps, s)
+                if succ is not None and (prev is None or not sp.start <= prev.pc < sp.end)                         and sp.end in per_role[s.clk_owner]:
+                    clk = _start(prev, s.clk_owner, *per_role[s.clk_owner][sp.end])
             # anchor distance along this edge only (untimed instructions don't move it)
             a_edge = 0 if prev is None else max(
                 (_advance(prev, t)[0] for t in states.get(prev.pc, set())), default=0)
-            _pair_checks(s, st, a_edge, ppm, diags)
+            _pair_checks(s, st, a_edge, ppm, diags, clk)
     return diags.list()
+
+
+def _start(prev: _Step | None, r: Role, lo: int, hi: int) -> tuple[int, int]:
+    """r's (earliest, latest) start of a step, `lo`..`hi` untimed cycles after prev (isa §6, L)."""
+    if prev is None:  # reset completes at 0, so instruction 0 starts at now = 2
+        return 2 + lo, 2 + hi
+    c_lo, c_hi = completion(prev, r)  # the first own cycle >= c + 1: c + 1 or c + ISSUE (isa §4.0)
+    return c_lo + 1 + lo, c_hi + ISSUE + hi
+
+
+def _lead_clock(low: Lowered, steps: dict[int, _Step], s: _Step):
+    """(block, S) for a clocked step in a lead block whose clock the other party owns: that party
+    skips the block and clocks its fall-through successor S meanwhile, so S's edges are the
+    step's, if S is a clocked XFER on the same clock with the same half period and cpha, and at
+    least as many bits (else S is None)."""
+    for sp in low.spans:
+        if sp.lead and sp.start <= s.pc < sp.end and s.clk_owner not in sp.roles:
+            succ = steps.get(sp.end)
+            same = (succ is not None and succ.clocked and succ.clk_line == s.clk_line
+                    and succ.prof.nom == s.prof.nom and succ.cpha == s.cpha and succ.n >= s.n)
+            return sp, succ if same else None
+    return None, None
 
 
 def _reach(instrs: list[Instr], starts: list[int], role: Role) -> set[int]:
@@ -455,12 +816,18 @@ def _makes_others_wait(s: _Step, r: Role, low: Lowered | None = None,
     """An unbounded COND that r does, or an unbounded clocked XFER r clocks (whoever owns its
     data): the others wait for r however long it stalled. A bounded one times them out. A step
     in a lead block r leads, if the block's successor makes the others wait for r: they are in
-    it while r decides (R3-lead)."""
+    it while r decides (R3-lead). Not the successor of another party's lead block that holds a
+    bounded step on r's clock: that step gets the successor's edges, and times out while r stalls."""
     if low is not None and steps is not None:
         for sp in low.spans:
             if sp.lead and r in sp.roles and sp.start <= s.pc < sp.end:
                 succ = steps.get(sp.end)
                 return succ is not None and _makes_others_wait(succ, r)
+        for sp in low.spans:  # r clocks s for another party's lead block that falls through to it
+            if sp.lead and sp.end == s.pc and r not in sp.roles and any(
+                    t.clocked and t.clk_owner == r and t.prof.bounded
+                    for t in (steps.get(pc) for pc in range(sp.start, sp.end)) if t is not None):
+                return False  # the leader's bounded step there gets s's edges: it times out while r stalls
     if s.prof.bounded:
         return False
     if s.op == Op.COND:
@@ -474,7 +841,7 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
     XFER waits inside the step (unless the clock is someone else's: then it sends ONES), so it
     must itself make the others wait: only a clocked XFER its owner clocks does."""
     instrs = low.instrs
-    starts = [0] + ([low.image.abort_pc] if low.image.abort_pc else [])
+    starts = _entries(low)
     for r in ROLES:  # MON owns no step, so nothing after a MON POP makes the others wait
         for pc in sorted(_reach(instrs, starts, r)):
             ins = instrs[pc]
@@ -495,7 +862,10 @@ def _check_stalls(low: Lowered, steps: dict[int, _Step], timed: set[int], diags:
                                               f"FIFO (or POP into a register before an unbounded COND)")
 
 
-def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int, diags: _Diags) -> None:
+def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int, diags: _Diags,
+                 clk: tuple[int, int] | None = None) -> None:
+    """The checks between a step and its predecessor, from each role's start (`st`). `clk` is the
+    clock owner's start when it doesn't run a clocked step itself (_lead_clock), else None."""
     p = s.prof
     pc = s.pc
     o = s.owner_role
@@ -540,12 +910,22 @@ def _pair_checks(s: _Step, st: dict[Role, tuple[int, int]], amax: int, ppm: int,
             # A bounded clock follower counts its timeout from its own start, then from each edge
             # (isa §4.1). The clock owner re-bases to its start (cpha 0) or start - H (cpha 1), so
             # its first edge is at max(0, start) + H or max(H, start), seen EDGE_LAT later.
-            c_hi = st[s.clk_owner][1] if s.clk_owner in st else 0
+            c_start = st.get(s.clk_owner, clk)
+            if c_start is None:  # its edges may never come (it HALTed, or S gives no start)
+                for r in st:
+                    if not s.is_clk_owner(r):
+                        diags.add("T3-latency", pc, f"{r.name} may time out: the clock owner "
+                                                    f"{s.clk_owner.name} doesn't run this step; it clocks it "
+                                                    f"only as a lead block's successor on the same clock "
+                                                    f"with the same half period, after a step before the block")
+                return
+            c_hi = c_start[1]
             first = (max(0, c_hi) + p.nom if s.cpha == 0 else max(p.nom, c_hi)) + E
+            df = drift(ppm, amax + first)  # the follower's timeout runs until that edge
             for r in st:
-                if not s.is_clk_owner(r) and first + dr - st[r][0] > p.max + Q:
+                if not s.is_clk_owner(r) and first + df - st[r][0] > p.max + Q:
                     diags.add("T3-latency", pc, f"{r.name} may start at {st[r][0]} and time out: the first "
-                                                f"clock edge may be visible only at {first} (drift {dr}), "
+                                                f"clock edge may be visible only at {first} (drift {df}), "
                                                 f"past max {p.max} + QUANT after it")
             if p.nom + drift(ppm, p.nom) > p.max + Q:
                 diags.add("T3-latency", pc, f"a clock phase of {p.nom} plus drift outlasts max {p.max} + "

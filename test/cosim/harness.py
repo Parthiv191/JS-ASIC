@@ -75,7 +75,8 @@ def _check_build(dut) -> None:
                            "trace port: run make, or make GATES=yes for the netlist")
 
 
-async def cosim(dut, rep: Replay, role: Role, margin: int = 64) -> None:
+async def cosim(dut, rep: Replay, role: Role, margin: int = 64, sample2: bool = False) -> None:
+    """`sample2` also compares a duplex MON's data2 samples (tr_sample2, architecture §5)."""
     _check_build(dut)
     await reset(dut)
     dut.uio_in.value = rep.stimulus[0]
@@ -85,7 +86,7 @@ async def cosim(dut, rep: Replay, role: Role, margin: int = 64) -> None:
     await host.write(ENG0 + E_ROLE, [int(role)])
     if rep.tx:  # the model pushes them at tick 0; RUN keeps the TX FIFO (architecture §4)
         await host.write(ENG0 + E_TXDATA, [b for w in rep.tx for b in (w & 0xFF, w >> 8)], pair=True)
-    mon = Monitor(dut, rep.stimulus, RUN_S0, GATES)
+    mon = Monitor(dut, rep.stimulus, RUN_S0, GATES, sample2=sample2)
     await host.write(RUN, [1])
     while mon.tick <= rep.trace.ticks + margin:
         await RisingEdge(dut.clk)

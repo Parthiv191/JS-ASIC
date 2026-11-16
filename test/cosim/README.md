@@ -74,7 +74,7 @@ below, then by fields, so the order of signals inside a cycle doesn't matter.
 | evt | kind code (isa §7) | each set bit of `tr_evt` | `events`, except MARK |
 | mark | id | `tr_mark` with `tr_value` | `events` of kind MARK |
 | br | taken | `tr_br` with `tr_taken` | `branches` |
-| sample | line | `tr_sample` with `tr_line` | `samples` |
+| sample | line | `tr_sample` with `tr_line`; with `cosim(..., sample2=True)` also `tr_sample2` with `tr_line2`, a duplex MON's data2 sample | `samples` |
 | halt | – | the first cycle `tr_halted` reads 1. Time freezes at the halt, so its `tr_now` is the HALT's start cycle. | `halt_cycle` |
 
 `pc` is `tr_pc` in the pulse's cycle. Times compare modulo 2^24.
@@ -151,6 +151,7 @@ An OD line driven high for its 1s also fails, in the OD readback test, through t
 | input at now 1 | P1 | `uio_in` during `now = 1` is the stimulus at tick 1 |
 | idle 0 start | P0, P1 | the idle drive lands at `now = 1`: owner and follower read 1 at `now = 2`, then 0 |
 | hold, cond | P0, P1 | HOLD and COND do and follow; EARLY, TIMEOUT, ABORT into `abort_pc` |
+| cond meas | P0, P1, MON | COND with MEAS, unbounded and bounded, against peers up to 2% slow: the step's trace value is the measurement MEAS writes; a TIMEOUT writes and traces 0xFFFF |
 | xfer follower | P1 | unclocked XFER, every MSB/CHK/RESYNC combination, against a 2% slow sender with a glitch |
 | uart frame | tx, rx, mon | a UART frame with register src/dst, peers up to 2% slow and out of phase (model clocks only run slower) |
 | glitch | rx | an out-of-window edge (EDGE, data kept), a flipped sample (data 0xA0), a glitch in the start bit (LEVEL) |
@@ -161,16 +162,19 @@ An OD line driven high for its 1s also fails, in the OD readback test, through t
 | illegal | P0 | a reserved code halts as ILLEGAL |
 | role branches | P0 | `tr_br` pulses for ROLE_IF and RAW JPIN (both gaps in #13 were fixed in #14) |
 | uart protocol | tx, rx, mon | the library UART (`emu/protocols/uart.py`) from the FIFOs: tx POPs its host's 4 words (the RTL's from TXDATA), rx and mon push them into RX (the RTL's read over RXDATA); peers up to 2% slow |
+| spi protocol | ctl, per, mon | the library SPI (`emu/protocols/spi.py`), a 2-byte frame in all four modes against peers 2% slow: the SELECT bus, the gated MISO, duplex XFERs from TXDATA to RXDATA; MON's MISO samples on `tr_sample2` (`sample2=True`) |
+| i2c protocol | ctl, tgt, mon | the library I2C write (`emu/protocols/i2c.py`) with two data bytes, against peers up to 2% slow: COND START and STOP, the OD lane and its lets-go, the lead blocks. ack: the target and MON push the bytes. nack: the controller pushes 1, and MON's speculative data byte ends in a bus exit |
+| i2c short ldelay | ctl, tgt | `ldelay` 1 and 4: the let-go counts down from the owner's edge, or `ldelay` − 3 from a detected one, down to 0 |
+| random program | ctl, per, mon (k mod 3) | `COSIM_RANDOM` (24) random programs from `emu/gen`, each the first accepted recipe from its seed whose RTL party needs at most 4 host words, against peers at a tolerance corner. 60 pass; a model whose followers see edges a cycle early (EDGE_LAT − 1), which passes every oracle on the model, fails 10 of 12 |
 
 Every test compares the pins and ACT, at gate level too. There, illegal and role branches check
 only ACT: an ILLEGAL halts 2 cycles before the HALT behind it would.
 
 **Later**, each its own PR:
-1. SPI and I2C, the library protocols (`emu/protocols`), once the RTL has clocked XFER and the bus.
-2. Engine 1: both engines on-chip with LOOPBACK, against a two-engine model.
-3. Random programs from the compiler, with the shrinker (verification.md layer 4).
-4. The other `uo_out` pins against the model: IRQ, and ERR (any VIOL bit).
-5. Host words during the run (more than 4 for the RTL's engine), timed as the model pushes them.
+1. Engine 1: both engines on-chip with LOOPBACK, against a two-engine model.
+2. Random programs with aborts, the bus, duplex and more host words than TX holds (emu/gen's next slice).
+3. The other `uo_out` pins against the model: IRQ, and ERR (any VIOL bit).
+4. Host words during the run (more than 4 for the RTL's engine), timed as the model pushes them.
 
 ## 5. Running
 

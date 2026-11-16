@@ -149,7 +149,7 @@ def test_taken_branch_and_role_if_skip_cost_U():
     assert run(Engine(img(skip), Role.P0), 20).starts == [(0, 2), (3, 4)]
 
 
-@pytest.mark.parametrize("n,gap", [(2, 2), (3, 4), (4, 4), (5, 6)])
+@pytest.mark.parametrize("n,gap", [(1, 2), (2, 2), (3, 4), (4, 4), (5, 6)])
 def test_raw_delay_rounds_up_to_U(n, gap):
     """RAW DELAY n takes n cycles rounded up to a multiple of U = 2 (isa §4.0)."""
     def b(d, l):
@@ -362,3 +362,11 @@ def test_rx_fifo_holds_8_words_then_drops_with_overflow():
     e = run(Engine(img(b), Role.P0), 100)
     assert e.halted and e.rx == list(range(8))
     assert [ev.kind for ev in e.events] == ["OVERFLOW"] and e.evt == 1 << 4
+
+
+def test_an_image_that_runs_past_its_last_word_halts_there():
+    """The compiler rejects a program that can run past its last word (S-end): the chip has no
+    program length. A hand-built image that does halts where its next instruction would start."""
+    full = img(lambda d, ln: (d.li("r1", 5), d.halt()))
+    e = run(Engine(replace(full, words=full.words[:1]), Role.P0), 40)
+    assert e.halted and e.regs[1] == 5 and e.halt_cycle == 4 and [pc for pc, _ in e.starts] == [0]

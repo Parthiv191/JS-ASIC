@@ -9,14 +9,15 @@ list. verification.md §2's table must match what this file finds:
 import re
 from pathlib import Path
 
+from simutil import reads_source
+
 ROOT = Path(__file__).resolve().parents[2]
 ISA = ROOT / "docs/design/isa.md"
 PLAN = ROOT / "docs/design/verification.md"
 TESTS = Path(__file__).resolve().parent
 CODE = [ROOT / "toolchain/emu/compiler.py", ROOT / "toolchain/emu/analysis.py"]
 
-GAPS = {  # id: why it has no test, or no code
-    "R3-fz": "FZ ops reach the compiler with plan step 6 (Dec 6)",
+GAPS: dict[str, str] = {  # id: why it has no test, or no code
 }
 
 
@@ -63,12 +64,14 @@ def test_every_rule_and_kind_has_a_test():
     assert missing - set(GAPS) == set(), f"no test names these: {sorted(missing - set(GAPS))}"
 
 
+@reads_source
 def test_every_rule_the_code_raises_is_in_the_spec_and_back():
     isa, code = isa_rules(), code_rules()
     assert code - isa == set(), f"raised by the code but not named in isa.md: {sorted(code - isa)}"
     assert isa - code - set(GAPS) == set(), f"named in isa.md but never raised: {sorted(isa - code - set(GAPS))}"
 
 
+@reads_source
 def test_gaps_are_still_gaps():
     closed = {g for g in GAPS if _tests_naming(g) and g in code_rules()}
     assert not closed, f"these gaps are closed: take them out of GAPS: {sorted(closed)}"

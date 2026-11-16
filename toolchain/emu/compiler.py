@@ -11,12 +11,13 @@ from .desc import MON, SHARED, Description, LaneRef, LineRef, Step
 from .image import IDLE, BusCfg, Image, LaneCfg, LineCfg
 from .isa import (
     F_ABORT, F_CHK, F_MSB, F_REG, F_RESYNC, INF, NUM_LANES, NUM_LINES, NUM_PROFILES, PROG_DEPTH, TIMED_OPS,
-    AluOp, BrCond, BusKind, CondKind, Dst, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
+    AluOp, BrCond, BusKind, CondKind, Dst, FzOp, Instr, Op, Owner, RawOp, Role, Src, cond_operand, encode, li,
     role_if_operand, role_mask, unpack_cond, unpack_xfer, xfer_operand,
 )
 
 TIMED = ("cond", "hold", "xfer")
 BRANCHES = ("br", "raw_jpin")
+FZ_KINDS = ("fz_next", "fz_tok", "fz_end")
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,9 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     # ---- pass 2: rules + instructions ----
     instrs: list[Instr] = []
     pc = 0
+    od_lane: int | None = None  # R1-od-lane: the one clocked lane with an OD data line
+    fz_party: str | None = None  # R3-fz: the one party whose role blocks hold the FZ ops
+    fz_sends: list[Step] = []    # XFERs with src = fz: the fuzzing party must send in each
     for kind, obj, extra in layout:
         if kind == "role_if":
             mask = role_mask(_role(desc, r) for r in obj)
@@ -175,6 +179,26 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
         s: Step = obj
         a = s.args
         _check_rules(desc, s, lines, lanes, err)
+        if s.kind == "xfer" and isinstance(a["lane"], LaneRef):
+            la = desc.lanes[a["lane"].index]
+            if la.clk is not None and any(x is not None and lines[x.index].kind == "od"
+                                          for x in (la.data, la.data2)):
+                if od_lane is None:
+                    od_lane = a["lane"].index
+                elif od_lane != a["lane"].index:
+                    err("R1-od-lane", s, f"lane {la.name!r} is a second clocked lane with an OD data "
+                                         f"line (after {desc.lanes[od_lane].name!r}); the engine has one "
+                                         f"OD let-go tracker (isa §4.3)")
+        if s.kind in FZ_KINDS:
+            party = next(iter(s.block)) if s.block is not None and len(s.block) == 1 else None
+            if party not in desc.parties:
+                err("R3-fz", s, "an FZ op belongs in a role block for exactly one party (isa §5)")
+            elif fz_party is None:
+                fz_party = party
+            elif party != fz_party:
+                err("R3-fz", s, f"FZ ops for {party!r} and {fz_party!r}: one party fuzzes (isa §5)")
+        if s.kind == "xfer" and a["src"] == "fz":
+            fz_sends.append(s)
         try:
             ins = _instr(desc, s, a, lambda n: target(s, n), lambda r: lane_index(s, r))
         except ValueError as e:
@@ -195,6 +219,16 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                 err("R3-escape", s, "branch between role blocks")
         instrs.append(ins)
         pc += 1
+
+    for s in fz_sends:
+        senders = {s.owner}
+        if isinstance(s.args["lane"], LaneRef) and desc.lanes[s.args["lane"].index].data2 is not None:
+            senders.add(desc.lines[desc.lanes[s.args["lane"].index].data2.index].owner)
+        if fz_party is None:
+            err("R3-fz", s, "src = fz with no FZ op: no party fuzzes")
+        elif fz_party not in senders:
+            err("R3-fz", s, f"src = fz sent by {', '.join(sorted(senders))}, not the fuzzing party "
+                            f"{fz_party!r} (isa §5)")
 
     if len(profiles) > NUM_PROFILES or len(lanes) > NUM_LANES or len(lines) > NUM_LINES:
         anchor = desc.steps[0] if desc.steps else Step("nop", {}, None, None, "?", 0)
@@ -249,6 +283,10 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
                                  f"runs no detector)")
         if kind == "select" and lines[a.index].kind != "pp":
             err("S-bus", anchor, "a SELECT bus needs a push-pull CS line (a)")
+        if kind == "select" and lines[a.index].idle != 1:
+            # its owner drives idle from now = 1 (isa §2): an idle-0 CS would fall at start-up, a
+            # START to every detector that no COND START made
+            err("S-bus", anchor, f"a SELECT bus's CS line {lines[a.index].name!r} idles at 1 (a fall is START)")
     image = Image(desc.name, desc.parties, words, profiles, lines, lanes, abort_pc, desc.tolerance_ppm, debug,
                   bus=bus)
     if not any(d.rule == "S-table" for d in diags):
@@ -260,7 +298,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
     return Lowered(instrs, image, spans, pc_step, diags)
 
 
-def compile_desc(desc: Description, *, check_timing: bool = True,
+def compile_desc(desc: Description, *, check_timing: bool = True, check_levels: bool = True,
                  prog_depth: int = PROG_DEPTH) -> Image:
     low = lower(desc, prog_depth)
     diags = list(low.diags)
@@ -270,6 +308,9 @@ def compile_desc(desc: Description, *, check_timing: bool = True,
     if not diags:
         from . import analysis  # imports this module; deferred to avoid a cycle
         diags += analysis.check_branches(desc, low)
+        diags += analysis.check_end(desc, low)
+        if check_levels:
+            diags += analysis.check_levels(desc, low)
         if check_timing:
             diags += analysis.check_timing(desc, low)
     if diags:
@@ -278,6 +319,21 @@ def compile_desc(desc: Description, *, check_timing: bool = True,
 
 
 # ---------------------------------------------------------------------------------------
+def _drives(desc, s: Step) -> set[int]:
+    """The lines a step may drive: a COND FALL/RISE's, a HOLD's or a RAW SET/REL's line, every
+    line of an XFER's lane. (COND START/STOP name no line.)"""
+    a = s.args
+    if s.kind in ("cond", "hold", "raw_set", "raw_rel"):
+        return {a["line"].index} if a.get("line") is not None else set()
+    if s.kind == "xfer":
+        ref = a["lane"]
+        if isinstance(ref, LaneRef):
+            la = desc.lanes[ref.index]
+            return {x.index for x in (la.data, la.clk, la.data2) if x is not None}
+        return {ref.index}
+    return set()
+
+
 def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err) -> None:
     a = s.args
     if s.kind in TIMED:
@@ -348,6 +404,13 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
             la.stretch and la.clk is not None and la.clk.index == a["line"].index for la in desc.lanes):
         err("S-bus", s, f"HOLD 1 on stretch clock {lines[a['line'].index].name!r}: its followers would "
                         f"keep the unstretched timeline; release it with COND RISE")
+    if (desc.bus_cfg is not None and desc.bus_cfg[0] == "select" and s.kind not in ("hold", "raw_set")
+            and desc.bus_cfg[1].index in _drives(desc, s)):
+        # isa §5 R1-bus: every follower's detector takes any edge of CS as a START or STOP (§4.7),
+        # and only COND START/STOP are timed and tracked as one (a STOP releases the gated lines).
+        # A HOLD or RAW SET may keep CS at its level: check_levels checks that it does
+        err("R1-bus", s, f"only COND START/STOP change the SELECT line {lines[desc.bus_cfg[1].index].name!r}: "
+                         f"any edge on it is a START or STOP to the others")
     if s.kind in ("raw_set", "raw_rel"):
         ln = lines[a["line"].index]
         if ln.kind == "pp":
@@ -482,6 +545,10 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                 continue
             if ck in (CondKind.START, CondKind.STOP):
                 bus = ck
+                if not mine(ins.owner) and profiles[ins.prof].max != INF:
+                    err("R3-lead", at(pc), "the leader follows the exit's bus COND, which its owner makes "
+                                           "from the block's successor whenever it gets there: it needs "
+                                           "max INF")
                 if kind == "clock" and watch == bus_a:
                     edges += 1
             else:
@@ -537,6 +604,10 @@ def _instr(desc, s: Step, a: dict, target, lane_index) -> Instr:
         return Instr(Op.POP, rd=reg(a["rd"]))
     if k == "mark":
         return Instr(Op.MARK, operand=_imm(a["id"]))
+    if k in ("fz_next", "fz_end"):
+        return Instr(Op.FZ, rd=reg(a["rd"]), sub=int(FzOp.NEXT if k == "fz_next" else FzOp.END))
+    if k == "fz_tok":
+        return Instr(Op.FZ, ra=reg(a["ra"]), sub=int(FzOp.TOK))
     if k == "halt":
         return Instr(Op.HALT)
     if k == "nop":

@@ -33,8 +33,8 @@ def i2c_desc(body, confirm=CONFIRM, abort_label=None):
     return d
 
 
-def i2c(body, **kw):
-    return compile_desc(i2c_desc(body, **kw), check_timing=False)
+def i2c(body, levels=True, **kw):
+    return compile_desc(i2c_desc(body, **kw), check_timing=False, check_levels=levels)
 
 
 def conds(t, i):
@@ -203,6 +203,75 @@ def test_cond_meas_timeout_writes_ffff():
     assert "TIMEOUT" in kinds(t, 0) and t.engines[0].rx == [0xFFFF]
 
 
+
+def cond_values(t, i):
+    return [r.value for r in t.engines[i].records if r.op == "COND"]
+
+
+def test_a_cond_records_its_measurement_as_the_trace_value():
+    """architecture §5 tr_value: a COND step carries the value MEAS writes (the RTL's `value`),
+    0 (none) without MEAS. Found by devOps's co-sim (#50): the model recorded none for every COND."""
+    t = run_sys(meas_desc(INF))
+    assert [cond_values(t, i) for i in range(3)] == [[NOM]] * 3
+    t = run_sys(meas_desc(20), roles=(Role.P1,))
+    assert cond_values(t, 0) == [0xFFFF]                 # a TIMEOUT without ABORT
+    d = Description("m", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=NOM, min=0, max=INF))
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False))
+    assert [cond_values(t, i) for i in range(3)] == [[None]] * 3
+
+
+def test_a_followed_start_records_its_measurement():
+    def body(d, sda, scl, p):
+        with d.only("a"):
+            d.raw_delay(20)
+        d.cond("start", owner="a", prof=p, meas="r2")
+    t = run_sys(i2c(body), roles=(Role.P0, Role.P1))
+    act = conds(t, 0)[0].cycle
+    assert cond_values(t, 0)[0] == act and cond_values(t, 1)[0] == act
+
+
+
+def test_a_cond_value_is_the_measurement_not_tb():
+    """With a step before it, a COND's measurement (tb to the edge) differs from tb after it."""
+    d = Description("m", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    d.hold(ln, 1, owner="a", prof=d.profile("H", nom=10, min=10, max=10))
+    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=NOM, min=0, max=INF), meas="r3")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False))
+    for i in range(3):
+        rec = [r for r in t.engines[i].records if r.op == "COND"][0]
+        assert (rec.value, rec.tb) == (NOM, 10 + NOM), (i, rec)
+
+
+def test_a_cond_measurement_clamps_at_ffff():
+    """MEAS clamps to 0xFFFF (isa §4.2), and so does the trace value: the owner acts about
+    72000 cycles after tb (late), and every role measures that."""
+    d = Description("m", parties=("a", "b"))
+    ln = d.line("l", owner="a", idle=1)
+    with d.only("a"):
+        for _ in range(18):
+            d.raw_delay(4000)
+    d.cond("fall", ln, owner="a", prof=d.profile("P", nom=NOM, min=0, max=INF), meas="r3")
+    d.push("r3")
+    d.halt()
+    t = run_sys(compile_desc(d, check_timing=False), max_ticks=300_000)
+    assert [cond_values(t, i) for i in range(3)] == [[0xFFFF]] * 3
+    assert [t.engines[i].rx for i in range(3)] == [[0xFFFF]] * 3
+
+
+def test_a_followed_start_timeout_records_ffff():
+    def body(d, sda, scl, p):
+        d.cond("start", owner="a", prof=d.profile("S", nom=NOM, min=0, max=30), meas="r2")
+        d.push("r2")
+    t = run_sys(i2c(body), roles=(Role.P1,))
+    assert "TIMEOUT" in kinds(t, 0)
+    assert cond_values(t, 0) == [0xFFFF] and t.engines[0].rx == [0xFFFF]
+
+
 # ---------------------------------------------------------------- compiler rules
 def test_start_is_owned_by_the_master_line_owner():
     with pytest.raises(CompileError, match="R1-bus"):
@@ -340,7 +409,7 @@ def test_a_followed_start_ignores_stop():
     def body(d, sda, scl, p):
         d.cond("start", owner="a", prof=p)
         d.cond("start", owner="a", prof=p)  # SDA is already low: no edge of its own
-    t = run_sys(i2c(body), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 30, 1)])
+    t = run_sys(i2c(body, levels=False), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 30, 1)])
     assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP", "START"]
     assert conds(t, 1)[1].tb == 40 + 30 - 1         # the fall on the wire at 70: e = 69
 
@@ -450,6 +519,186 @@ def select_desc(body, abort_label=None):
 
 def stops(t, i):
     return [c for c, k in t.engines[i].bus_events if k == "STOP"]
+
+
+def start_then_raw_set_1(d, cs, p):
+    d.cond("start", owner="a", prof=p)
+    with d.only("a"):
+        d.raw_set(cs, 1)
+
+
+CS_DRIVES = {
+    "after START, RAW SET 1": start_then_raw_set_1,
+    "COND RISE": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.cond("rise", cs, owner="a", prof=p)),
+    "COND FALL": lambda d, cs, p: d.cond("fall", cs, owner="a", prof=p),
+    "HOLD 1 after START": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.hold(cs, 1, owner="a", prof=p)),
+    "HOLD 0 before START": lambda d, cs, p: d.hold(cs, 0, owner="a", prof=p),
+    "XFER": lambda d, cs, p: d.xfer(1, cs, owner="a", prof=p, src="ones"),
+    "XFER clocked by CS": lambda d, cs, p: d.xfer(
+        1, d.lane("Lc", d.line("m", owner="a", idle=1), clk=cs, cpol=1), owner="a", prof=p, src="ones"),
+    "XFER with CS as data2": lambda d, cs, p: d.xfer(
+        1, d.lane("L2", d.line("s", owner="b", idle=0), clk=d.line("k", owner="b", idle=0), data2=cs),
+        owner="b", prof=p, src="ones"),
+    "RAW SET 0": lambda d, cs, p: d.raw_set(cs, 0),
+    "RAW REL": lambda d, cs, p: d.raw_rel(cs),
+}
+
+
+@pytest.mark.parametrize("drive", CS_DRIVES)
+def test_on_select_only_start_and_stop_drive_cs(drive):
+    """isa §5 R1-bus: every follower's detector takes any edge of CS as a START or STOP (§4.7), and
+    only COND START/STOP are timed and tracked as one. A COND RISE on CS, say, would release the
+    peripheral's gated lines where R2-edge doesn't see it, and hang a follower."""
+    def body(d, cs, miso, x, p):
+        if drive.startswith("RAW"):
+            with d.only("a"):
+                CS_DRIVES[drive](d, cs, p)
+        else:
+            CS_DRIVES[drive](d, cs, p)
+    with pytest.raises(CompileError, match=r"\[R1-bus\] .*the SELECT line 'cs'.* START or STOP to the others"):
+        select_desc(body)
+
+
+def cs_setup(d, cs, miso, x, p):
+    """devOps's RTL test (`test/test_bus.py`): a HOLD keeps CS low after the START as the setup time
+    before the first clock, and a RAW SET 1 and a HOLD 1 keep it high before the START."""
+    with d.only("a"):
+        d.raw_set(cs, 1)
+    d.hold(cs, 1, owner="a", prof=p)
+    d.cond("start", owner="a", prof=p)
+    d.hold(cs, 0, owner="a", prof=p)
+    d.hold(x, 0, owner="b", prof=p)
+    d.cond("stop", owner="a", prof=p)
+    d.hold(cs, 1, owner="a", prof=p)
+
+
+def test_a_hold_or_raw_set_that_keeps_cs_at_its_level_is_no_edge():
+    """isa §5 R1-bus: a HOLD or RAW SET on CS at the level it already has on every path makes no
+    edge, so it is allowed (a setup time after the START, say). The detectors see one START and
+    one STOP."""
+    t = run_sys(select_desc(cs_setup), roles=(Role.P0, Role.P1))
+    assert [k for _, k in t.engines[1].bus_events] == ["START", "STOP"]
+    assert not t.engines[1].violations
+
+
+@pytest.mark.parametrize("what", ["HOLD", "RAW SET"])
+def test_a_drive_on_cs_at_a_level_it_has_on_only_some_paths_is_rejected(what):
+    """isa §5 R1-bus: CS low on one path into the drive 0 and high on the other: on the second it
+    makes a START no COND START timed."""
+    def body(d, cs, miso, x, p):
+        d.li("r1", 0)
+        d.br("skip", "z", "r1")
+        d.cond("start", owner="a", prof=p)
+        d.label("skip")
+        if what == "HOLD":
+            d.hold(cs, 0, owner="a", prof=p)
+        else:
+            with d.only("a"):
+                d.raw_set(cs, 0)
+        d.cond("stop", owner="a", prof=p)
+    with pytest.raises(CompileError, match=rf"\[R1-bus\] .*{what} 0 on the SELECT line 'cs'.*may not be at 0"):
+        select_desc(body)
+
+
+def cs_after_abort(variant):
+    """The review's programs: b's HOLD with ABORT, which a follows inside a's frame, so a glitch on
+    x aborts a with CS low. `top`: a RAW SET 1 at abort_pc, which the walk from pc 0 reaches with
+    CS high. `exit`: the same at an abort_pc only an abort reaches. `plain`: nothing drives CS
+    there."""
+    d = Description("sel", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    x = d.line("x", owner="b", idle=1)
+    d.bus("select", cs)
+    cnd = d.profile("C", nom=12, min=4, max=0xFFFF)
+    setup = d.profile("SU", nom=20, min=10, max=0xFFFF)
+    hp = d.profile("H", nom=20, min=0, max=INF)
+    d.abort_to("exit" if variant == "exit" else "top")
+    d.label("top")
+    if variant == "top":
+        with d.only("a"):
+            d.raw_set(cs, 1)
+    d.cond("start", owner="a", prof=cnd)
+    d.hold(cs, 0, owner="a", prof=setup)
+    d.hold(x, 0, owner="b", prof=hp, abort=True)
+    d.cond("stop", owner="a", prof=cnd)
+    d.halt()
+    if variant == "exit":
+        d.label("exit")
+        with d.only("a"):
+            d.raw_set(cs, 1)
+        d.halt()
+    return d
+
+
+@pytest.mark.parametrize("variant", ["top", "exit"])
+def test_a_drive_on_cs_where_an_abort_may_leave_it_low_is_rejected(variant):
+    """isa §5 R1-bus: an abort can reach abort_pc with CS at either level, so a HOLD or RAW SET on
+    CS there (before a COND START/STOP sets it) may make an edge."""
+    with pytest.raises(CompileError, match=r"\[R1-bus\] .*RAW SET 1 on the SELECT line 'cs'.*may not be at 1"):
+        compile_desc(cs_after_abort(variant))
+
+
+def test_without_a_drive_on_cs_at_abort_pc_it_compiles():
+    compile_desc(cs_after_abort("plain"))
+
+
+def test_the_rejected_abort_program_makes_a_stop_no_cond_stop_timed():
+    """On the model: a aborts with CS low, its RAW SET at abort_pc raises CS, and b's detector
+    takes that as the STOP before a's COND STOP, which b then follows EARLY."""
+    img = compile_desc(cs_after_abort("top"), check_levels=False)
+    t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON), glitches=[Glitch(1, 41, 3, 1)])
+    assert "ABORT" in kinds(t, 0)
+    assert "EARLY" in kinds(t, 1)
+
+
+def spi_select():
+    """devOps's RTL test (`test/test_bus.py`), compiled with every check: START, a HOLD that keeps
+    CS low as the setup time, a duplex byte with a gated MISO, STOP."""
+    d = Description("sel", parties=("m", "t"))
+    cs = d.line("cs", owner="m", idle=1)
+    sck = d.line("sck", owner="m", idle=0)
+    mosi = d.line("mosi", owner="m", idle=1)
+    miso = d.line("miso", owner="t", idle=1, gated=True)
+    d.bus("select", cs)
+    lane = d.lane("ln", mosi, clk=sck, cpol=0, cpha=1, data2=miso)
+    bit = d.profile("H", nom=12, min=12, max=0xFFFF)
+    cnd = d.profile("C", nom=12, min=4, max=0xFFFF)
+    setup = d.profile("SU", nom=20, min=10, max=0xFFFF)
+    with d.only("m"):
+        d.li("r0", 0xA4)
+    with d.only("t"):
+        d.li("r0", 0x3C)
+    d.cond("start", owner="m", prof=cnd)
+    d.hold(cs, 0, owner="m", prof=setup)
+    d.xfer(8, lane, owner="m", prof=bit, src="r0", dst="r1", abort=True)
+    d.cond("stop", owner="m", prof=cnd)
+    d.mark(1)
+    d.halt()
+    d.label("exit")
+    d.mark(2)
+    d.halt()
+    d.abort_to("exit")
+    return compile_desc(d)
+
+
+def test_devops_select_program_compiles_and_runs_clean():
+    t = run_sys(spi_select())
+    for i in range(3):
+        assert t.engines[i].regs[1] == 0x3CA4 and "MARK" in kinds(t, i), i
+        assert not t.engines[i].violations, i
+    for i in (1, 2):
+        assert [k for _, k in t.engines[i].bus_events] == ["START", "STOP"], i
+
+
+def test_a_select_cs_idles_at_1():
+    """isa §5 S-bus: CS's owner drives it to idle from now = 1, so an idle-0 CS would fall at
+    start-up: a START to every detector that no COND START made."""
+    d = Description("sel", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=0)
+    d.bus("select", cs)
+    d.halt()
+    with pytest.raises(CompileError, match=r"\[S-bus\] .*idles at 1"):
+        compile_desc(d)
 
 
 def test_a_gated_line_is_in_the_image_and_only_on_pp():

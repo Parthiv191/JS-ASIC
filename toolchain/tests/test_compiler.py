@@ -27,7 +27,7 @@ def test_lowering_role_if_count_and_labels():
         d.alu("add", "r0", "r0", 1)
     d.cond("fall", pp, owner="a")
     d.br("top")
-    img = compile_desc(d, check_timing=False)
+    img = compile_desc(d, check_timing=False, check_levels=False)  # lowering only: it falls twice
     ins = img.instrs()
     assert [i.op for i in ins] == [Op.ROLE_IF, Op.LI, Op.ALU, Op.COND, Op.BR]
     assert unpack_role_if(ins[0].operand) == (0b101, 2)
@@ -50,6 +50,7 @@ def test_r1_rejects_shared_on_pp():
 def test_r1_accepts_shared_on_od():
     d, pp, od, p = base()
     d.hold(od, 0, owner="shared", prof=p)
+    d.halt()
     compile_desc(d, check_timing=False)
 
 
@@ -94,6 +95,7 @@ def test_r3_allows_loop_back_to_own_block_head():
     with d.only("b"):
         d.label("wait")
         d.raw_jpin(pp, 1, "wait")  # "wait" names the block's ROLE_IF
+    d.halt()
     compile_desc(d, check_timing=False)
 
 
@@ -119,7 +121,7 @@ def test_s_rejects_9_profiles():
         d, pp, od, p = base()
         for i in range(k):
             d.profile(f"x{i}", nom=4)
-        d.nop()
+        d.halt()
         return d
     compile_desc(with_extra(6), check_timing=False)  # IDLE + base's 1 + 6 = 8
     assert rules(with_extra(7)) == {"S-table"}
@@ -144,6 +146,7 @@ def test_implicit_lanes_are_deduplicated():
     d, pp, od, p = base()
     d.xfer(8, pp, owner="a", prof=p)
     d.xfer(4, pp, owner="a", prof=p)
+    d.halt()
     img = compile_desc(d, check_timing=False)
     assert len(img.lanes) == 1 and img.lanes[0].data == pp.index and img.lanes[0].clk is None
 
@@ -165,8 +168,9 @@ def test_debug_map_has_every_pc():
 def test_s_rejects_program_over_depth():
     def nops(k):
         d = Description("t", parties=("a", "b"))
-        for _ in range(k):
+        for _ in range(k - 1):
             d.nop()
+        d.halt()
         return d
     assert PROG_DEPTH == 512  # isa §1
     assert rules(nops(PROG_DEPTH + 1)) == {"S-range"}
@@ -284,3 +288,29 @@ def test_raw_evt_lowers_to_rd_and_a_6_bit_clear_mask():
     d2.raw_evt("r0", 64)
     with pytest.raises(CompileError, match="S-range.*mask"):
         compile_desc(d2)
+
+
+def od_lanes(kind_b="od", clk_b=True):
+    """Lane A: an I2C-like clocked lane with OD data; lane B: a second lane, OD or PP data,
+    clocked or not."""
+    d = Description("t", parties=("a", "b"))
+    scl = d.line("scl", owner="a", idle=1)
+    scl2 = d.line("scl2", owner="a", idle=1)
+    sda = d.line("sda", kind="od", owner="shared", idle=1)
+    d2 = d.line("d2", kind=kind_b, owner="shared" if kind_b == "od" else "b", idle=1)
+    a = d.lane("A", sda, clk=scl, cpol=1, cpha=1, ldelay=2)
+    b = d.lane("B", d2, clk=scl2 if clk_b else None, cpol=1, cpha=0, ldelay=0)
+    p = d.profile("H", nom=16, min=15, max=18)
+    d.xfer(1, a, owner="b", prof=p, src="zero")
+    d.xfer(1, b, owner="b", prof=p, src="zero")
+    d.halt()
+    return d
+
+
+def test_r1_od_lane_allows_one_clocked_lane_with_od_data():
+    """isa §5 R1-od-lane: the engine has one OD let-go tracker (isa §4.3), so a description has
+    at most one clocked lane with an OD data line. Two such lanes would let a let-go taken on
+    one release the other's line at once: SDA rising while SCL is high, a STOP."""
+    assert rules(od_lanes()) == {"R1-od-lane"}
+    compile_desc(od_lanes(kind_b="pp"), check_timing=False)        # B's data is push-pull
+    compile_desc(od_lanes(clk_b=False), check_timing=False)        # B is unclocked: no let-go
