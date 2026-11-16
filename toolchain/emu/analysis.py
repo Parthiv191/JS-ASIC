@@ -187,7 +187,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
     - anything else, and paths that disagree, leave a drive unknown.
 
     COND START/STOP are the edges on `bus_a` (START = FALL, STOP = RISE); on I2C, SCL must be high
-    too. The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
+    too. On SELECT, a HOLD or RAW SET by CS's owner must keep CS at its level (R1-bus, its own
+    walk, which also starts at abort_pc). The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
     instrs = low.instrs
     diags = _Diags(desc, low)
     img = low.image
@@ -272,6 +273,40 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         if not ok:
             diags.add("R2-edge", pc, f"COND {k.name} by {r.name}: {why}, so its drive makes no edge "
                                      f"and the others wait for one (isa §4.2)")
+
+
+    def check_cs() -> None:
+        """R1-bus: a HOLD or RAW SET by CS's owner keeps a SELECT CS at the level it has. Only
+        its owner's COND START/STOP change CS (the rest is rejected outright), so this walks CS's
+        level alone, along its owner's paths: from pc 0 at idle (1), and from abort_pc at either
+        level once a step has ABORT, since an abort may come in the middle of a frame (the walk
+        above doesn't take those paths)."""
+        r = next(q for q in _PARTIES if int(q) == int(lines[bus_a].owner))
+        name = lines[bus_a].name
+        state: dict[int, int | None] = {0: lines[bus_a].idle}
+        if any(_aborts(ins) for ins in instrs):
+            state[img.abort_pc] = None
+        work = list(state)
+        while work:
+            pc = work.pop()
+            v, ins = state[pc], instrs[pc]
+            if r in runs(pc):
+                if ins.op == Op.COND and edge_line(ins)[1] == bus_a:
+                    v = 0 if edge_line(ins)[0] in (CondKind.FALL, CondKind.START) else 1
+                elif ((ins.op == Op.HOLD and ins.line == bus_a and does(ins.owner, r))
+                      or (ins.op == Op.RAW and ins.sub == RawOp.SET and ins.ra == bus_a)):
+                    what, level = ("HOLD" if ins.op == Op.HOLD else "RAW SET"), ins.operand & 1
+                    if v != level:
+                        diags.add("R1-bus", pc, f"{what} {level} on the SELECT line {name!r} by {r.name}: "
+                                                f"{name} may not be at {level} here, so it may make an edge, "
+                                                f"a START or STOP to the others that no COND START/STOP "
+                                                f"times (isa §4.7)")
+                    v = level
+            for s in successors(instrs, pc, r):
+                new = v if s not in state else (state[s] if state[s] == v else None)
+                if s not in state or new != state[s]:
+                    state[s] = new
+                    work.append(s)
 
     def step(st, pc: int) -> None:
         ins, ex = instrs[pc], runs(pc)
@@ -360,6 +395,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 if new != old:
                     state[s] = new
                     work.append(s)
+    if kind == BusKind.SELECT:
+        check_cs()
     return diags.list()
 
 
