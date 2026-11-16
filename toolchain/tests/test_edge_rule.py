@@ -570,3 +570,34 @@ def test_other_edges_on_scl_take_the_let_go_too(build, src):
     before)."""
     assert "R2-edge" in rules(build(src))
     assert model_goes_wrong(build(src))
+
+
+def joined(rise_nom):
+    """A branch after the byte: one path's SCL fall leaves the release pending, the other's has
+    waited it out (a long HOLD after the fall); where they meet, it is still pending, so SCL may
+    rise only `need` after the fall."""
+    d = Description("j", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d, ldelay=15)
+    d.li("r3", 0)
+    d.br("slow", "z", "r3")
+    d.cond("fall", scl, owner="ctl", prof=d.profile("F4", nom=4, min=0, max=INF))
+    d.br("join")
+    d.label("slow")
+    d.cond("fall", scl, owner="ctl", prof=d.profile("F4b", nom=4, min=0, max=INF))
+    d.hold(scl, 0, owner="ctl", prof=d.profile("H40", nom=40))
+    d.label("join")
+    d.cond("rise", scl, owner="ctl", prof=d.profile("R", nom=rise_nom, min=0, max=INF))
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="ones")
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("H", nom=20))
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+def test_a_pending_release_joined_with_a_released_line_is_still_pending():
+    assert "R2-edge" in rules(joined(4))
+    runs_clean(joined(30))
+
