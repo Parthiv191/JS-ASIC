@@ -265,15 +265,16 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
 
     def tick(st, nom: int) -> None:
         """At least `nom` of some party's cycles pass (less drift and quantization)."""
-        t = nom - drift(2 * ppm, nom) - Q
+        t = max(0, nom - drift(2 * ppm, nom) - Q)
         for row in st:
             for i, v in enumerate(row):
                 if _rel(v):
                     row[i] = 1 if v[1] <= t else ("REL", v[1] - t)
 
-    def edge_on(st, clk: int, how: str = "xfer") -> None:
-        """An edge on a lane's clock: that lane's let-go is taken (isa §4.3). `how`: "xfer" (released
-        within the XFER), "cond" (released ldelay later: pending), "maybe" (unknown)."""
+    def edge_on(st, clk: int, how: str = "xfer", pc: int = 0, H: int = 0) -> None:
+        """An edge on a lane's clock: that lane's let-go is taken (isa §4.3). `how`: "xfer" (an XFER
+        of half period H: released within it where ldelay <= H - EDGE_LAT - 2, which T4-profile
+        gives its own lane), "cond" (released ldelay later: pending), "maybe" (unknown)."""
         for la in lanes:
             if la.clk == clk:
                 need = max(la.ldelay, E) + Q + 1 + drift(ppm, la.ldelay + E)
@@ -281,11 +282,21 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     if dl is not None:
                         for q in _PARTIES:
                             v = st[int(q)][dl]
-                            if v in (_LG, _LGX) or _rel(v):
-                                if how == "maybe":
-                                    st[int(q)][dl] = None
-                                elif not _rel(v):
-                                    st[int(q)][dl] = 1 if how == "xfer" else ("REL", need)
+                            if not (v in (_LG, _LGX) or _rel(v)):
+                                continue
+                            if how == "maybe":
+                                st[int(q)][dl] = None
+                            elif _rel(v):
+                                pass
+                            elif how == "cond" or la.ldelay > H - E - 2:
+                                if how == "xfer" and scl is not None and dl == bus_a:
+                                    diags.add("R2-edge", pc, f"this XFER's half period {H} is too short for "
+                                              f"the let-go on SDA ({lines[dl].name}, ldelay {la.ldelay}): it "
+                                              f"may release SDA with SCL high, a STOP to the others "
+                                              f"(isa §4.3, §4.7)")
+                                st[int(q)][dl] = ("REL", need)
+                            else:
+                                st[int(q)][dl] = 1
 
     def check(st, pc: int, ins: Instr, r: Role) -> None:
         k, line = edge_line(ins)
@@ -341,11 +352,31 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     state[s] = new
                     work.append(s)
 
+    def clock_before(st, line: int):
+        """The clock owner's drive and the wire, if `line` clocks a lane (else None)."""
+        if not any(la.clk == line for la in lanes):
+            return None
+        return st[int(lines[line].owner)][line], wire(st, line)
+
+    def clock_after(st, line: int, before) -> None:
+        """A drive on a clock line takes the let-go only if it moves the clock owner's drive and the
+        wire between known levels (the owner's tracker watches its own drive; the others, the
+        wire). No change does nothing; anything else leaves the let-go unknown."""
+        if before is None:
+            return
+        (od, ow), (nd, nw) = before, (st[int(lines[line].owner)][line], wire(st, line))
+        if od == nd and ow == nw:
+            return
+        if od in (0, 1) and nd in (0, 1) and od != nd and ow in (0, 1) and nw in (0, 1) and ow != nw:
+            edge_on(st, line, "cond")
+        else:
+            edge_on(st, line, "maybe")
+
     def scl_rises(st, pc: int, ins: Instr, r: Role) -> None:
         """On I2C, SCL doesn't rise while a let-go may still release SDA: an SDA rise with SCL
         high is a STOP to the others."""
         vals = [st[int(q)][bus_a] for q in _PARTIES]
-        if any(v in (_LG, _LGX) or _rel(v) for v in vals) and 0 not in vals:
+        if wire(st, scl) != 1 and any(v in (_LG, _LGX) or _rel(v) for v in vals) and 0 not in vals:
             diags.add("R2-edge", pc, f"SCL ({lines[scl].name}) rises while a let-go may still release SDA "
                                      f"({lines[bus_a].name}) after it: an SDA rise with SCL high is a STOP "
                                      f"to the others (isa §4.3, §4.7)")
@@ -367,22 +398,11 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 k, line, level = None, ins.line, ins.operand & 1
             if line is None:
                 return
-            clocks = any(la.clk == line for la in lanes)
-            if clocks:  # the clock owner's tracker watches its own drive; the others, the wire
-                own = int(lines[line].owner)
-                old_drive, old_wire = st[own][line], wire(st, line)
+            before = clock_before(st, line)
             for q in ex:
                 if does(ins.owner, q):
                     st[int(q)][line] = level
-            if clocks:
-                new_drive, new_wire = st[own][line], wire(st, line)
-                if old_drive == new_drive and old_wire == new_wire:
-                    pass  # no edge
-                elif (old_drive in (0, 1) and new_drive in (0, 1) and old_drive != new_drive
-                      and old_wire in (0, 1) and new_wire in (0, 1) and old_wire != new_wire):
-                    edge_on(st, line, "cond")
-                else:
-                    edge_on(st, line, "maybe")
+            clock_after(st, line, before)
             # the STOP shuts the gate it opened: for a follower that holds only because T5-watch
             # has it start the COND STOP by the confirm cycle (a later start would reopen it)
             if k == CondKind.STOP and kind == BusKind.SELECT:
@@ -392,7 +412,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         elif ins.op == Op.XFER:
             la = lanes[ins.line]
             if la.clk is not None:
-                edge_on(st, la.clk)
+                edge_on(st, la.clk, "xfer", pc, nom_of(ins))
             const = {Src.ZERO: 0, Src.ONES: 1}.get(unpack_xfer(ins.operand)[1])
             for q, dl in drives(pc):
                 if dl == la.clk:
@@ -405,6 +425,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     st[int(q)][dl] = None
         elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
             od = lines[ins.ra].kind == "od"
+            before = clock_before(st, ins.ra)
             for q in ex:
                 cur = st[int(q)][ins.ra]
                 if cur == _SHUT:
@@ -417,6 +438,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     st[int(q)][ins.ra] = ins.operand & 1
                 else:
                     st[int(q)][ins.ra] = 1 if od else None
+            clock_after(st, ins.ra, before)
 
     init = []
     for q in _PARTIES:
@@ -441,9 +463,11 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 tick(st, nom_of(ins))      # a COND acts at least nom after the previous step
             if ins.op == Op.COND and mine:
                 check(st, pc, ins, r)
-            if (scl is not None and mine and ((ins.op == Op.COND and ins.line == scl
-                                               and CondKind(unpack_cond(ins.operand)[0]) == CondKind.RISE)
-                                              or (ins.op == Op.HOLD and ins.line == scl and ins.operand & 1))):
+            raw_up = (ins.op == Op.RAW and ins.ra == scl and r in runs(pc)
+                      and (ins.sub == RawOp.REL or ins.sub == RawOp.SET and ins.operand & 1))
+            if scl is not None and (raw_up or mine and (
+                    (ins.op == Op.COND and ins.line == scl and CondKind(unpack_cond(ins.operand)[0]) == CondKind.RISE)
+                    or (ins.op == Op.HOLD and ins.line == scl and ins.operand & 1))):
                 scl_rises(st, pc, ins, r)
             step(st, pc)
             if ins.op in (Op.HOLD, Op.XFER) and r in runs(pc):

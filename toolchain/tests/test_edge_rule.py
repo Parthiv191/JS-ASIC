@@ -460,3 +460,113 @@ def test_the_release_comes_in_time_at_the_longest_ldelay():
     d = od_byte(soon(20), ldelay=15)
     runs_clean(d)
     assert not model_goes_wrong(od_byte(soon(20), ldelay=15))
+
+
+# ---- the second review of the let-go: the walk ends, SCL "rises" only from low, and a RAW drive or
+# another lane's XFER on SCL takes the let-go too
+def i2c_byte(d, src="r1", ldelay=2, owner="ctl"):
+    """Lines sda, scl, x (spare, PP); lane L on (sda, scl); START, then `owner`'s byte from `src`."""
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    x = d.line("x", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=ldelay)
+    half = d.profile("HALF", nom=20, min=0, max=INF)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    with d.only(owner):
+        d.li("r1", 0xB4)
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(8, lane, owner=owner, prof=half, src=src, dst="r2", msb_first=True)
+    return sda, scl, x, lane, half, w
+
+
+def repeated_start_and_stop(d, sda, scl, lane, half, w):
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="ones")
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("H", nom=20))
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+
+
+def test_a_loop_of_nom_0_steps_after_a_pending_release_compiles_in_finite_time():
+    """A step's nom less drift and QUANT is below 0 for nom 0: counted as is, a pending release
+    grew each time round the loop and the walk never ended."""
+    import threading
+    d = Description("lp", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d)
+    z = d.profile("Z", nom=0, min=0, max=INF)
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.label("L")
+    with d.only("ctl"):
+        for _ in range(6):
+            d.nop()
+    d.cond("fall", x, owner="ctl", prof=z)
+    with d.only("ctl"):
+        for _ in range(6):
+            d.nop()
+    d.cond("rise", x, owner="ctl", prof=z)
+    d.br("L")
+    done = []
+
+    def walk():
+        try:
+            compile_desc(d)
+        except CompileError:
+            pass
+        done.append(True)
+    th = threading.Thread(target=walk, daemon=True)
+    th.start()
+    th.join(30)
+    assert done, "the level walk didn't end"
+    compile_desc(d)          # and it runs clean on the model, so it is accepted
+
+
+def test_a_hold_1_on_scl_while_it_is_high_is_no_rise():
+    """It makes no SCL edge, so no let-go is released with SCL high; then a real fall and rise."""
+    d = Description("p7", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d)
+    d.cond("fall", x, owner="ctl", prof=w)
+    d.hold(scl, 1, owner="ctl", prof=d.profile("H1", nom=20))
+    repeated_start_and_stop(d, sda, scl, lane, half, w)
+    runs_clean(d)
+
+
+def raw_on_scl(src="r1"):
+    d = Description("raw", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d, src=src, ldelay=8)
+    d.cond("fall", x, owner="ctl", prof=w)
+    with d.only("ctl"):
+        d.raw_set(scl, 0)
+        d.raw_rel(scl)
+    repeated_start_and_stop(d, sda, scl, lane, half, w)
+    return d
+
+
+def second_lane_on_scl(src="r1"):
+    """Lane M (PP data z) on SCL with H 6, against lane L's ldelay 15."""
+    d = Description("m2", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d, src=src, ldelay=15)
+    m = d.lane("M", x, clk=scl, cpol=1, cpha=1)
+    d.xfer(1, m, owner="ctl", prof=d.profile("HM", nom=6, min=0, max=INF), src="ones")
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="ones")
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("H", nom=20))
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("src", ["r1", "zero"])
+@pytest.mark.parametrize("build", [raw_on_scl, second_lane_on_scl], ids=["RAW on SCL", "another lane's XFER"])
+def test_other_edges_on_scl_take_the_let_go_too(build, src):
+    """A RAW SET 0 / REL on SCL, or a short-H XFER on another lane clocked by SCL: the let-go is
+    taken at the fall and released ldelay later, after SCL is high again: a STOP (both compiled
+    before)."""
+    assert "R2-edge" in rules(build(src))
+    assert model_goes_wrong(build(src))
