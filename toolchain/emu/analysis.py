@@ -285,6 +285,11 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                             if not (v in (_LG, _LGX) or _rel(v)):
                                 continue
                             if how == "maybe":
+                                if scl is not None and dl == bus_a:
+                                    diags.add("R2-edge", pc, f"SCL ({lines[clk].name}) may or may not have an "
+                                              f"edge here, which may take the let-go on SDA "
+                                              f"({lines[dl].name}) and release it later with SCL high: "
+                                              f"a STOP to the others (isa §4.3, §4.7)")
                                 st[int(q)][dl] = None
                             elif _rel(v):
                                 pass
@@ -358,7 +363,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             return None
         return st[int(lines[line].owner)][line], wire(st, line)
 
-    def clock_after(st, line: int, before) -> None:
+    def clock_after(st, line: int, before, pc: int) -> None:
         """A drive on a clock line takes the let-go only if it moves the clock owner's drive and the
         wire between known levels (the owner's tracker watches its own drive; the others, the
         wire). No change does nothing; anything else leaves the let-go unknown."""
@@ -368,9 +373,9 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         if od == nd and ow == nw:
             return
         if od in (0, 1) and nd in (0, 1) and od != nd and ow in (0, 1) and nw in (0, 1) and ow != nw:
-            edge_on(st, line, "cond")
+            edge_on(st, line, "cond", pc)
         else:
-            edge_on(st, line, "maybe")
+            edge_on(st, line, "maybe", pc)
 
     def scl_rises(st, pc: int, ins: Instr, r: Role) -> None:
         """On I2C, SCL doesn't rise while a let-go may still release SDA: an SDA rise with SCL
@@ -402,7 +407,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             for q in ex:
                 if does(ins.owner, q):
                     st[int(q)][line] = level
-            clock_after(st, line, before)
+            clock_after(st, line, before, pc)
             # the STOP shuts the gate it opened: for a follower that holds only because T5-watch
             # has it start the COND STOP by the confirm cycle (a later start would reopen it)
             if k == CondKind.STOP and kind == BusKind.SELECT:
@@ -438,7 +443,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     st[int(q)][ins.ra] = ins.operand & 1
                 else:
                     st[int(q)][ins.ra] = 1 if od else None
-            clock_after(st, ins.ra, before)
+            clock_after(st, ins.ra, before, pc)
 
     init = []
     for q in _PARTIES:
@@ -463,6 +468,12 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 tick(st, nom_of(ins))      # a COND acts at least nom after the previous step
             if ins.op == Op.COND and mine:
                 check(st, pc, ins, r)
+            if ins.op == Op.XFER and r in runs(pc):
+                la = lanes[ins.line]
+                if la.clk is not None and int(lines[la.clk].owner) == int(r) and st[int(r)][la.clk] != la.cpol:
+                    diags.add("R2-edge", pc, f"a clocked XFER by {r.name}: its clock {lines[la.clk].name} may "
+                                             f"not be at its idle level {la.cpol} here, so its first edge "
+                                             f"may not come and the others wait for it (isa §4.3)")
             raw_up = (ins.op == Op.RAW and ins.ra == scl and r in runs(pc)
                       and (ins.sub == RawOp.REL or ins.sub == RawOp.SET and ins.operand & 1))
             if scl is not None and (raw_up or mine and (

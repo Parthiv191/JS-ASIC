@@ -601,3 +601,76 @@ def test_a_pending_release_joined_with_a_released_line_is_still_pending():
     assert "R2-edge" in rules(joined(4))
     runs_clean(joined(30))
 
+
+# ---- the third review: SCL edges the walk can't pin down, and a clocked XFER from a clock that
+# isn't at its idle level
+def unpinned(kind, src="r1"):
+    """After the controller's byte (ldelay 15), SCL moves in a way the walk can't pin down, so it
+    doesn't know when the let-go is taken; the model takes it and releases SDA with SCL high."""
+    d = Description("u", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d, src=src, ldelay=15)
+    c10 = d.profile("C10", nom=10, min=0, max=INF)
+    if kind == "both RAW REL":          # the target pulls SCL low, a RAW REL both parties run
+        d.cond("fall", scl, owner="tgt", prof=c10)
+        d.cond("fall", x, owner="ctl", prof=c10)
+        d.hold(scl, 0, owner="ctl", prof=d.profile("C0", nom=10))
+        with d.only("ctl", "tgt"):
+            d.raw_rel(scl)
+        d.cond("rise", x, owner="ctl", prof=w)
+    elif kind == "target RAW":          # the target holds SCL low by RAW, the controller's HOLDs
+        with d.only("tgt"):
+            d.raw_set(scl, 0)
+        d.cond("fall", x, owner="ctl", prof=c10)
+        d.hold(scl, 0, owner="ctl", prof=d.profile("LO", nom=10))
+        with d.only("tgt"):
+            d.raw_rel(scl)
+        d.hold(scl, 1, owner="ctl", prof=d.profile("HI", nom=40))
+        with d.only("ctl", "tgt"):
+            d.raw_rel(scl)
+    else:                               # a branch join where SCL's drive is unknown
+        d.li("r3", 1)
+        d.br("A", "z", "r3")
+        d.br("J")
+        d.label("A")
+        d.cond("fall", scl, owner="ctl", prof=c10)
+        d.hold(scl, 0, owner="ctl", prof=d.profile("H30", nom=30))
+        d.label("J")
+        d.cond("fall", x, owner="ctl", prof=c10)
+        d.hold(scl, 0, owner="ctl", prof=d.profile("LO", nom=10))
+        d.hold(scl, 1, owner="ctl", prof=d.profile("HI", nom=40))
+    d.xfer(1, lane, owner="ctl", prof=half, src="ones")
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("src", ["r1", "zero"])
+@pytest.mark.parametrize("kind", ["both RAW REL", "target RAW", "branch join"])
+def test_an_scl_edge_the_walk_cant_pin_down_with_a_let_go_on_sda_is_rejected(kind, src):
+    assert "R2-edge" in rules(unpinned(kind, src))
+    assert model_goes_wrong(unpinned(kind, src))
+
+
+def xfer_from_scl_low(which):
+    d = Description("nidle", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d, src="ones", ldelay=12)
+    m = d.lane("M", x, clk=scl, cpol=1, cpha=1)
+    d.cond("fall", scl, owner="ctl", prof=d.profile("F", nom=4, min=0, max=INF))
+    d.hold(scl, 0, owner="ctl", prof=d.profile("H40", nom=40))
+    d.xfer(1, lane if which == "L" else m, owner="ctl", prof=half, src="ones")
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("which", ["L", "M"])
+def test_a_clocked_xfer_starts_with_its_clock_at_idle(which):
+    """A cpol 1 XFER after SCL was left low: its first edge, a fall, never comes, and the followers
+    hang."""
+    assert "R2-edge" in rules(xfer_from_scl_low(which))
+    assert model_goes_wrong(xfer_from_scl_low(which))
+
