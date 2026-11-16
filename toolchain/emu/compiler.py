@@ -411,9 +411,24 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
         # A HOLD or RAW SET may keep CS at its level: check_levels checks that it does
         err("R1-bus", s, f"only COND START/STOP change the SELECT line {lines[desc.bus_cfg[1].index].name!r}: "
                          f"any edge on it is a START or STOP to the others")
+    if desc.bus_cfg is not None and desc.bus_cfg[0] == "i2c" and s.kind == "xfer":
+        # isa §5 R1-bus: every follower's detector takes an SDA edge with SCL high as a START or STOP
+        # (§4.7). The bus lane (cpol 1, cpha 1, clocked by SCL) changes SDA with SCL low; another XFER
+        # on SDA may change it with SCL high, and a lane clocked by SDA makes its edges there
+        sda, scl = desc.bus_cfg[1].index, desc.bus_cfg[2].index
+        la = desc.lanes[ref.index] if isinstance(ref, LaneRef) else None   # ref, clk: the timed step's, above
+        on = {ref.index} if la is None else {x.index for x in (la.data, la.data2) if x is not None}
+        if clk == sda or sda in on and not (clk == scl and la.cpol == 1 and la.cpha == 1):
+            err("R1-bus", s, f"only COND START/STOP change SDA {lines[sda].name!r} with SCL high: this XFER "
+                             f"may change or clock on it then (only a cpol 1, cpha 1 lane clocked by SCL "
+                             f"changes it with SCL low), a START or STOP to the others")
     if s.kind in ("raw_set", "raw_rel"):
         ln = lines[a["line"].index]
-        if ln.kind == "pp":
+        if s.block is None or MON in s.block:
+            # the walks that check levels (R2-edge, R1-bus) follow P0 and P1 only
+            err("R3-raw-drive", s, f"raw drive of {ln.name!r} outside a role block, or in one MON runs: "
+                                   f"only a role block without MON may drive a line by RAW")
+        elif ln.kind == "pp":
             allowed = s.block is not None and s.block <= {_name(desc, ln.owner)}
             if not allowed:
                 err("R3-raw-drive", s, f"raw drive of push-pull line {ln.name!r} outside an "

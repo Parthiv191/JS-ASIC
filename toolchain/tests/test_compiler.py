@@ -75,10 +75,26 @@ def test_r3_rejects_raw_drive_pp_outside_owner_block():
         d.raw_rel(pp)
     with d.only("a"):
         d.raw_set(pp, 1)  # fine: owner's own block
-    d.raw_set(od, 0)  # fine: open-drain
+    with d.only("b"):
+        d.raw_set(od, 0)  # fine: an OD line in any party's own block
     with pytest.raises(CompileError) as e:
         compile_desc(d, check_timing=False)
     assert [(x.rule, x.index) for x in e.value.diags] == [("R3-raw-drive", 0), ("R3-raw-drive", 1)]
+
+
+@pytest.mark.parametrize("where", ["outside a block", "in MON's block", "in a block with MON"])
+def test_r3_rejects_raw_drive_of_any_line_outside_a_party_s_own_block(where):
+    """isa §5 R3-raw-drive: MON runs a RAW outside a block too, and drives the line (the model's
+    drive() has no MON case), but the level walks follow P0 and P1 only (found by the review of
+    R1-bus on I2C: MON's RAW SET 0 on SDA made a START no COND START made)."""
+    d, pp, od, p = base()
+    if where == "outside a block":
+        d.raw_set(od, 0)
+    else:
+        with d.only(*(("mon",) if where == "in MON's block" else ("a", "mon"))):
+            d.raw_set(od, 0)
+    with pytest.raises(CompileError, match="R3-raw-drive"):
+        compile_desc(d, check_timing=False)
 
 
 def test_r3_rejects_branch_out_of_block():

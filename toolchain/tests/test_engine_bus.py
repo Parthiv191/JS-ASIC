@@ -18,7 +18,9 @@ CONFIRM = 15
 
 def i2c_desc(body, confirm=CONFIRM, abort_label=None):
     """`body(d, sda, scl, p)` builds the program. The master then waits before its HALT, because
-    HALT releases its OD lines: SDA rising while SCL is high would be a STOP."""
+    HALT releases its OD lines: SDA rising while SCL is high would be a STOP. These are the
+    detector's tests, so they compile with the level checks off: R1-bus rejects that HALT, as a
+    STOP no COND STOP times (the followers are done by then)."""
     d = Description("bus", parties=("a", "b"))
     sda = d.line("sda", "od", owner="shared", idle=1)
     scl = d.line("scl", "od", owner="a", idle=1)
@@ -33,7 +35,7 @@ def i2c_desc(body, confirm=CONFIRM, abort_label=None):
     return d
 
 
-def i2c(body, levels=True, **kw):
+def i2c(body, levels=False, **kw):
     return compile_desc(i2c_desc(body, **kw), check_timing=False, check_levels=levels)
 
 
@@ -67,7 +69,7 @@ def test_start_completion_matches_the_compiler():
     """isa §6: a followed START completes at E + bus_confirm + 1 after its tb."""
     d = i2c_desc(start_body)
     step = next(iter(_steps(lower(d)).values()))
-    t = run_sys(compile_desc(d, check_timing=False))
+    t = run_sys(compile_desc(d, check_timing=False, check_levels=False))
     for i, r in enumerate((Role.P0, Role.P1, Role.MON)):
         (rec,) = conds(t, i)
         assert rec.cycle - rec.tb == completion(step, r)[0], r
@@ -144,7 +146,7 @@ def exit_desc(abort):
         d.halt()
         d.label("top")
         d.cond("start", owner="a", prof=p)
-    return compile_desc(i2c_desc(body, abort_label="top"), check_timing=False)
+    return compile_desc(i2c_desc(body, abort_label="top"), check_timing=False, check_levels=False)
 
 
 def test_a_repeated_start_is_a_bus_exit_with_abort():
@@ -473,10 +475,10 @@ def test_i2c_needs_its_lane_and_a_party_owned_scl():
         d.cond("start", owner="a" if scl_owner == "a" else "shared", prof=d.profile("P", nom=NOM))
         d.halt()
         return d
-    compile_desc(desc("a", lane=True), check_timing=False)
+    compile_desc(desc("a", lane=True), check_timing=False, check_levels=False)   # (its HALT is a STOP: R1-bus)
     for scl_owner, lane in (("a", False), ("shared", True)):
-        with pytest.raises(CompileError, match="S-bus|R1"):
-            compile_desc(desc(scl_owner, lane), check_timing=False)
+        with pytest.raises(CompileError, match="S-bus|R1-owner|R1-bus.*owned"):
+            compile_desc(desc(scl_owner, lane), check_timing=False, check_levels=False)
 
 
 def test_unclocked_abort_without_check_is_allowed_on_a_bus():
@@ -894,9 +896,9 @@ def test_a_followed_start_may_start_until_its_confirm(delay, ok):
     d = i2c_desc(body)
     if not ok:
         with pytest.raises(CompileError, match="T5-watch"):
-            compile_desc(d)
+            compile_desc(d, check_levels=False)
         return
-    t = run_sys(compile_desc(d), roles=(Role.P0, Role.P1))
+    t = run_sys(compile_desc(d, check_levels=False), roles=(Role.P0, Role.P1))
     (f,) = conds(t, 1)
     start = dict(t.engines[1].starts)[2]            # ROLE_IF, RAW DELAY, COND START
     assert start > SEEN and (f.cycle, f.tb) == (CONFIRMED + 1, NOM)
@@ -955,7 +957,7 @@ def test_a_followed_start_that_starts_when_the_flag_is_already_set():
         d.cond("start", owner="a", prof=p)
     d = i2c_desc(body, confirm=14)
     d.tolerance_ppm = 0
-    t = run_sys(compile_desc(d), roles=(Role.P0, Role.P1))
+    t = run_sys(compile_desc(d, check_levels=False), roles=(Role.P0, Role.P1))
     start = dict(t.engines[1].starts)[2]
     (f,) = conds(t, 1)
     assert start == visible and t.engines[1].bus_events == [(visible - 1, "START")]
