@@ -292,6 +292,35 @@ async def test_i2c_protocol(dut, case, role, peer_clock):
     await cosim(dut, rep, role)
 
 
+I2C_REG_HOST = {  # the controller's host words: address W, the register, address R
+    "ack": [0x5A << 1, 0x44, 0x5A << 1 | 1],
+    "nack_r": [0x5A << 1, 0x44, 0x50 << 1 | 1],   # a read address that isn't the target's
+    "nack_w": [0x50 << 1, 0x44, 0x50 << 1 | 1],   # another device's transaction
+}
+I2C_REG_RX = {  # what each role pushes into RX, and the events it logs
+    "ack": {Role.P0: ([0x68, 0xA5], set()), Role.P1: ([0x44], set()), Role.MON: ([0x44, 0x68, 0xA5], set())},
+    "nack_r": {Role.P0: ([0x100], set()), Role.P1: ([0x44], set()), Role.MON: ([0x44], {"BUS"})},
+    "nack_w": {Role.P0: ([0x100], set()), Role.P1: ([], set()), Role.MON: ([], {"BUS"})},
+}
+
+
+@cocotb.test()
+@cocotb.parametrize(case=list(I2C_REG_HOST), role=[Role.P0, Role.P1, Role.MON], peer_clock=[(1, 1), (49, 50)])
+async def test_i2c_reg_protocol(dut, case, role, peer_clock):
+    """The library I2C register read (emu/protocols/i2c_reg.py) with two data bytes, as ctl, tgt
+    and mon, against peers up to 2% slow: a repeated START in the middle of the transaction, the
+    target sending from registers on the controller's clock, the controller's ACK then NACK. ack:
+    the target serves 0x68, 0xA5 and pushes the register number. nack_r: the target NACKs the
+    read address after the repeated START; the controller pushes NACK (0x100), and MON's
+    speculative data byte becomes a bus exit at the STOP. nack_w: the same at the write address."""
+    img = compile_desc(get("i2c_reg").build(data_bytes=2))
+    rep = model(img, role, peer_clock, host={Role.P0: I2C_REG_HOST[case]})
+    et = rep.trace.engines[0]
+    rx, events = I2C_REG_RX[case][role]
+    assert et.rx == rx and et.tx_left == 0 and {ev.kind for ev in et.events} == events
+    await cosim(dut, rep, role)
+
+
 @cocotb.test()
 @cocotb.parametrize(role=[Role.P0, Role.P1], ldelay=[1, 4])
 async def test_i2c_short_ldelay(dut, role, ldelay):
