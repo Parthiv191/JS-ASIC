@@ -445,8 +445,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 edge_on(st, la.clk, "xfer", pc, nom_of(ins))
             const = {Src.ZERO: 0, Src.ONES: 1}.get(unpack_xfer(ins.operand)[1])
             for x in {la.data, la.data2} - {None, la.clk}:
-                if any(other.clk == x for other in lanes):
-                    edge_on(st, x, "maybe", pc)
+                edge_on(st, x, "maybe", pc)     # nothing, unless x clocks a lane
             for q, dl in drives(pc):
                 if dl == la.clk:
                     st[int(q)][dl] = la.cpol

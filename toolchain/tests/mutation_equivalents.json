@@ -156,5 +156,7 @@
  {"file": "emu/analysis.py", "func": "_Step", "desc": "0 -> 1", "code": "ldelay: int = 0", "nth": 0,
   "why": "_steps always sets abort; cpha, cpol and ldelay are read only for clocked XFERs and chk only for XFERs, which set them"},
  {"file": "emu/analysis.py", "func": "check_levels.edge_on", "desc": "== -> !=", "code": "st[int(q)][dl] = _LGU if v == _LGU else None", "nth": 0,
-  "why": "after a \"maybe\" edge, _LGU and unknown differ only in the checks on I2C's SDA (the SCL rise, the edge checks), and a \"maybe\" edge with a let-go on SDA is already an R2-edge error at that pc"}
+  "why": "after a \"maybe\" edge, _LGU and unknown differ only in the checks on I2C's SDA (the SCL rise, the edge checks), and a \"maybe\" edge with a let-go on SDA is already an R2-edge error at that pc"},
+ {"file": "emu/analysis.py", "func": "check_levels.halt_sda", "desc": "1 -> 2", "code": "let_go[int(r)][bus_a] = let_go[int(r)][scl] = 1", "nth": 0,
+  "why": "wire() reads an OD drive that is neither 0, a held let-go nor unknown as released, so 2 reads as 1 does"}
 ]
