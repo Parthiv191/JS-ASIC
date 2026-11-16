@@ -312,8 +312,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                               f"may release SDA with SCL high, a STOP to the others "
                                               f"(isa §4.3, §4.7)")
                                 st[int(q)][dl] = _LGU if v == _LGU else ("REL", need)
-                            else:   # released within the XFER: an _LGU's let-go is gone, a plain unknown left
-                                st[int(q)][dl] = None if v == _LGU else 1
+                            elif v != _LGU:
+                                st[int(q)][dl] = 1
 
     def check(st, pc: int, ins: Instr, r: Role) -> None:
         k, line = edge_line(ins)
