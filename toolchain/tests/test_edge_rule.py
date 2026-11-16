@@ -355,3 +355,51 @@ def test_an_od_line_with_idle_0_starts_released():
                          ids=["stop bit", "ones"])
 def test_the_accepted_cases_run_clean(build):
     runs_clean(build())
+
+
+# ---- the let-go of a clocked OD byte from a register or the FIFO (isa §4.3): the engine holds
+# the last bit, whatever it is, until the lane's next clock edge, then releases the line
+def od_byte(after):
+    """ctl's clocked OD byte from a register whose last bit is 0, then `after`, then a repeated
+    START, one bit and a STOP."""
+    d = Description("lg", parties=("ctl", "tgt"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=2)
+    half = d.profile("HALF", nom=20, min=0, max=INF)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    with d.only("ctl"):
+        d.li("r1", 0xB4)                         # MSB first: the last bit is 0
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(8, lane, owner="ctl", prof=half, src="r1", dst="r2", msb_first=True)
+    after(d, sda, scl, lane, half, w)
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="ones")
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("H", nom=20))
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+def scl_low_high(d, sda, scl, lane, half, w):
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.cond("rise", scl, owner="ctl", prof=w)
+
+
+def ack_then_scl_low_high(d, sda, scl, lane, half, w):
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero")
+    scl_low_high(d, sda, scl, lane, half, w)
+
+
+def test_before_the_next_clock_edge_a_clocked_od_byte_may_still_hold_sda_low():
+    assert "R2-edge" in rules(od_byte(lambda *a: None))
+
+
+@pytest.mark.parametrize("after", [scl_low_high, ack_then_scl_low_high], ids=["scl low", "ack, scl low"])
+def test_the_next_clock_edge_lets_a_clocked_od_byte_go(after):
+    """The repeated START of an I2C register read: SDA is high once SCL has fallen after the byte
+    (and the target's ACK, if any, has been let go the same way)."""
+    runs_clean(od_byte(after))

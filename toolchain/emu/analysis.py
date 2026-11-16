@@ -157,6 +157,7 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
 
 # ----------------------------------------------------------------------------- R2-edge
 _LG, _SHUT = "LG", "SHUT"   # a pending OD let-go (low until the lane's next clock edge); a shut gate
+_LGX = "LG?"                # a pending OD let-go of a bit of unknown level (released at that edge)
 _SHUT1 = "SHUT?"            # a gated line shut on some paths, released or driven 1 on the others
 _READS_1 = (_SHUT, _SHUT1, 1)
 
@@ -178,8 +179,9 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
     - a PP line is its owner's drive. It is the idle level from reset, unless the line is gated;
     - an OD line is the wired-AND of every party's drive. It starts released (1), whatever its idle;
     - a drive comes from a HOLD, a COND's post-edge level, an XFER from ZERO or ONES (a PP data line
-      keeps its last bit; a clocked OD one holds it until the lane's next clock edge, the let-go),
-      a lane's clock at its idle level after a clocked XFER, or RAW SET/REL;
+      keeps its last bit), a clocked OD data line's let-go (it holds its last bit, whatever the
+      source, until the lane's next clock edge, then is released), a lane's clock at its idle
+      level after a clocked XFER, or RAW SET/REL;
     - a gated line is released while its gate is shut: at RUN and after a SELECT STOP, until the
       next timed step its engine runs. RAW SET does nothing then (isa §2). Where a path with the
       gate shut meets one where the line is released or 1, it reads 1 (_SHUT1);
@@ -242,7 +244,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         vals = [st[int(q)][i] for q in _PARTIES]
         if any(v in (0, _LG) for v in vals):
             return 0
-        return None if any(v is None for v in vals) else 1
+        return None if any(v is None or v == _LGX for v in vals) else 1
 
     def edge_on(st, clk: int) -> None:
         """An edge on a lane's clock: that lane's let-go is taken (isa §4.3)."""
@@ -251,7 +253,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 for dl in (la.data, la.data2):
                     if dl is not None:
                         for q in _PARTIES:
-                            if st[int(q)][dl] == _LG:
+                            if st[int(q)][dl] in (_LG, _LGX):
                                 st[int(q)][dl] = 1
 
     def check(st, pc: int, ins: Instr, r: Role) -> None:
@@ -345,8 +347,10 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     st[int(q)][dl] = la.cpol
                 elif lines[dl].kind == "pp" or const == 1:
                     st[int(q)][dl] = const
+                elif la.clk is not None:  # the let-go holds the last bit until the next clock edge
+                    st[int(q)][dl] = _LG if const == 0 else _LGX
                 else:
-                    st[int(q)][dl] = _LG if la.clk is not None and const == 0 else None
+                    st[int(q)][dl] = None
         elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
             od = lines[ins.ra].kind == "od"
             for q in ex:
