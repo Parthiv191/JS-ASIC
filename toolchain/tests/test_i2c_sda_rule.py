@@ -275,7 +275,8 @@ def test_a_halt_while_another_party_holds_sda_low_too_is_no_edge():
     with d.only("ctl"):
         d.halt()
     d.cond("fall", scl, owner="tgt", prof=w)
-    d.hold(sda, 1, owner="tgt", prof=d.profile("T1", nom=20))
+    with d.only("tgt"):
+        d.raw_rel(sda)     # (a HOLD 1 would need the controller known released: R2-edge)
     d.cond("rise", scl, owner="tgt", prof=w)
     with d.only("tgt"):
         d.halt()
@@ -339,7 +340,10 @@ def test_a_halt_leaves_the_others_walk_its_lines_released_or_not(build):
 def test_a_block_without_a_halt_leaves_the_skipped_partys_drive_known():
     """After the START the target pulls SDA low too, then runs a block of its own with no HALT.
     For the controller it still holds SDA low, so the controller's RAW REL of SDA with SCL high
-    changes nothing; then SCL low, the target lets go, SDA low again and the STOP."""
+    changes nothing. Then SCL low, the target lets go (SDA rises with SCL low), SCL high, and each
+    halts in its own block. (Each RAW is in its party's own block, so the other's walk can't see it:
+    neither could then release SDA with a HOLD 1, nor the controller STOP, which needs the target
+    known released.)"""
     d = Description("nb", parties=("ctl", "tgt"))
     sda, scl, x, lane, half, w = bus(d)
     y = d.line("y", owner="tgt", idle=1)
@@ -353,12 +357,13 @@ def test_a_block_without_a_halt_leaves_the_skipped_partys_drive_known():
         d.raw_rel(sda)         # (a HOLD 1 would be followed and checked at 1: LEVEL, as SDA stays low)
     d.cond("fall", x, owner="ctl", prof=w)
     d.cond("fall", scl, owner="ctl", prof=w)
-    d.cond("rise", y, owner="tgt", prof=w)      # (a HOLD may not start late)
-    d.hold(sda, 1, owner="tgt", prof=d.profile("T1", nom=20))
-    d.cond("rise", x, owner="ctl", prof=w)
-    d.hold(sda, 0, owner="ctl", prof=d.profile("C0", nom=20))
+    with d.only("tgt"):
+        d.raw_rel(sda)
     d.cond("rise", scl, owner="ctl", prof=w)
-    d.cond("stop", owner="ctl", prof=w)
+    with d.only("ctl"):
+        d.halt()
+    with d.only("tgt"):
+        d.halt()
     d.halt()
     assert diags(d) == []
     runs_clean(d)

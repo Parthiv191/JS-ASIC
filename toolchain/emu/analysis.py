@@ -373,6 +373,33 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     state[s] = new
                     work.append(s)
 
+    def raw_in_hold_slots(r: Role) -> None:
+        """A HOLD's owner finishes it when it starts (isa §4.2), so its untimed instructions up to
+        its next timed step run in the HOLD's slot: a RAW there that changes the HOLD's line does so
+        before the followers sample it, and they read the wrong level."""
+        for pc, ins in enumerate(instrs):
+            if ins.op != Op.HOLD or r not in runs(pc) or not does(ins.owner, r):
+                continue
+            level, line = ins.operand & 1, ins.line
+            seen, work = set(), list(successors(instrs, pc, r))
+            while work:
+                q = work.pop()
+                if q in seen:
+                    continue
+                seen.add(q)
+                nxt = instrs[q]
+                if nxt.op in (Op.COND, Op.HOLD, Op.XFER):
+                    continue
+                if (nxt.op == Op.RAW and nxt.sub in (RawOp.SET, RawOp.REL) and nxt.ra == line and r in runs(q)
+                        and not (nxt.sub == RawOp.SET and nxt.operand & 1 == level)
+                        and not (nxt.sub == RawOp.REL and level == 1 and lines[line].kind == "od")):
+                    what = f"RAW SET {nxt.operand & 1}" if nxt.sub == RawOp.SET else "RAW REL"
+                    diags.add("R2-edge", q, f"{what} on {lines[line].name} by {r.name} comes in the slot of its "
+                                            f"HOLD {level} at pc {pc} (its owner finishes a HOLD when it starts), "
+                                            f"so it changes the line before the HOLD's followers sample it "
+                                            f"(isa §4.2)")
+                work += successors(instrs, q, r)
+
     def clock_before(st, line: int):
         """The clock owner's drive and the wire, if `line` clocks a lane (else None)."""
         if not any(la.clk == line for la in lanes):
@@ -502,6 +529,11 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 tick(st, nom_of(ins))      # a COND acts at least nom after the previous step
             if ins.op == Op.COND and mine:
                 check(st, pc, ins, r)
+            if (ins.op == Op.HOLD and mine and ins.operand & 1 and lines[ins.line].kind == "od"
+                    and not all(st[int(q)][ins.line] == 1 for q in _PARTIES if not does(ins.owner, q))):
+                # its followers check the line at its level (isa §4.2): released, but held low by another
+                diags.add("R2-edge", pc, f"HOLD 1 on {lines[ins.line].name} by {r.name}: another party may hold "
+                                         f"it low here, so the HOLD's followers read 0, not its level (isa §4.2)")
             if ins.op == Op.XFER and r in runs(pc):
                 la = lanes[ins.line]
                 if la.clk is not None and int(lines[la.clk].owner) == int(r) and st[int(r)][la.clk] != la.cpol:
@@ -556,6 +588,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     work.append(s)
     if kind == BusKind.SELECT:
         check_cs()
+    for r in _PARTIES:
+        raw_in_hold_slots(r)
     return diags.list()
 
 
@@ -918,8 +952,24 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                     diags.add("T5-watch", nxt_pc, f"this bus edge comes {s.prof.nom} after the previous "
                                                   f"one: it needs nom - drift - QUANT >= bus_confirm "
                                                   f"{confirm}, or it replaces that one's candidate")
+            # anchor distance along this edge only (untimed instructions don't move it)
+            a_edge = 0 if prev is None else max(
+                (_advance(prev, t)[0] for t in states.get(prev.pc, set())), default=0)
             if s.owner_role is None:
-                continue  # SHARED steps: Phase 4 (ARB)
+                # a SHARED step: both parties do it. Each drives a HOLD when it starts, so each
+                # starts by ISSUE (T5-overrun); the rest of a SHARED step's checks wait for ARB (open)
+                if s.op == Op.HOLD:
+                    sample, dr = s.prof.nom // 2 + E, drift(ppm, a_edge + s.prof.nom)
+                    for r in ROLES:
+                        if nxt_pc not in per_role[r]:
+                            continue
+                        hi = _start(prev, r, *per_role[r][nxt_pc])[1]
+                        if r != Role.MON and hi > ISSUE:
+                            diags.add("T5-overrun", nxt_pc, f"{r.name}, an owner of this SHARED HOLD, starts "
+                                                            f"at {hi}, more than ISSUE after the step start")
+                        elif r == Role.MON and hi + dr > sample:   # MON follows it, as any HOLD's follower
+                            diags.add("T5-watch", nxt_pc, f"{r.name} starts at {hi}, after its first sample at {sample}")
+                continue
             st = {r: _start(prev, r, *per_role[r][nxt_pc]) for r in ROLES if nxt_pc in per_role[r]}
             if s.owner_role not in st:
                 continue
@@ -928,9 +978,6 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
                 sp, succ = _lead_clock(low, steps, s)
                 if succ is not None and (prev is None or not sp.start <= prev.pc < sp.end)                         and sp.end in per_role[s.clk_owner]:
                     clk = _start(prev, s.clk_owner, *per_role[s.clk_owner][sp.end])
-            # anchor distance along this edge only (untimed instructions don't move it)
-            a_edge = 0 if prev is None else max(
-                (_advance(prev, t)[0] for t in states.get(prev.pc, set())), default=0)
             _pair_checks(s, st, a_edge, ppm, diags, clk)
     return diags.list()
 
