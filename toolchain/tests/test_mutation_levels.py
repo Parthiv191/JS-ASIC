@@ -614,3 +614,20 @@ def test_a_duplex_xfer_leaves_data2_at_its_last_bit():
     d.cond("rise", d2, owner="b", prof=w)
     d.halt()
     runs_clean(d)
+
+
+def test_an_xfer_on_the_lane_ends_a_let_go_that_may_still_be_held():
+    """The target's ACK is a let-go; its RAW REL in its own block leaves it, for the controller, a
+    let-go that may still be held. The controller's next byte on the lane releases any let-go
+    within its XFER, so 60 after SCL falls it may rise (found by the review of this pass)."""
+    d = Description("lgu", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = i2c_byte(d)
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero")
+    with d.only("tgt"):
+        d.raw_rel(sda)
+    d.xfer(8, lane, owner="ctl", prof=half, src="ones")
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.cond("fall", x, owner="ctl", prof=d.profile("X60", nom=60, min=0, max=INF))
+    d.hold(scl, 1, owner="ctl", prof=d.profile("HI", nom=40))
+    d.halt()
+    runs_clean(d)
