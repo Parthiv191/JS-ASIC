@@ -233,3 +233,69 @@ def test_a_late_host_one_word_at_a_time():
     vals = values_for(**params())
     assert t.engines[0].rx == vals * 2 and t.engines[1].rx == [0x05, 0x06]
     assert all(not et.events for et in t.engines)
+
+
+def mcu_controller(tlow, n=1, H=20):
+    """An MCU-like controller (not the library's): the register read with its STOP keeping SCL low
+    for `tlow` in all, SDA low a quarter in. Only P0 runs it; the lines and lane are the library's."""
+    from emu.desc import Description
+    from emu.isa import INF
+    d = Description("mcu", parties=("ctl", "tgt"), tolerance_ppm=20000)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=12, stretch=True)
+    half, wait = d.profile("HALF", nom=H, min=0, max=INF), d.profile("WAIT", nom=H, min=0, max=INF)
+    q = max(2, tlow // 4)
+    pq, pr, p0 = d.profile("Q", nom=q), d.profile("R", nom=tlow - q), d.profile("Z", nom=0, min=0, max=INF)
+    d.label("frame")
+    with d.only("ctl"):
+        d.pop("r1")
+    d.cond("start", owner="ctl", prof=wait)
+    d.xfer(8, lane, owner="ctl", prof=half, src="r1", msb_first=True)
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero")
+    d.xfer(8, lane, owner="ctl", prof=half, src="fifo", msb_first=True)
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero")
+    d.cond("fall", scl, owner="ctl", prof=wait)
+    d.cond("rise", scl, owner="ctl", prof=wait)
+    d.cond("start", owner="ctl", prof=wait)
+    d.xfer(8, lane, owner="ctl", prof=half, src="fifo", msb_first=True)
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero")
+    for i in range(n):
+        d.xfer(8, lane, owner="tgt", prof=half, src="r5", dst="fifo", msb_first=True)
+        d.xfer(1, lane, owner="ctl", prof=half, src="ones" if i == n - 1 else "zero")
+    d.cond("fall", scl, owner="ctl", prof=wait)
+    d.hold(scl, 0, owner="ctl", prof=pq)
+    d.hold(sda, 0, owner="ctl", prof=pr)
+    d.cond("rise", scl, owner="ctl", prof=p0)
+    d.cond("stop", owner="ctl", prof=wait)
+    d.br("frame")
+    return compile_desc(d, check_timing=False, check_levels=False)
+
+
+@pytest.mark.parametrize("tlow", [12, 16, 20, 24])
+def test_the_target_follows_a_controller_with_a_short_stop(tlow):
+    """The second review: a STOP holding SCL low for SETTLE first made the target watch for SCL's
+    rise that much later, so an MCU's STOP with SCL low under 1.2 H went unseen and its next
+    transaction was NACKed. The STOP is now a ZERO bit, which a target follows like any bit."""
+    from emu.model.system import EngineSpec, System
+    tgt = compile_desc(SPEC.build())
+    s = System([EngineSpec(mcu_controller(tlow), Role.P0), EngineSpec(tgt, Role.P1)])
+    s.host_push(0, [A << 1, 0x44, A << 1 | 1] * 3)
+    t = s.run(600_000)
+    assert t.engines[0].rx == [0x68] * 3 and t.engines[1].rx == [0x44] * 3
+    assert not t.engines[1].events
+
+
+def test_an_mcu_reading_more_bytes_than_the_target_serves_gets_ff():
+    """It ACKs the target's last byte and clocks on: the target, done, leaves SDA released and waits
+    for the STOP, with no violation, and the next transaction goes through."""
+    from emu.model.engine import VIOLATIONS
+    from emu.model.system import EngineSpec, System
+    tgt = compile_desc(SPEC.build(data_bytes=1))
+    s = System([EngineSpec(mcu_controller(20, n=2), Role.P0), EngineSpec(tgt, Role.P1)])
+    s.host_push(0, [A << 1, 0x44, A << 1 | 1] * 2)
+    t = s.run(600_000)
+    assert t.engines[0].rx == [0x68, 0xFF] * 2 and t.engines[1].rx == [0x44] * 2
+    assert [e.kind for e in t.engines[1].events if e.kind in VIOLATIONS] == []
+

@@ -20,15 +20,16 @@ controller owns, a cpol 1, cpha 1 lane with `ldelay`, bits of half period H, MSB
 - The target reads the controller's ACK after each byte but its last, in a lead block: on a NACK
   (an MCU reading fewer bytes than `data_bytes`) it waits for the STOP and starts over.
 - The repeated START: SCL low (the target lets SDA go, isa §4.3 let-go), SCL high with SDA high,
-  then SDA falls while SCL is high. The STOP: SCL low, SDA low `ldelay` later (the data hold),
-  SCL high, then SDA rises.
+  then SDA falls while SCL is high. The STOP: a ZERO bit (SCL low, SDA low `ldelay` later, the
+  data hold; SCL high), then SDA rises. A target follows it like any bit.
 - `stretch` (default on): a target may hold SCL low, and the controller waits for it to rise.
 
 Limits: the register's ACK isn't checked (a lead block there would end where the repeated START's
 SCL fall does, R3-lead). The target answers reads only (a register write, START W reg data STOP, confuses it until
 the next STOP), and it serves the same `values` whatever the register. A monitor pushes the
 register number and the bytes of any device's read, unchecked; on a NACKed read address it has
-pushed the register number alone, and its BUS event marks that transaction.
+pushed the register number alone, and its BUS event marks that transaction. A controller that
+reads more than `data_bytes` gets 0xFF for the rest: the target waits for the STOP.
 """
 from __future__ import annotations
 
@@ -59,14 +60,10 @@ def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldela
     lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=ldelay, stretch=stretch)
     half = d.profile("HALF", nom=H, min=0, max=INF)
     wait = d.profile("WAIT", nom=H, min=0, max=INF)
-    hold = d.profile("HOLD", nom=H)
-    settle = d.profile("SETTLE", nom=max(10, ldelay))   # 10: a follower samples it mid-slot (T1)
 
     def stop() -> None:
-        d.cond("fall", scl, owner="ctl", prof=wait)
-        d.hold(scl, 0, owner="ctl", prof=settle)   # SDA moves ldelay after SCL falls
-        d.hold(sda, 0, owner="ctl", prof=hold)
-        d.cond("rise", scl, owner="ctl", prof=wait)
+        # a ZERO bit: SCL low, SDA low ldelay later (the lane's data hold), SCL high; then SDA rises
+        d.xfer(1, lane, owner="ctl", prof=half, src="zero", abort=True)
         d.cond("stop", owner="ctl", prof=wait)
 
     def target_acks(want: int, label: str) -> None:
