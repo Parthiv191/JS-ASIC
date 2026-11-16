@@ -3,7 +3,7 @@ found loose (verification.md §1): each pins which check rejects a program, or t
 count it keeps. The rules are isa §5 (R2-edge, R1-bus); the let-go is isa §4.3."""
 import pytest
 
-from emu.analysis import _LG, _LGX, _SHUT, _SHUT1, _join, drift
+from emu.analysis import _LG, _LGU, _LGX, _SHUT, _SHUT1, _join, drift
 from emu.compiler import CompileError, compile_desc
 from emu.desc import Description
 from emu.isa import EDGE_LAT as E, INF, QUANT as Q
@@ -44,22 +44,27 @@ def stop_after(d, sda, scl, lane, half, w):
     (("REL", 3), 1, ("REL", 3)),
     (1, ("REL", 3), ("REL", 3)),
     (("REL", 3), ("REL", 5), ("REL", 5)),
-    (("REL", 3), 0, None),
-    (("REL", 3), None, None),
+    (("REL", 3), 0, _LGU),
+    (("REL", 3), None, _LGU),
     (_LG, 1, _LGX),
     (1, _LG, _LGX),
     (_LG, _LGX, _LGX),
     (("REL", 3), _LG, _LGX),
     (_LGX, ("REL", 3), _LGX),
-    (_LG, 0, None),
+    (_LG, 0, _LGU),
+    (0, _LGX, _LGU),
+    (_LGU, 1, _LGU),
+    (None, _LGU, _LGU),
     (0, 1, None),
+    (0, None, None),
     (_SHUT, 1, _SHUT1),
     (_SHUT1, _SHUT, _SHUT1),
 ])
 def test_join_keeps_a_let_go_that_one_path_may_still_hold(x, y, want):
     """A pending release meets a released line: pending, for the longer time. A let-go taken on one
     path (pending) or not yet taken (held), against a released or held one: it may still be held
-    (_LGX). A gated line shut on one path and high on the other reads 1."""
+    (_LGX). A let-go against a drive or an unknown: unknown, and it may still release (_LGU). A
+    gated line shut on one path and high on the other reads 1."""
     assert _join(x, y) == want
 
 
@@ -138,7 +143,7 @@ def test_the_release_needs_max_ldelay_edge_lat_plus_quant_1_and_drift(n, ok):
     it counts its own."""
     assert (E, Q) == (3, 1) and drift(60000, 18) == 2 and drift(120000, 22) == drift(120000, 23) == 3
     if ok:
-        assert diags(held_low(n)) == []
+        runs_clean(held_low(n))
     else:
         assert said(held_low(n), RISES)
 
@@ -160,9 +165,10 @@ def zero_steps(k):
     return d
 
 
-def test_a_step_of_nom_0_counts_no_time_never_below_0():
-    """nom 0 less drift and QUANT is below 0, which counts as 0 (isa §5): after 6 of them the release
-    may still come, so SCL may not rise yet."""
+def test_a_step_of_nom_0_counts_no_time():
+    """nom 0 less drift and QUANT is below 0, which counts as 0 (isa §5), not as a cycle: after 6 of
+    them the release may still come, so SCL may not rise yet. (Counting below 0 would make the
+    walk endless: test_edge_rule.py's loop test.)"""
     assert said(zero_steps(6), RISES)
 
 
@@ -238,12 +244,12 @@ def test_a_raw_fall_of_scl_takes_the_let_go():
 
 
 # ---------------------------------------------------------------- clock edges off I2C
-def od_lane(d, cpol):
+def od_lane(d, cpol, ldelay=2):
     """a's OD data line dl on lane L (ldelay 2), clocked by c, a's (PP for cpol 0, OD for cpol 1).
     A NOP first: instruction 0 may not watch an idle-0 line (T5-startup)."""
     dl = d.line("dl", "od", owner="a", idle=1)
     c = d.line("c", "pp" if cpol == 0 else "od", owner="a", idle=cpol)
-    lane = d.lane("L", dl, clk=c, cpol=cpol, cpha=1, ldelay=2)
+    lane = d.lane("L", dl, clk=c, cpol=cpol, cpha=1, ldelay=ldelay)
     d.nop()
     return dl, c, lane, d.profile("HALF", nom=20, min=0, max=INF), d.profile("W", nom=40, min=0, max=INF)
 
@@ -456,3 +462,155 @@ def test_cs_at_a_level_on_only_some_paths_is_unknown_whichever_the_walk_meets_fi
     d.cond("stop", owner="ctl", prof=w)
     d.halt()
     assert said(d, "RAW SET 0 on the SELECT line 'cs' by P0: cs may not be at 0")
+
+
+def plain_0_on_one_path(layout):
+    """After the controller's ZERO byte (ldelay 15, SDA held by the let-go), one path drives SDA 0
+    with a HOLD, the other doesn't. Where they meet, SCL falls (taking the let-go on the second
+    path, released 15 later) and a HOLD 1 raises it at once: on that path, SDA rises with SCL
+    high, a STOP. The model takes the path without the HOLD; `layout` puts the HOLD at the
+    branch's target or its fall-through (found by the review of this pass)."""
+    d = Description("j0", parties=("ctl", "tgt"))
+    d.li("r3", 0)
+    sda, scl, x, lane, half, w = i2c_byte(d, src="zero", ldelay=15)
+    f4 = d.profile("F4", nom=4, min=0, max=INF)
+
+    def plain():
+        d.cond("fall", x, owner="ctl", prof=f4)
+
+    def held():
+        d.cond("fall", x, owner="ctl", prof=f4)
+        d.hold(sda, 0, owner="ctl", prof=d.profile("H0", nom=20))
+    d.br("other", "nz" if layout == "target" else "z", "r3")
+    (plain if layout == "target" else held)()
+    d.br("join")
+    d.label("other")
+    (held if layout == "target" else plain)()
+    d.label("join")
+    d.cond("fall", scl, owner="ctl", prof=d.profile("F8", nom=8, min=0, max=INF))
+    d.hold(scl, 1, owner="ctl", prof=d.profile("H1", nom=40))
+    d.xfer(1, lane, owner="ctl", prof=half, src="ones")
+    d.cond("fall", scl, owner="ctl", prof=w)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("H", nom=20))
+    d.cond("rise", scl, owner="ctl", prof=w)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("layout", ["target", "fall-through"])
+def test_a_let_go_met_with_a_plain_drive_may_still_release(layout):
+    """_join(let-go, 0) was unknown, which the SCL check doesn't read as a let-go: with the HOLD at
+    the target (the walk meets it first), accepted, and on the model a STOP."""
+    assert said(plain_0_on_one_path(layout), RISES)
+    assert model_goes_wrong(plain_0_on_one_path(layout))
+
+
+# ---------------------------------------------------------------- a block the walker skips
+def lead_exit(drive_y):
+    """SELECT. In a lead block the controller may leave by an exit (a STOP, then abort_pc); if
+    `drive_y`, that exit first pulls the shared OD line y low. The block's successor S is the
+    peripheral's own COND, so the peripheral completes it and runs on whichever way the
+    controller left, then drives y low and high. The model takes the exit (found by the review
+    of this pass)."""
+    d = Description("ld", parties=("ctl", "per"))
+    if not drive_y:
+        y = d.line("y", "od", owner="shared", idle=1)     # line 0, where a START/STOP's line field points
+    cs = d.line("cs", owner="ctl", idle=1)
+    if drive_y:
+        y = d.line("y", "od", owner="shared", idle=1)
+    z = d.line("z", owner="per", idle=1)
+    d.bus("select", cs)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    d.abort_to("ab")
+    d.li("r3", 1)
+    d.cond("start", owner="ctl", prof=w)
+    with d.lead("ctl"):
+        d.br("fin", "z", "r3")
+        if drive_y:
+            d.cond("fall", y, owner="ctl", prof=w)
+        d.cond("stop", owner="ctl", prof=w)
+        d.br("ab")
+    d.label("fin")
+    d.cond("fall", z, owner="per", prof=w, abort=True)
+    d.cond("rise", z, owner="per", prof=w)
+    d.cond("fall", y, owner="per", prof=w)
+    d.cond("rise", y, owner="per", prof=w)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    d.label("ab")
+    d.cond("start", owner="ctl", prof=d.profile("L", nom=400, min=0, max=INF))
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+def test_a_drive_in_a_lead_block_the_walker_skips_is_unknown_after_it():
+    """The exit's y low may still hold when the peripheral's COND FALL comes: no edge, and the
+    monitor waits for one."""
+    assert said(lead_exit(True), "y may not be high here")
+    assert model_goes_wrong(lead_exit(True))
+
+
+def test_a_start_or_stop_in_a_lead_block_drives_bus_a_not_line_0():
+    """Its line field is 0, here y: the exit's STOP leaves y alone, so the peripheral's COND FALL
+    on y is legal."""
+    assert diags(lead_exit(False)) == []
+
+
+def test_a_short_xfer_on_scl_with_sda_possibly_held_is_rejected():
+    """As second_lane at H 6, but SDA's let-go met a plain 0 on the other path first: it may still
+    be held, so lane M's edges may take it and release it with SCL high."""
+    d = Description("m6", parties=("ctl", "tgt"))
+    d.li("r3", 0)
+    sda, scl, x, lane, half, w = i2c_byte(d, src="zero", ldelay=15)
+    y = d.line("y", owner="ctl", idle=1)
+    m = d.lane("M", y, clk=scl, cpol=1, cpha=1)
+    f4 = d.profile("F4", nom=4, min=0, max=INF)
+    d.br("held", "nz", "r3")
+    d.cond("fall", x, owner="ctl", prof=f4)
+    d.br("join")
+    d.label("held")
+    d.cond("fall", x, owner="ctl", prof=f4)
+    d.hold(sda, 0, owner="ctl", prof=d.profile("H0", nom=20))
+    d.label("join")
+    d.cond("rise", x, owner="ctl", prof=w)       # where the paths meet
+    d.xfer(1, m, owner="ctl", prof=d.profile("HM", nom=6, min=0, max=INF), src="ones")
+    d.halt()
+    assert said(d, "is too short for the let-go on SDA")
+
+
+def test_a_second_clock_edge_doesnt_restart_a_pending_release():
+    """Off I2C, cpol 1, ldelay 15: the clock's fall takes the let-go (the release may take 15 + 1 +
+    1 + 1 = 18); the rise, a COND of nom 10 (counting 10 - 1 - 1 = 8), leaves it pending for 10, not
+    taken again; a HOLD of 12 (12 - 1 - 1 = 10) covers the rest, so a's COND FALL on dl makes an
+    edge."""
+    d = Description("re", parties=("a", "b"))
+    dl, c, lane, half, w = od_lane(d, 1, ldelay=15)
+    d.xfer(1, lane, owner="a", prof=half, src="zero")
+    d.cond("fall", c, owner="a", prof=d.profile("F4", nom=4, min=0, max=INF))
+    d.cond("rise", c, owner="a", prof=d.profile("R10", nom=10, min=0, max=INF))
+    d.hold(c, 1, owner="a", prof=d.profile("H12", nom=12))
+    d.cond("fall", dl, owner="a", prof=d.profile("F4b", nom=4, min=0, max=INF))   # counting only 2 itself
+    d.cond("rise", dl, owner="a", prof=w)
+    d.halt()
+    runs_clean(d)
+
+
+def test_a_duplex_xfer_leaves_data2_at_its_last_bit():
+    """b drives data2 (PP) low, then the duplex XFER from ONES leaves it high, so b's COND FALL on it
+    makes an edge."""
+    d = Description("dx", parties=("a", "b"))
+    c = d.line("c", owner="a", idle=0)
+    d1 = d.line("d1", owner="a", idle=1)
+    d2 = d.line("d2", owner="b", idle=1)
+    lane = d.lane("L", d1, clk=c, cpha=1, data2=d2)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    d.nop()
+    d.cond("fall", d2, owner="b", prof=w)
+    d.hold(d2, 0, owner="b", prof=d.profile("H0", nom=20))
+    d.xfer(8, lane, owner="a", prof=d.profile("HALF", nom=20, min=0, max=INF), src="ones")
+    d.cond("fall", d2, owner="b", prof=w)
+    d.cond("rise", d2, owner="b", prof=w)
+    d.halt()
+    runs_clean(d)

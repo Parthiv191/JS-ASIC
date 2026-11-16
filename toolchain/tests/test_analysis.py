@@ -644,6 +644,9 @@ def test_s_end_rejects_an_empty_program():
     """No words at all: the chip's first fetch is already past the end."""
     d, ln, p = two_party()
     assert s_end_pcs(d) == ([0], set())
+    with pytest.raises(CompileError) as e:      # no step to point at: step 0
+        compile_desc(d, check_timing=False, check_levels=False)
+    assert [(x.rule, x.index) for x in e.value.diags] == [("S-end", 0)]
 
 
 @pytest.mark.parametrize("last", ["halt", "loop", "each_role_halts"])

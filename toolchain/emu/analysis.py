@@ -159,6 +159,8 @@ def check_branches(desc, low: Lowered) -> list[Diagnostic]:
 _LG, _SHUT = "LG", "SHUT"   # a pending OD let-go (low until the lane's next clock edge); a shut gate
 _LGX = "LG?"                # a pending OD let-go of a bit of unknown level (taken at that edge)
 _SHUT1 = "SHUT?"            # a gated line shut on some paths, released or driven 1 on the others
+_LGU = "LG??"               # unknown, and it may hold a let-go: one path's let-go met a drive, or an
+                            # unknown, on another. Nothing but a new drive resolves it
 _READS_1 = (_SHUT, _SHUT1, 1)
 # A let-go taken at an edge a COND or HOLD made: ("REL", k), possibly still low for k more cycles
 # (the release comes ldelay after the edge, isa §4.3). An XFER's own edges release it within that
@@ -169,10 +171,16 @@ def _rel(v) -> bool:
     return isinstance(v, tuple)
 
 
+def _letgo(v) -> bool:
+    """A let-go may still release the line later."""
+    return v in (_LG, _LGX, _LGU) or _rel(v)
+
+
 def _join(x, y):
     """Two paths' drives: the same, a gated line that reads 1 on both, a let-go pending on one
     and released (or pending) on the other, a let-go held (not yet taken) on one and taken or
-    released on the other (it may still be held: unknown would hide it from the SCL check), or
+    released on the other (it may still be held), a let-go on one and anything else on the other
+    (unknown, and it may still release: plain unknown would hide it from the SCL check), or
     unknown."""
     if x == y:
         return x
@@ -180,6 +188,8 @@ def _join(x, y):
         return ("REL", max(v[1] for v in (x, y) if _rel(v)))
     if all(v in (_LG, _LGX, 1) or _rel(v) for v in (x, y)):
         return _LGX
+    if _letgo(x) or _letgo(y):
+        return _LGU
     return _SHUT1 if x in _READS_1 and y in _READS_1 else None
 _PARTIES = (Role.P0, Role.P1)
 
@@ -258,7 +268,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         vals = [st[int(q)][i] for q in _PARTIES]
         if any(v in (0, _LG) for v in vals):
             return 0
-        return None if any(v is None or v == _LGX or _rel(v) for v in vals) else 1
+        return None if any(v is None or v in (_LGX, _LGU) or _rel(v) for v in vals) else 1
 
     ppm = img.tolerance_ppm
 
@@ -284,7 +294,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     if dl is not None:
                         for q in _PARTIES:
                             v = st[int(q)][dl]
-                            if not (v in (_LG, _LGX) or _rel(v)):
+                            if not _letgo(v):
                                 continue
                             if how == "maybe":
                                 if scl is not None and dl == bus_a:
@@ -292,8 +302,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                               f"edge here, which may take the let-go on SDA "
                                               f"({lines[dl].name}) and release it later with SCL high: "
                                               f"a STOP to the others (isa §4.3, §4.7)")
-                                st[int(q)][dl] = None
-                            elif _rel(v):
+                                st[int(q)][dl] = _LGU if v == _LGU else None
+                            elif _rel(v) or v == _LGU and how == "cond":
                                 pass
                             elif how == "cond" or la.ldelay > H - E - 2:
                                 if how == "xfer" and scl is not None and dl == bus_a:
@@ -301,8 +311,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                               f"the let-go on SDA ({lines[dl].name}, ldelay {la.ldelay}): it "
                                               f"may release SDA with SCL high, a STOP to the others "
                                               f"(isa §4.3, §4.7)")
-                                st[int(q)][dl] = ("REL", need)
-                            else:
+                                st[int(q)][dl] = _LGU if v == _LGU else ("REL", need)
+                            elif v != _LGU:
                                 st[int(q)][dl] = 1
 
     def check(st, pc: int, ins: Instr, r: Role) -> None:
@@ -383,7 +393,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         """On I2C, SCL doesn't rise while a let-go may still release SDA: an SDA rise with SCL
         high is a STOP to the others."""
         vals = [st[int(q)][bus_a] for q in _PARTIES]
-        if wire(st, scl) != 1 and any(v in (_LG, _LGX) or _rel(v) for v in vals) and 0 not in vals:
+        if wire(st, scl) != 1 and any(_letgo(v) for v in vals) and 0 not in vals:
             diags.add("R2-edge", pc, f"SCL ({lines[scl].name}) rises while a let-go may still release SDA "
                                      f"({lines[bus_a].name}) after it: an SDA rise with SCL high is a STOP "
                                      f"to the others (isa §4.3, §4.7)")
@@ -488,7 +498,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             sp = block_at.get(pc)
             if sp is not None and r not in sp.roles:  # r skips it: what its parties drive there is unknown
                 for q, ln in touched[pc]:
-                    st[int(q)][ln] = None
+                    st[int(q)][ln] = _join(st[int(q)][ln], None)
             out = tuple(tuple(row) for row in st)
             for s in successors(instrs, pc, r):
                 old = state.get(s)
