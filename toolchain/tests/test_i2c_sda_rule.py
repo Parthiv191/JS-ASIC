@@ -153,3 +153,65 @@ def test_only_the_bus_lane_transfers_on_sda(lane_kind):
         d.xfer(1, m, owner="ctl", prof=half, src="ones")
     d.halt()
     assert said(d)
+
+
+# ---- the review of this rule: HALT, and an XFER with SCL as its data
+def halts(who):
+    """The target halts after its ACK (SDA low, SCL high at its end), or the controller right
+    after the START: HALT releases SDA at once (isa §4.1), a STOP."""
+    d = Description("th", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    d.nop()
+    d.cond("start", owner="ctl", prof=w)
+    if who == "ctl":
+        d.halt()
+        return d
+    d.xfer(8, lane, owner="ctl", prof=half, src="ones")
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero")
+    with d.only("tgt"):
+        d.halt()
+    d.xfer(1, lane, owner="ctl", prof=d.profile("H40", nom=40, min=0, max=INF), src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("who", ["tgt", "ctl"])
+def test_a_halt_that_releases_sda_with_scl_high_is_rejected(who):
+    assert any(r == "R1-bus" and "HALT by" in m for r, m in diags(halts(who)))
+    img = compile_desc(halts(who), check_levels=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    stops = [at for at, k in t.engines[2].bus_events if k == "STOP"]
+    assert stops and (who == "ctl" or stops[0] < max(t.wire_edges[img.bus.a]))   # before the program's own
+
+
+def scl_as_data():
+    """The controller's byte (SDA's let-go held, ldelay 12), then an unclocked 2-bit XFER of 0b10
+    with SCL as its data line: SCL falls, taking the let-go, and rises 10 later, before the
+    release (found by the review of this rule; a 9-clock bus recovery is written this way)."""
+    d = Description("sd", parties=("ctl", "tgt"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    x = d.line("x", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=12)
+    u = d.lane("U", scl)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    d.li("r1", 0xB4)
+    d.li("r5", 0b10)
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(8, lane, owner="ctl", prof=d.profile("HALF", nom=20, min=0, max=INF), src="r1", msb_first=True)
+    d.cond("fall", x, owner="ctl", prof=w)
+    d.xfer(2, u, owner="ctl", prof=d.profile("P", nom=10, min=9, max=11), src="r5")
+    d.cond("rise", x, owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+def test_an_xfer_with_scl_as_its_data_makes_edges_the_walk_cant_pin_down():
+    """So with a let-go on SDA it is rejected; on the model the followers see a STOP (the program
+    makes none)."""
+    assert any("may or may not have an edge" in m for _, m in diags(scl_as_data()))
+    img = compile_desc(scl_as_data(), check_levels=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    assert "STOP" in [k for _, k in t.engines[2].bus_events]

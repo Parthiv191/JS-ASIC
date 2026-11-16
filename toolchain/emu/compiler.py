@@ -424,7 +424,11 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
                              f"changes it with SCL low), a START or STOP to the others")
     if s.kind in ("raw_set", "raw_rel"):
         ln = lines[a["line"].index]
-        if ln.kind == "pp":
+        if s.block is None or MON in s.block:
+            # the walks that check levels (R2-edge, R1-bus) follow P0 and P1 only
+            err("R3-raw-drive", s, f"raw drive of {ln.name!r} outside a role block, or in one MON runs: "
+                                   f"only a party's own block may drive a line by RAW")
+        elif ln.kind == "pp":
             allowed = s.block is not None and s.block <= {_name(desc, ln.owner)}
             if not allowed:
                 err("R3-raw-drive", s, f"raw drive of push-pull line {ln.name!r} outside an "

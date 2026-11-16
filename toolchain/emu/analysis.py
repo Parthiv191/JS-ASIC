@@ -214,7 +214,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
 
     COND START/STOP are the edges on `bus_a` (START = FALL, STOP = RISE); on I2C, SCL must be high
     too. On SELECT, a HOLD or RAW SET by CS's owner must keep CS at its level (R1-bus, its own
-    walk, which also starts at abort_pc). The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
+    walk, which also starts at abort_pc). On I2C, R1-bus: a HOLD, COND FALL/RISE or RAW SET/REL on
+    SDA comes with SCL low or leaves SDA as it is, and a HALT doesn't release SDA with SCL high. The paths from an abort or bus exit into abort_pc are not walked yet (isa §5, open)."""
     instrs = low.instrs
     diags = _Diags(desc, low)
     img = low.image
@@ -398,6 +399,18 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                      f"({lines[bus_a].name}) after it: an SDA rise with SCL high is a STOP "
                                      f"to the others (isa §4.3, §4.7)")
 
+    def halt_sda(st, pc: int, r: Role) -> None:
+        """R1-bus on I2C: HALT releases r's lines (isa §4.1), so where SCL may be high (after r lets
+        go of it too), r's SDA must already be released, or the others see a STOP."""
+        let_go = [list(row) for row in st]
+        let_go[int(r)][bus_a] = let_go[int(r)][scl] = 1
+        sda_was = wire(st, bus_a)
+        if (st[int(r)][bus_a] != 1 and (sda_was is None or wire(let_go, bus_a) != sda_was)
+                and wire(let_go, scl) != 0):
+            diags.add("R1-bus", pc, f"HALT by {r.name} releases SDA ({lines[bus_a].name}), which it may "
+                                    f"still drive, where SCL ({lines[scl].name}) may be high: a STOP to the "
+                                    f"others that no COND STOP times (isa §4.1, §4.7)")
+
     def step(st, pc: int) -> None:
         ins, ex = instrs[pc], runs(pc)
         if ins.op in (Op.COND, Op.HOLD, Op.XFER):
@@ -431,6 +444,9 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             if la.clk is not None:
                 edge_on(st, la.clk, "xfer", pc, nom_of(ins))
             const = {Src.ZERO: 0, Src.ONES: 1}.get(unpack_xfer(ins.operand)[1])
+            for x in {la.data, la.data2} - {None, la.clk}:
+                if any(other.clk == x for other in lanes):
+                    edge_on(st, x, "maybe", pc)
             for q, dl in drives(pc):
                 if dl == la.clk:
                     st[int(q)][dl] = la.cpol
@@ -499,14 +515,22 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 ins.op in (Op.HOLD, Op.COND) and ins.line == bus_a and does(ins.owner, r)
                 and not (ins.op == Op.COND and edge_line(ins)[0] in (CondKind.START, CondKind.STOP))
                 or ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL) and ins.ra == bus_a)
-            sda_was, scl_was = (wire(st, bus_a), wire(st, scl)) if on_sda else (None, None)
+            if on_sda:
+                sda_was, scl_was = wire(st, bus_a), wire(st, scl)
+            if ins.op == Op.HALT and scl is not None and r in runs(pc):
+                halt_sda(st, pc, r)
             step(st, pc)
             if on_sda and scl_was != 0 and (sda_was is None or wire(st, bus_a) != sda_was):
-                what = {Op.HOLD: "HOLD", Op.COND: "COND", Op.RAW: "RAW SET/REL"}[ins.op]
+                if ins.op == Op.HOLD:
+                    what = f"HOLD {ins.operand & 1}"
+                elif ins.op == Op.COND:
+                    what = f"COND {edge_line(ins)[0].name}"
+                else:
+                    what = "RAW SET " + str(ins.operand & 1) if ins.sub == RawOp.SET else "RAW REL"
                 diags.add("R1-bus", pc, f"{what} on SDA ({lines[bus_a].name}) by {r.name}: SCL "
                                         f"({lines[scl].name}) may be high here, and only COND START/STOP "
-                                        f"change SDA then: the others take any SDA edge with SCL high as "
-                                        f"a START or STOP (isa §4.7)")
+                                        f"change SDA then, so SCL is low or SDA stays as it is: the others "
+                                        f"take any SDA edge with SCL high as a START or STOP (isa §4.7)")
             if ins.op in (Op.HOLD, Op.XFER) and r in runs(pc):
                 tick(st, nom_of(ins))      # the next step comes at least nom (or H) later
             sp = block_at.get(pc)
