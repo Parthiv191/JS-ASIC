@@ -521,7 +521,14 @@ def stops(t, i):
     return [c for c, k in t.engines[i].bus_events if k == "STOP"]
 
 
+def start_then_raw_set_1(d, cs, p):
+    d.cond("start", owner="a", prof=p)
+    with d.only("a"):
+        d.raw_set(cs, 1)
+
+
 CS_DRIVES = {
+    "after START, RAW SET 1": start_then_raw_set_1,
     "COND RISE": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.cond("rise", cs, owner="a", prof=p)),
     "COND FALL": lambda d, cs, p: d.cond("fall", cs, owner="a", prof=p),
     "HOLD 1 after START": lambda d, cs, p: (d.cond("start", owner="a", prof=p), d.hold(cs, 1, owner="a", prof=p)),
@@ -574,18 +581,113 @@ def test_a_hold_or_raw_set_that_keeps_cs_at_its_level_is_no_edge():
     assert not t.engines[1].violations
 
 
-def test_a_hold_on_cs_at_a_level_it_has_on_only_some_paths_is_rejected():
-    """isa §5 R1-bus: CS low on one path into the HOLD 0 and high on the other: on the second the
-    HOLD makes a START no COND START timed."""
+@pytest.mark.parametrize("what", ["HOLD", "RAW SET"])
+def test_a_drive_on_cs_at_a_level_it_has_on_only_some_paths_is_rejected(what):
+    """isa §5 R1-bus: CS low on one path into the drive 0 and high on the other: on the second it
+    makes a START no COND START timed."""
     def body(d, cs, miso, x, p):
         d.li("r1", 0)
         d.br("skip", "z", "r1")
         d.cond("start", owner="a", prof=p)
         d.label("skip")
-        d.hold(cs, 0, owner="a", prof=p)
+        if what == "HOLD":
+            d.hold(cs, 0, owner="a", prof=p)
+        else:
+            with d.only("a"):
+                d.raw_set(cs, 0)
         d.cond("stop", owner="a", prof=p)
-    with pytest.raises(CompileError, match=r"\[R1-bus\] .*HOLD 0 on the SELECT line 'cs'.*may not be at 0"):
+    with pytest.raises(CompileError, match=rf"\[R1-bus\] .*{what} 0 on the SELECT line 'cs'.*may not be at 0"):
         select_desc(body)
+
+
+def cs_after_abort(variant):
+    """The review's programs: b's HOLD with ABORT, which a follows inside a's frame, so a glitch on
+    x aborts a with CS low. `top`: a RAW SET 1 at abort_pc, which the walk from pc 0 reaches with
+    CS high. `exit`: the same at an abort_pc only an abort reaches. `plain`: nothing drives CS
+    there."""
+    d = Description("sel", parties=("a", "b"))
+    cs = d.line("cs", owner="a", idle=1)
+    x = d.line("x", owner="b", idle=1)
+    d.bus("select", cs)
+    cnd = d.profile("C", nom=12, min=4, max=0xFFFF)
+    setup = d.profile("SU", nom=20, min=10, max=0xFFFF)
+    hp = d.profile("H", nom=20, min=0, max=INF)
+    d.abort_to("exit" if variant == "exit" else "top")
+    d.label("top")
+    if variant == "top":
+        with d.only("a"):
+            d.raw_set(cs, 1)
+    d.cond("start", owner="a", prof=cnd)
+    d.hold(cs, 0, owner="a", prof=setup)
+    d.hold(x, 0, owner="b", prof=hp, abort=True)
+    d.cond("stop", owner="a", prof=cnd)
+    d.halt()
+    if variant == "exit":
+        d.label("exit")
+        with d.only("a"):
+            d.raw_set(cs, 1)
+        d.halt()
+    return d
+
+
+@pytest.mark.parametrize("variant", ["top", "exit"])
+def test_a_drive_on_cs_where_an_abort_may_leave_it_low_is_rejected(variant):
+    """isa §5 R1-bus: an abort can reach abort_pc with CS at either level, so a HOLD or RAW SET on
+    CS there (before a COND START/STOP sets it) may make an edge."""
+    with pytest.raises(CompileError, match=r"\[R1-bus\] .*RAW SET 1 on the SELECT line 'cs'.*may not be at 1"):
+        compile_desc(cs_after_abort(variant))
+
+
+def test_without_a_drive_on_cs_at_abort_pc_it_compiles():
+    compile_desc(cs_after_abort("plain"))
+
+
+def test_the_rejected_abort_program_makes_a_stop_no_cond_stop_timed():
+    """On the model: a aborts with CS low, its RAW SET at abort_pc raises CS, and b's detector
+    takes that as the STOP before a's COND STOP, which b then follows EARLY."""
+    img = compile_desc(cs_after_abort("top"), check_levels=False)
+    t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON), glitches=[Glitch(1, 41, 3, 1)])
+    assert "ABORT" in kinds(t, 0)
+    assert "EARLY" in kinds(t, 1)
+
+
+def spi_select():
+    """devOps's RTL test (`test/test_bus.py`), compiled with every check: START, a HOLD that keeps
+    CS low as the setup time, a duplex byte with a gated MISO, STOP."""
+    d = Description("sel", parties=("m", "t"))
+    cs = d.line("cs", owner="m", idle=1)
+    sck = d.line("sck", owner="m", idle=0)
+    mosi = d.line("mosi", owner="m", idle=1)
+    miso = d.line("miso", owner="t", idle=1, gated=True)
+    d.bus("select", cs)
+    lane = d.lane("ln", mosi, clk=sck, cpol=0, cpha=1, data2=miso)
+    bit = d.profile("H", nom=12, min=12, max=0xFFFF)
+    cnd = d.profile("C", nom=12, min=4, max=0xFFFF)
+    setup = d.profile("SU", nom=20, min=10, max=0xFFFF)
+    with d.only("m"):
+        d.li("r0", 0xA4)
+    with d.only("t"):
+        d.li("r0", 0x3C)
+    d.cond("start", owner="m", prof=cnd)
+    d.hold(cs, 0, owner="m", prof=setup)
+    d.xfer(8, lane, owner="m", prof=bit, src="r0", dst="r1", abort=True)
+    d.cond("stop", owner="m", prof=cnd)
+    d.mark(1)
+    d.halt()
+    d.label("exit")
+    d.mark(2)
+    d.halt()
+    d.abort_to("exit")
+    return compile_desc(d)
+
+
+def test_devops_select_program_compiles_and_runs_clean():
+    t = run_sys(spi_select())
+    for i in range(3):
+        assert t.engines[i].regs[1] == 0x3CA4 and "MARK" in kinds(t, i), i
+        assert not t.engines[i].violations, i
+    for i in (1, 2):
+        assert [k for _, k in t.engines[i].bus_events] == ["START", "STOP"], i
 
 
 def test_a_select_cs_idles_at_1():
