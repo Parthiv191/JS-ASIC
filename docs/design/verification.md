@@ -33,7 +33,7 @@ A name in a test shows that a test expects the rule, not that the test is strong
 
 | Rule or kind | Tests |
 |---|---|
-| `R1-bus` | `test_engine_bus.py` |
+| `R1-bus` | `test_engine_bus.py`, `test_i2c_sda_rule.py` |
 | `R1-od-lane` | `test_compiler.py`, `test_engine_clocked.py` |
 | `R1-owner` | `test_compiler.py`, `test_engine_clocked.py` |
 | `R1-shared` | `test_compiler.py` |

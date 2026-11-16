@@ -416,10 +416,8 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
         # (§4.7). The bus lane (cpol 1, cpha 1, clocked by SCL) changes SDA with SCL low; another XFER
         # on SDA may change it with SCL high, and a lane clocked by SDA makes its edges there
         sda, scl = desc.bus_cfg[1].index, desc.bus_cfg[2].index
-        ref = a["lane"]
-        la = desc.lanes[ref.index] if isinstance(ref, LaneRef) else None
+        la = desc.lanes[ref.index] if isinstance(ref, LaneRef) else None   # ref, clk: the timed step's, above
         on = {ref.index} if la is None else {x.index for x in (la.data, la.data2) if x is not None}
-        clk = None if la is None or la.clk is None else la.clk.index
         if clk == sda or sda in on and not (clk == scl and la.cpol == 1 and la.cpha == 1):
             err("R1-bus", s, f"only COND START/STOP change SDA {lines[sda].name!r} with SCL high: this XFER "
                              f"may change or clock on it then (only a cpol 1, cpha 1 lane clocked by SCL "
