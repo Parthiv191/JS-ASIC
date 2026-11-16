@@ -6,6 +6,8 @@
     python bringup.py --port COM5 engine   # layer 5: one engine runs a tiny program
     python bringup.py --port COM5 uart-tx  # layer 7: the library UART sends to a device (M1)
     python bringup.py --port COM5 uart-rx  # layer 7: the library UART receives from a device
+    python bringup.py --port COM5 i2c-read --addr 0x50 --reg 0x00 --n 2   # demo step 8
+    python bringup.py --port COM5 spi-jedec                               # demo step 10
 
 Layer 1 (TESTMODE) needs no PC: see README.md. Each check prints what it saw and exits 1 on the
 first mismatch. Layer 6 (LOOPBACK, two engines) waits for engine 1 in the RTL.
@@ -131,19 +133,81 @@ def layer_uart_rx(chip: Chip, n: int = 4, wait: float = 5.0) -> None:
     check("bytes received", len(words) >= n, True)
 
 
+def wait_rx(chip: Chip, n: int, wait: float, done=lambda words: False) -> list[int]:
+    """Pop engine 0's RX until `n` words, `done(words)`, or `wait` seconds."""
+    words: list[int] = []
+    t0 = time.time()
+    while len(words) < n and not done(words) and time.time() - t0 < wait:
+        k = chip.fifo_counts(0)[1]
+        if k:
+            words += chip.rx_pop(0, k)
+        else:
+            time.sleep(0.01)
+    return words
+
+
+def layer_i2c_read(chip: Chip, addr: int = 0x50, reg: int = 0x00, n: int = 1, wait: float = 2.0) -> None:
+    """The library I2C register read (100 kHz at 40 MHz) as the controller on engine 0: SDA is IO0
+    (JB pin 1) and SCL is IO1 (JB pin 2), open drain, with 2.2-4.7 kOhm pull-ups to 3.3 V (most
+    sensor breakouts have them; the FPGA's own are too weak). Reads `n` (1-4) bytes from register
+    `reg` of the device at 7-bit address `addr`: an EEPROM (0x50) gives its data, a sensor its
+    WHO_AM_I (demo step 8). NACK (0x100) means no device answered that address."""
+    from emu.compiler import compile_desc
+    from emu.isa import Role
+    from emu.protocols import get
+    from emu.protocols.i2c_reg import NACK
+    chip.load(compile_desc(get("i2c_reg").build(half_cycles=200, data_bytes=n)))
+    chip.set_role(0, Role.P0)
+    chip.run(0b01)
+    chip.tx_push(0, [addr << 1, reg, addr << 1 | 1])
+    words = wait_rx(chip, n, wait, done=lambda w: NACK in w)
+    print(f"     device 0x{addr:02X}, register 0x{reg:02X}: {[hex(w) for w in words]}")
+    check("violations", chip.status(0)["viol"], 0)
+    check("the device ACKed", NACK not in words, True)
+    check("bytes read", len(words), n)
+
+
+def layer_spi_jedec(chip: Chip, wait: float = 2.0) -> None:
+    """The library SPI (mode 0, 1 MHz at 40 MHz) as the controller on engine 0: CS is IO0 (JB pin 1),
+    SCK IO1 (pin 2), MOSI IO2 (pin 3), MISO IO3 (pin 4). Sends an SPI flash's JEDEC ID command
+    (0x9F) and reads three bytes: manufacturer, memory type, capacity (demo step 10). Each RX
+    word is (MISO << 8) | MOSI."""
+    from emu.compiler import compile_desc
+    from emu.isa import Role
+    from emu.protocols import get
+    chip.load(compile_desc(get("spi").build(half_cycles=20, words=4)))
+    chip.set_role(0, Role.P0)
+    chip.run(0b01)
+    chip.tx_stream(0, [0, 0x9F, 0, 0, 0])   # the frame token, the command, three dummy bytes
+    words = wait_rx(chip, 4, wait)
+    ident = [w >> 8 for w in words[1:4]]
+    print(f"     JEDEC ID: {' '.join(f'{b:02X}' for b in ident)} (manufacturer, type, capacity)")
+    check("violations", chip.status(0)["viol"], 0)
+    check("bytes read", len(words), 4)
+    check("a manufacturer answered (not 00 or FF)", ident[0] not in (0x00, 0xFF), True)
+
+
 LAYERS = {"id": layer_id, "gpio": layer_gpio, "sram": layer_sram, "engine": layer_engine,
-          "uart-tx": layer_uart_tx, "uart-rx": layer_uart_rx}
+          "uart-tx": layer_uart_tx, "uart-rx": layer_uart_rx, "i2c-read": layer_i2c_read,
+          "spi-jedec": layer_spi_jedec}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", required=True, help="the Basys 3's USB-UART, e.g. COM5")
     ap.add_argument("layer", choices=list(LAYERS) + ["all"])
+    num = lambda x: int(x, 0)
+    ap.add_argument("--addr", type=num, default=0x50, help="i2c-read: the 7-bit device address")
+    ap.add_argument("--reg", type=num, default=0x00, help="i2c-read: the register")
+    ap.add_argument("--n", type=int, default=1, choices=range(1, 5), help="i2c-read: bytes to read")
     args = ap.parse_args()
     chip = Chip.open(args.port)
     for name in (["id", "gpio", "sram", "engine"] if args.layer == "all" else [args.layer]):
         print(f"--- {name}")
-        LAYERS[name](chip)
+        if name == "i2c-read":
+            LAYERS[name](chip, args.addr, args.reg, args.n)
+        else:
+            LAYERS[name](chip)
     print("all checks passed")
 
 

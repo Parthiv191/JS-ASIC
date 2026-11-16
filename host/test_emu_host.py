@@ -157,3 +157,30 @@ def test_uart_tx_layer_runs_engine_0_as_the_transmitter_and_streams_the_text():
     assert port.tx == list(b"JS-ASIC\r\n")
     assert port.mem[ENG0] == 0                      # ROLE := P0, the UART's tx party
     assert port.mem[0x04] == 0b01                   # RUN engine 0
+
+
+def test_i2c_read_layer_pushes_address_w_register_address_r_and_reads_the_bytes():
+    import bringup
+    port = FakeBridgePort()
+    port.rx = [0x12, 0x34]                          # what the device answers
+    bringup.layer_i2c_read(Chip(Bridge(port)), addr=0x50, reg=0x0F, n=2)
+    assert port.tx == [0x50 << 1, 0x0F, 0x50 << 1 | 1]
+    assert port.mem[ENG0] == 0 and port.mem[0x04] == 0b01   # P0, the controller; RUN engine 0
+
+
+def test_i2c_read_layer_fails_on_a_nack():
+    import bringup
+    port = FakeBridgePort()
+    port.rx = [0x100]
+    with pytest.raises(SystemExit):
+        bringup.layer_i2c_read(Chip(Bridge(port)), addr=0x51, n=1)
+
+
+def test_spi_jedec_layer_sends_9f_and_decodes_miso():
+    import bringup
+    port = FakeBridgePort()
+    port.rx = [0xFF9F, 0xEF00, 0x4000, 0x1800]       # a Winbond W25Q128: EF 40 18
+    bringup.layer_spi_jedec(Chip(Bridge(port)))
+    assert port.tx == [0, 0x9F, 0, 0, 0]
+    assert port.mem[ENG0] == 0 and port.mem[0x04] == 0b01
+

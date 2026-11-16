@@ -53,6 +53,10 @@ All switches down.
 | 6 LOOPBACK | waits for engine 1 in the RTL | |
 | 7a UART to a device (M1) | the microcontroller's UART RX on JB pin 1 at 115200 8N1 (3.3 V), ground shared; `... uart-tx` | it prints "Hello from the JS-ASIC engine"; TX drains, no violations, the engine waits on POP |
 | 7b UART from a device | the microcontroller's UART TX on JB pin 1 instead; `... uart-rx`, then send 4 bytes | the bytes arrive in RX, no violations |
+| 7c I2C read (demo step 8) | an I2C EEPROM or sensor: SDA on JB pin 1, SCL on JB pin 2, 3.3 V, ground, 2.2–4.7 kΩ pull-ups on both (breakouts usually have them); `... i2c-read --addr 0x50 --reg 0x00 --n 2` (a sensor: its address and WHO_AM_I register) | the bytes, no NACK (0x100), no violations; 100 kHz with a repeated START, the last byte NACKed |
+| 7d SPI flash ID (demo step 10) | an SPI flash: CS on JB pin 1, SCK pin 2, MOSI (flash DI) pin 3, MISO (flash DO) pin 4, 3.3 V, ground, /WP and /HOLD high; `... spi-jedec` | three ID bytes, the first a manufacturer (EF Winbond, C2 Macronix, 20 Micron), no violations; mode 0 at 1 MHz |
 
-Every layer's register sequence also runs in `fpga/sim` against the RTL, so a failure on the
-board points at the board, the pins or the build, not the sequence.
+Layers 1–7b also run, register sequence and all, in `fpga/sim` against the RTL, so a failure on
+the board points at the board, the pins or the build, not the sequence. 7c and 7d don't yet; the
+engine side of each runs in co-sim (`test/cosim`: the library I2C register read and SPI in every
+role), so for them the bridge and the pads are what's untested off the board.
