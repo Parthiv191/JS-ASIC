@@ -19,8 +19,8 @@ default 12 is I2C's 300 ns at the 40 MHz sign-off clock.
   exit, so the target re-syncs on the real START instead of losing the transaction.
 - Every data byte is ACKed by the target. The target and a monitor push each data byte into RX;
   the controller drives SDA, the lane's only data line, so it pushes nothing (isa §4.3).
-- The STOP: SCL low (the target lets SDA go, isa §4.3 let-go), SDA low, SCL high, then SDA rises
-  while SCL is high.
+- The STOP: SCL low (the target lets SDA go, isa §4.3 let-go), SDA low `ldelay` later (the data
+  hold), SCL high, then SDA rises while SCL is high.
 """
 from __future__ import annotations
 
@@ -40,9 +40,11 @@ def build(half_cycles: int = 20, data_bytes: int = 1, address: int = 0x5A, ldela
     half = d.profile("HALF", nom=H, min=0, max=INF)
     wait = d.profile("WAIT", nom=H, min=0, max=INF)
     hold = d.profile("HOLD", nom=H)
+    settle = d.profile("SETTLE", nom=max(10, ldelay))   # 10: a follower samples it mid-slot (T1)
 
     def stop() -> None:
         d.cond("fall", scl, owner="ctl", prof=wait)
+        d.hold(scl, 0, owner="ctl", prof=settle)   # SDA moves ldelay after SCL falls
         d.hold(sda, 0, owner="ctl", prof=hold)
         d.cond("rise", scl, owner="ctl", prof=wait)
         d.cond("stop", owner="ctl", prof=wait)

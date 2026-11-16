@@ -137,3 +137,14 @@ def test_the_default_data_hold_is_300_ns_at_50_mhz():
     falls = scl[0::2]                              # SCL idles high: even edges fall
     moves = [e for e in sda[1:-1]]                 # SDA edges other than START and STOP
     assert all(min(e - f for f in falls if f <= e) >= 12 for e in moves)
+
+
+@pytest.mark.parametrize("ctl", [[0x5A << 1, 0x11], [0x50 << 1, 0x11]], ids=["ack", "nack"])
+def test_sda_moves_only_ldelay_after_scl_falls_on_every_path(ctl):
+    """With SCL low, SDA moves at least ldelay after SCL fell, the STOP's SDA fall included: after a
+    NACKed address SDA is high, and the STOP pulled it low 2 cycles after SCL fell."""
+    t = run_roles(get("i2c").build(), (Role.P0, Role.P1), {"ctl": ctl, "tgt": []})
+    sda, scl = t.wire_edges[SDA], t.wire_edges[SCL]
+    level = lambda edges, tick: 1 ^ (sum(e <= tick for e in edges) & 1)
+    early = [(e, e - max(f for f in scl if f <= e)) for e in sda if level(scl, e) == 0]
+    assert [x for x in early if x[1] < get("i2c").defaults["ldelay"]] == []

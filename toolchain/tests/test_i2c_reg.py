@@ -130,3 +130,106 @@ def test_every_i2c_reg_space_point_compiles():
     keys = sorted(SPEC.space)
     for values in itertools.product(*(SPEC.space[k] for k in keys)):
         compile_desc(SPEC.build(**dict(zip(keys, values))))
+
+
+# ---- the review of the register read: what a real device on the other end needs
+A = SPEC.defaults["address"]
+LD = SPEC.defaults["ldelay"]
+HOSTS = {   # one transaction then a good one: a NACK at the write address, at the read address
+    "ack": [A << 1, 0x05, A << 1 | 1, A << 1, 0x06, A << 1 | 1],
+    "nack_w": [0x11 << 1, 0x05, 0x11 << 1 | 1, A << 1, 0x06, A << 1 | 1],
+    "nack_r": [A << 1, 0x05, 0x11 << 1 | 1, A << 1, 0x06, A << 1 | 1],
+}
+
+
+def level(edges, tick):
+    return 1 ^ (sum(e <= tick for e in edges) & 1)        # both lines idle at 1
+
+
+@pytest.mark.parametrize("case", HOSTS)
+def test_sda_moves_only_ldelay_after_scl_falls(case):
+    """I2C's data hold: with SCL low, SDA moves at least `ldelay` (300 ns by default) after SCL fell,
+    on every path, the STOP's SDA fall included (it came 2 cycles after SCL fell)."""
+    t = run_roles(SPEC.build(), (Role.P0, Role.P1), {"ctl": HOSTS[case], "tgt": []})
+    sda, scl = t.wire_edges[SDA], t.wire_edges[SCL]
+    early = [(e, e - max(f for f in scl if f <= e)) for e in sda if level(scl, e) == 0]
+    assert [x for x in early if x[1] < LD] == []
+
+
+@pytest.mark.parametrize("case", HOSTS)
+def test_every_role_on_a_nack_and_the_next_transaction(case):
+    """The controller pushes NACK for the failed transaction; the target has the register numbers
+    it got (both, on a NACKed read address); MON pushes what it saw, its failed transaction marked
+    by a BUS event."""
+    vals = values_for(**params())
+    perm = (Role.P0, Role.P1, Role.MON)
+    t = run_roles(SPEC.build(), perm, {"ctl": HOSTS[case], "tgt": []})
+    assert t.quiescent
+    want = {
+        "ack": ([*vals, *vals], [0x05, 0x06], [0x05, *vals, 0x06, *vals], set()),
+        "nack_w": ([NACK, *vals], [0x06], [0x06, *vals], {"BUS"}),
+        "nack_r": ([NACK, *vals], [0x05, 0x06], [0x05, 0x06, *vals], {"BUS"}),
+    }[case]
+    assert [t.engines[i].rx for i in range(3)] == list(want[:3])
+    assert not t.engines[0].events and not t.engines[1].events
+    assert {e.kind for e in t.engines[2].events} == want[3]
+
+
+def test_a_controller_reading_fewer_bytes_than_the_target_serves():
+    """An MCU reading one byte from a target that serves two: the target sees the NACK and waits for
+    the STOP instead of sending its second byte (0x25: its first bit, 0, would hold SDA low through
+    the STOP), so the next transaction goes through."""
+    from emu.model.system import EngineSpec, System
+    ctl = compile_desc(SPEC.build(data_bytes=1))
+    tgt = compile_desc(SPEC.build(data_bytes=2, values=(0x68, 0x25)))
+    s = System([EngineSpec(ctl, Role.P0), EngineSpec(tgt, Role.P1)])
+    s.host_push(0, HOSTS["ack"])
+    t = s.run(500_000)
+    assert t.quiescent and t.engines[0].rx == [0x68, 0x68] and t.engines[1].rx == [0x05, 0x06]
+    assert not t.engines[0].events and not t.engines[1].events
+
+
+def scl_fall(build, k):
+    """The tick of SCL's k-th fall in a clean run."""
+    t = run_roles(build, (Role.P0, Role.P1), {"ctl": HOSTS["ack"][:3], "tgt": []})
+    return t.wire_edges[SCL][0::2][k]
+
+
+@pytest.mark.parametrize("stretch", [True, False])
+def test_a_target_that_stretches_scl(stretch):
+    """A real target may hold SCL low (clock stretching): here for 200 cycles, in the data byte's
+    third bit. With `stretch` (the default) the controller waits for SCL to rise; without it, it
+    clocks on and reads a wrong byte, with no event."""
+    from emu.model.system import EngineSpec, Glitch, System
+    b = SPEC.build(stretch=stretch)
+    at = scl_fall(b, 31) + 1                       # 9 + 9 + 1 + 9 falls, then 3 bits in
+    s = System([EngineSpec(compile_desc(b), r) for r in (Role.P0, Role.P1)], glitches=[Glitch(SCL, at, 200, 0)])
+    s.host_push(0, HOSTS["ack"][:3])
+    t = s.run(500_000)
+    assert (t.engines[0].rx == values_for(**params())) == stretch
+
+
+def test_a_glitch_on_the_idle_bus_costs_no_transaction():
+    """As for the write: an SDA low pulse on the idle bus is a START and a STOP no controller made;
+    the address XFER bus-exits on the flags and the target re-syncs on the real START."""
+    from emu.model.system import EngineSpec, Glitch, System
+    img = compile_desc(SPEC.build())
+    s = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)], glitches=[Glitch(SDA, 500, 30, 0)])
+    s.host_push(0, HOSTS["ack"], at_tick=2000)
+    t = s.run(500_000)
+    vals = values_for(**params())
+    assert t.engines[0].rx == vals * 2 and t.engines[1].rx == [0x05, 0x06]
+
+
+def test_a_late_host_one_word_at_a_time():
+    """The register and the read address come from TX inside XFERs the controller clocks, so a POP
+    stall there holds SCL low, which I2C allows; the target follows it."""
+    from emu.model.system import EngineSpec, System
+    img = compile_desc(SPEC.build())
+    s = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)])
+    for k, w in enumerate(HOSTS["ack"]):
+        s.host_push(0, [w], at_tick=1000 + 1500 * k)
+    t = s.run(500_000)
+    vals = values_for(**params())
+    assert t.engines[0].rx == vals * 2 and t.engines[1].rx == [0x05, 0x06]
+    assert all(not et.events for et in t.engines)
