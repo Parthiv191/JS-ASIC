@@ -492,7 +492,21 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     (ins.op == Op.COND and ins.line == scl and CondKind(unpack_cond(ins.operand)[0]) == CondKind.RISE)
                     or (ins.op == Op.HOLD and ins.line == scl and ins.operand & 1))):
                 scl_rises(st, pc, ins, r)
+            # R1-bus on I2C: only COND START/STOP change SDA with SCL high (the others take any such
+            # edge as a START or STOP, isa §4.7), so a HOLD, COND FALL/RISE or RAW SET/REL on SDA
+            # comes with SCL low, or leaves SDA where it is
+            on_sda = scl is not None and r in runs(pc) and (
+                ins.op in (Op.HOLD, Op.COND) and ins.line == bus_a and does(ins.owner, r)
+                and not (ins.op == Op.COND and edge_line(ins)[0] in (CondKind.START, CondKind.STOP))
+                or ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL) and ins.ra == bus_a)
+            sda_was, scl_was = (wire(st, bus_a), wire(st, scl)) if on_sda else (None, None)
             step(st, pc)
+            if on_sda and scl_was != 0 and (sda_was is None or wire(st, bus_a) != sda_was):
+                what = {Op.HOLD: "HOLD", Op.COND: "COND", Op.RAW: "RAW SET/REL"}[ins.op]
+                diags.add("R1-bus", pc, f"{what} on SDA ({lines[bus_a].name}) by {r.name}: SCL "
+                                        f"({lines[scl].name}) may be high here, and only COND START/STOP "
+                                        f"change SDA then: the others take any SDA edge with SCL high as "
+                                        f"a START or STOP (isa §4.7)")
             if ins.op in (Op.HOLD, Op.XFER) and r in runs(pc):
                 tick(st, nom_of(ins))      # the next step comes at least nom (or H) later
             sp = block_at.get(pc)
