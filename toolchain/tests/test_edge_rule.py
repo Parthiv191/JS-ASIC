@@ -5,7 +5,7 @@ start bit on the same line, compiled with every rule on; the followers hung or m
 import pytest
 
 from emu.compiler import CompileError, compile_desc
-from emu.desc import Description
+from emu.desc import Description, LineRef
 from emu.isa import INF, Role
 from emu.model.system import EngineSpec, System
 from emu.protocols import PROTOCOLS, slack
@@ -359,22 +359,23 @@ def test_the_accepted_cases_run_clean(build):
 
 # ---- the let-go of a clocked OD byte from a register or the FIFO (isa §4.3): the engine holds
 # the last bit, whatever it is, until the lane's next clock edge, then releases the line
-def od_byte(after):
-    """ctl's clocked OD byte from a register whose last bit is 0, then `after`, then a repeated
-    START, one bit and a STOP."""
+def od_byte(after, ldelay=2, src="r1", start_nom=40):
+    """ctl's clocked OD byte from `src` (r1 = 0xB4: MSB first, the last bit is 0), then `after`,
+    then a repeated START, one bit and a STOP. `x` is a spare line."""
     d = Description("lg", parties=("ctl", "tgt"))
     sda = d.line("sda", "od", owner="shared", idle=1)
     scl = d.line("scl", "od", owner="ctl", idle=1)
+    d.line("x", owner="ctl", idle=1)
     d.bus("i2c", sda, scl)
-    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=2)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=ldelay)
     half = d.profile("HALF", nom=20, min=0, max=INF)
     w = d.profile("W", nom=40, min=0, max=INF)
     with d.only("ctl"):
-        d.li("r1", 0xB4)                         # MSB first: the last bit is 0
+        d.li("r1", 0xB4)
     d.cond("start", owner="ctl", prof=w)
-    d.xfer(8, lane, owner="ctl", prof=half, src="r1", dst="r2", msb_first=True)
+    d.xfer(8, lane, owner="ctl", prof=half, src=src, dst="r2", msb_first=True)
     after(d, sda, scl, lane, half, w)
-    d.cond("start", owner="ctl", prof=w)
+    d.cond("start", owner="ctl", prof=d.profile("WS", nom=start_nom, min=0, max=INF))
     d.xfer(1, lane, owner="ctl", prof=half, src="ones")
     d.cond("fall", scl, owner="ctl", prof=w)
     d.hold(sda, 0, owner="ctl", prof=d.profile("H", nom=20))
@@ -403,3 +404,59 @@ def test_the_next_clock_edge_lets_a_clocked_od_byte_go(after):
     """The repeated START of an I2C register read: SDA is high once SCL has fallen after the byte
     (and the target's ACK, if any, has been let go the same way)."""
     runs_clean(od_byte(after))
+
+
+# ---- the review of the let-go change: the release comes `ldelay` after a real edge of the clock
+# owner's drive (isa §4.3), so a COND/HOLD-made edge counts only if it moves that drive, and the
+# line stays possibly low until the steps after it have taken that long
+def soon(nom):
+    def after(d, sda, scl, lane, half, w):
+        p = d.profile(f"N{nom}", nom=nom, min=0, max=INF)
+        d.cond("fall", scl, owner="ctl", prof=p)
+        d.cond("rise", scl, owner="ctl", prof=p)
+    return after
+
+
+def hold_scl_high(d, sda, scl, lane, half, w):
+    d.cond("fall", LineRef("x", 2), owner="ctl", prof=w)       # a timed step, but no clock edge
+    d.hold(scl, 1, owner="ctl", prof=d.profile("H1", nom=20))
+
+
+def tgt_clocks(d, sda, scl, lane, half, w):
+    d.cond("fall", scl, owner="tgt", prof=w)
+    d.cond("rise", scl, owner="tgt", prof=w)
+
+
+def model_goes_wrong(d):
+    """A violation, an engine that never halts, or a follower seeing a STOP no COND STOP made (the
+    program has one)."""
+    from emu.model.engine import VIOLATIONS
+    t = System([EngineSpec(compile_desc(d, check_levels=False), r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    bad = [e.kind for et in t.engines for e in et.events if e.kind in VIOLATIONS]
+    stops = max([k for _, k in et.bus_events].count("STOP") for et in t.engines)
+    return bad or not all(et.halted for et in t.engines) or stops > 1
+
+
+LATE_RELEASE = {
+    "SCL low and high, then the START, too soon after the byte": dict(after=soon(4), ldelay=15, start_nom=4),
+    "the START long after, but SCL rose first": dict(after=soon(4), ldelay=15, start_nom=60),
+    "a HOLD at SCL's own level": dict(after=hold_scl_high),
+    "the edges made by a party that doesn't own the clock": dict(after=tgt_clocks),
+}
+
+
+@pytest.mark.parametrize("src", ["r1", "zero"])
+@pytest.mark.parametrize("case", LATE_RELEASE)
+def test_a_let_go_not_yet_released_is_rejected(case, src):
+    """Each compiled with every rule on before this fix. On the model the repeated START makes no
+    edge and the followers hang, or the release comes with SCL high: a STOP no COND STOP made."""
+    d = od_byte(src=src, **LATE_RELEASE[case])
+    assert "R2-edge" in rules(d)
+    assert model_goes_wrong(od_byte(src=src, **LATE_RELEASE[case]))
+
+
+def test_the_release_comes_in_time_at_the_longest_ldelay():
+    """ldelay 15 at H 20 (the most T4-profile allows): SCL low for 20, then high for 40."""
+    d = od_byte(soon(20), ldelay=15)
+    runs_clean(d)
+    assert not model_goes_wrong(od_byte(soon(20), ldelay=15))
