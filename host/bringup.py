@@ -1,0 +1,215 @@
+"""FPGA bring-up checks, one per layer of architecture §5, over the Basys 3 harness's bridge.
+
+    python bringup.py --port COM5 id       # layer 2: host port (ID, VERSION, SCRATCH)
+    python bringup.py --port COM5 gpio     # layer 3: GPIO override drives Pmod JB
+    python bringup.py --port COM5 sram     # layer 4: program SRAM write and read back
+    python bringup.py --port COM5 engine   # layer 5: one engine runs a tiny program
+    python bringup.py --port COM5 uart-tx  # layer 7: the library UART sends to a device (M1)
+    python bringup.py --port COM5 uart-rx  # layer 7: the library UART receives from a device
+    python bringup.py --port COM5 i2c-read --addr 0x50 --reg 0x00 --n 2   # demo step 8
+    python bringup.py --port COM5 spi-jedec                               # demo step 10
+
+Layer 1 (TESTMODE) needs no PC: see README.md. Each check prints what it saw and exits 1 on the
+first mismatch. Layer 6 (LOOPBACK, two engines) waits for engine 1 in the RTL.
+"""
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+import time
+from pathlib import Path
+
+from emu_host import ID, RUN, SCRATCH, VERSION, Chip
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "toolchain"))
+
+PIN_CTRL, PINS, PIN_OE, PIN_OUT, PIN_OE_SET = 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+PROGRAM = 0x1000
+
+
+def check(what: str, got, want) -> None:
+    ok = got == want
+    print(f"{'ok  ' if ok else 'FAIL'} {what}: {got!r}" + ("" if ok else f" (want {want!r})"))
+    if not ok:
+        sys.exit(1)
+
+
+def layer_id(chip: Chip) -> None:
+    check("ID", chip.read(ID, 1), [0x5E])
+    print(f"     VERSION {chip.read(VERSION, 1)[0]:#04x}")
+    for v in (0x00, 0xFF, 0xA5, 0x5A):
+        chip.write(SCRATCH, [v])
+        check(f"SCRATCH {v:#04x}", chip.read(SCRATCH, 1), [v])
+
+
+def layer_gpio(chip: Chip) -> None:
+    """GPIO override drives every JB pin; PINS reads them back (led[15:8] show them too)."""
+    chip.write(PIN_CTRL, [0b01])
+    chip.write(PIN_OE_SET, [0xFF])
+    for v in (0x55, 0xAA, 0x0F, 0xF0, 0x00, 0xFF):
+        chip.write(PIN_OUT, [v])
+        time.sleep(0.01)
+        check(f"PINS after PIN_OUT {v:#04x}", chip.read(PINS, 1), [v])
+    check("PIN_OE", chip.read(PIN_OE, 1), [0xFF])
+    chip.write(PIN_OE_SET, [0x00])
+    chip.write(PIN_CTRL, [0b00])
+    check("PINS released (pull-ups)", chip.read(PINS, 1), [0xFF])
+
+
+def layer_sram(chip: Chip) -> None:
+    chip.write(RUN, [0])
+    rng = random.Random(1)
+    data = bytes(rng.randrange(256) for _ in range(2048))
+    chip.write(PROGRAM, data)
+    got = bytes(chip.read(PROGRAM, len(data)))
+    bad = [i for i in range(len(data)) if got[i] != data[i]]
+    check(f"program SRAM, {len(data)} bytes: mismatched bytes", bad[:8], [])
+
+
+def layer_engine(chip: Chip) -> None:
+    """LI and ALU, then HALT: engine 0's registers and status after the run."""
+    from emu.compiler import compile_desc
+    from emu.desc import Description
+    from emu.isa import Role
+    d = Description("hello", parties=("a", "b"))
+    d.line("l", owner="a", idle=1)
+    d.li("r0", 0x1234)
+    d.li("r1", 0x0FF0)
+    d.alu("xor", "r2", "r0", "r1")
+    d.halt()
+    chip.load(compile_desc(d, check_timing=False))
+    chip.set_role(0, Role.P0)
+    chip.run(0b01)
+    time.sleep(0.05)
+    st = chip.status(0)
+    check("halted", st["halted"], 1)
+    check("r0-r2", chip.regs(0)[:3], [0x1234, 0x0FF0, 0x1234 ^ 0x0FF0])
+
+
+def layer_uart_tx(chip: Chip, text: bytes = b"Hello from the JS-ASIC engine\r\n") -> None:
+    """The library UART (115200 baud at 40 MHz) as tx on engine 0, on IO0 (JB pin 1): the PC
+    streams `text` into TXDATA. The microcontroller receives on IO0 (3.3 V, 8N1, ground shared)
+    and should print `text`. fpga/sim's test_uart_tx_sends_the_host_bytes_on_io0 runs this path."""
+    from emu.compiler import compile_desc
+    from emu.isa import Role
+    from emu.protocols import get
+    chip.load(compile_desc(get("uart").build(bit_cycles=347)))
+    chip.set_role(0, Role.P0)
+    chip.run(0b01)
+    print(f"     sending {text!r} on IO0 (JB pin 1) at 115200 8N1")
+    chip.tx_stream(0, list(text))
+    for _ in range(100):                  # the last word leaves the FIFO, then its 87 us frame
+        if chip.fifo_counts(0)[0] == 0:
+            break
+        time.sleep(0.01)
+    time.sleep(0.001)
+    check("TX drained", chip.fifo_counts(0)[0], 0)
+    st = chip.status(0)
+    check("violations", st["viol"], 0)
+    check("running, stalled on POP for the next byte", (st["running"], st["halted"]), (1, 0))
+    print("     the microcontroller should have printed the text above")
+
+
+def layer_uart_rx(chip: Chip, n: int = 4, wait: float = 5.0) -> None:
+    """The library UART (115200 baud at 40 MHz) as rx on engine 0: line 0 is JB pin 0 (IO0).
+    Have the microcontroller send `n` bytes to IO0 (3.3 V, 8N1); they arrive in RX."""
+    from emu.compiler import compile_desc
+    from emu.isa import Role
+    from emu.protocols import get
+    chip.load(compile_desc(get("uart").build(bit_cycles=347)))
+    chip.set_role(0, Role.P1)
+    chip.run(0b01)
+    print(f"     waiting {wait:.0f} s for {n} bytes on IO0 (JB pin 1)...")
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        if chip.fifo_counts(0)[1] >= n:
+            break
+        time.sleep(0.1)
+    words = chip.rx_pop(0, chip.fifo_counts(0)[1])
+    print(f"     received {[hex(w) for w in words]}")
+    st = chip.status(0)
+    check("violations", st["viol"], 0)
+    check("bytes received", len(words) >= n, True)
+
+
+def wait_rx(chip: Chip, n: int, wait: float, done=lambda words: False) -> list[int]:
+    """Pop engine 0's RX until `n` words, `done(words)`, or `wait` seconds."""
+    words: list[int] = []
+    t0 = time.time()
+    while len(words) < n and not done(words) and time.time() - t0 < wait:
+        k = chip.fifo_counts(0)[1]
+        if k:
+            words += chip.rx_pop(0, k)
+        else:
+            time.sleep(0.01)
+    return words
+
+
+def layer_i2c_read(chip: Chip, addr: int = 0x50, reg: int = 0x00, n: int = 1, wait: float = 2.0) -> None:
+    """The library I2C register read (100 kHz at 40 MHz) as the controller on engine 0: SDA is IO0
+    (JB pin 1) and SCL is IO1 (JB pin 2), open drain, with 2.2-4.7 kOhm pull-ups to 3.3 V (most
+    sensor breakouts have them; the FPGA's own are too weak). Reads `n` (1-4) bytes from register
+    `reg` of the device at 7-bit address `addr`: an EEPROM (0x50) gives its data, a sensor its
+    WHO_AM_I (demo step 8). NACK (0x100) means no device answered that address."""
+    from emu.compiler import compile_desc
+    from emu.isa import Role
+    from emu.protocols import get
+    from emu.protocols.i2c_reg import NACK
+    chip.load(compile_desc(get("i2c_reg").build(half_cycles=200, data_bytes=n)))
+    chip.set_role(0, Role.P0)
+    chip.run(0b01)
+    chip.tx_push(0, [addr << 1, reg, addr << 1 | 1])
+    words = wait_rx(chip, n, wait, done=lambda w: NACK in w)
+    print(f"     device 0x{addr:02X}, register 0x{reg:02X}: {[hex(w) for w in words]}")
+    check("violations", chip.status(0)["viol"], 0)
+    check("the device ACKed", NACK not in words, True)
+    check("bytes read", len(words), n)
+
+
+def layer_spi_jedec(chip: Chip, wait: float = 2.0) -> None:
+    """The library SPI (mode 0, 1 MHz at 40 MHz) as the controller on engine 0: CS is IO0 (JB pin 1),
+    SCK IO1 (pin 2), MOSI IO2 (pin 3), MISO IO3 (pin 4). Sends an SPI flash's JEDEC ID command
+    (0x9F) and reads three bytes: manufacturer, memory type, capacity (demo step 10). Each RX
+    word is (MISO << 8) | MOSI."""
+    from emu.compiler import compile_desc
+    from emu.isa import Role
+    from emu.protocols import get
+    chip.load(compile_desc(get("spi").build(half_cycles=20, words=4)))
+    chip.set_role(0, Role.P0)
+    chip.run(0b01)
+    chip.tx_stream(0, [0, 0x9F, 0, 0, 0])   # the frame token, the command, three dummy bytes
+    words = wait_rx(chip, 4, wait)
+    ident = [w >> 8 for w in words[1:4]]
+    print(f"     JEDEC ID: {' '.join(f'{b:02X}' for b in ident)} (manufacturer, type, capacity)")
+    check("violations", chip.status(0)["viol"], 0)
+    check("bytes read", len(words), 4)
+    check("a manufacturer answered (not 00 or FF)", ident[0] not in (0x00, 0xFF), True)
+
+
+LAYERS = {"id": layer_id, "gpio": layer_gpio, "sram": layer_sram, "engine": layer_engine,
+          "uart-tx": layer_uart_tx, "uart-rx": layer_uart_rx, "i2c-read": layer_i2c_read,
+          "spi-jedec": layer_spi_jedec}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port", required=True, help="the Basys 3's USB-UART, e.g. COM5")
+    ap.add_argument("layer", choices=list(LAYERS) + ["all"])
+    num = lambda x: int(x, 0)
+    ap.add_argument("--addr", type=num, default=0x50, help="i2c-read: the 7-bit device address")
+    ap.add_argument("--reg", type=num, default=0x00, help="i2c-read: the register")
+    ap.add_argument("--n", type=int, default=1, choices=range(1, 5), help="i2c-read: bytes to read")
+    args = ap.parse_args()
+    chip = Chip.open(args.port)
+    for name in (["id", "gpio", "sram", "engine"] if args.layer == "all" else [args.layer]):
+        print(f"--- {name}")
+        if name == "i2c-read":
+            LAYERS[name](chip, args.addr, args.reg, args.n)
+        else:
+            LAYERS[name](chip)
+    print("all checks passed")
+
+
+if __name__ == "__main__":
+    main()
