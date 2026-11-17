@@ -902,6 +902,16 @@ def test_the_owners_branch_on_the_ack_is_walked_both_ways():
     assert not any(e.halted for e in t.engines) and not any(e.events for e in t.engines)
 
 
+def test_the_walk_both_ways_also_rejects_a_pairing_that_works():
+    """Known limit (isa §5 R3-lead): without c's HOLD nobody can hold SDA at S, so with t away c
+    reads its ACK as 1 and never takes `go`; the program runs clean on the model, but the walk
+    takes both branches and rejects it."""
+    d = nack_pairing(go=go_waits_for_t)
+    assert launch_diags(d) == [WAITS]
+    t = run_sys(lower(d).image)
+    assert all(e.halted for e in t.engines) and xfer_values(t, 0) == [ADDR, 1, ADDR, 0, 0xFF]
+
+
 EDGES = ("the leader's XFERs on another party's clock in this exit take that party's edges from the block's "
          "successor, which it clocks meanwhile: before the bus COND it follows they may take no more than S "
          "makes (2 per bit), or the leader is still in one when it comes")
@@ -1119,3 +1129,95 @@ def test_a_leader_xfer_on_another_clock_of_the_owners_gets_no_edges_from_s():
 def test_an_unrelated_instruction_before_a_branch_on_an_ack_in_r0():
     d = c_ends_before_t_sends(reg="r0", ack=ack_into("r0"), before_br=lambda P: P.d.li("r6", 1))
     assert launch_diags(d) == []
+
+
+# ---------------------------------------------------------------- third review
+START_BACK = ("a START successor waits through the exit's STOP only: the exit's bus COND must be a STOP, and from "
+              "abort_pc the leader must reach this START before any other, and before any timed step outside "
+              "its lead blocks (the others are still in S)")
+
+
+def start_way_back(t_step):
+    """c leads, S its own START; abort_pc, top, runs c's COND on y (and with `t_step` t's on x)
+    before the block: c's way back from its exit STOP, while t and MON wait in S."""
+    d = Description("i2c", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    y = d.line("y", owner="c", idle=1)
+    x = d.line("x", owner="t", idle=1)
+    d.bus("i2c", sda, scl)
+    P = SimpleNamespace(d=d, sda=sda, scl=scl, L=d.lane("L", sda, clk=scl, cpol=1, cpha=1),
+                        bit=d.profile("B", nom=H, min=0, max=INF), wait=d.profile("W", nom=H, min=0, max=INF),
+                        hold=d.profile("Ho", nom=H))
+    d.abort_to("top")
+    d.li("r1", ADDR)
+    d.li("r5", 1)
+    d.label("top")
+    d.cond("fall", y, owner="c", prof=P.wait)
+    d.cond("rise", y, owner="c", prof=P.wait)
+    if t_step:
+        d.cond("fall", x, owner="t", prof=P.wait)
+        d.cond("rise", x, owner="t", prof=P.wait)
+    with d.lead("c"):
+        d.br("go", cond="z", reg="r5")
+        d.li("r5", 0)
+        stop_seq(P)
+        d.br("top")
+    d.label("go")
+    d.cond("start", owner="c", prof=P.wait, abort=True)
+    d.xfer(8, P.L, owner="c", prof=P.bit, src="r1", dst="r2", msb_first=True)
+    ack_bit(P)
+    stop_and_halt(P)
+    return d
+
+
+def test_a_start_successors_way_back_runs_no_step_the_others_dont():
+    """With t's COND on the way back, c waits for t, which waits in S for a START: nobody halts
+    (found by the third review). Steps c does alone there are rejected too: only c runs them."""
+    d = start_way_back(True)
+    assert launch_diags(d) == [START_BACK]
+    t = run_sys(lower(d).image, max_ticks=30_000)
+    assert not any(e.halted for e in t.engines) and not any(e.events for e in t.engines)
+    assert launch_diags(start_way_back(False)) == [START_BACK]
+
+
+LATE = ("after the bus COND it follows, the leader branches to abort_pc at once, with nothing between: its owner "
+        "goes on there at once, and a leader that is late misses the start of the next frame")
+
+
+def late_back(k):
+    """t's exit follows c's STOP, then runs k LIs before its branch to top; c's NACK exit (its STOP,
+    then top) after the ACK."""
+    def target(P):
+        with P.d.lead("t"):
+            P.d.br("ack", cond="z", reg="r5")
+            P.d.li("r5", 0)
+            P.d.cond("stop", owner="c", prof=P.wait)
+            for _ in range(k):
+                P.d.li("r6", 0)
+            P.d.br("top")
+
+    def after(P):
+        d = P.d
+        with d.lead("c"):
+            d.br("go", cond="z", reg="r4")
+            stop_seq(P)
+            d.br("top")
+        d.label("go")
+        d.xfer(8, P.L, owner="c", prof=P.bit, src="ones", abort=True, msb_first=True)
+        stop_and_halt(P)
+    return i2c(target=target, after=after, pre=lambda P: P.d.li("r5", 1))
+
+
+def test_a_followed_exit_branches_to_abort_pc_at_once():
+    """Ten LIs (20 cycles) after t's followed STOP: c's START comes while t is in them, t's top
+    START completes late on the sticky flag, its address byte misses c's first SCL edges, and it
+    reads 0x5A wrong and logs LEVEL at the ACK (found by the third review). Without them it runs
+    clean, the library's shape."""
+    d = late_back(10)
+    assert launch_diags(d) == [LATE]
+    t = run_sys(lower(d).image, max_ticks=40_000)
+    assert xfer_values(t, 1)[1] != ADDR and "LEVEL" in [e.kind for e in t.engines[1].events]
+    assert launch_diags(late_back(0)) == []
+    t = run(late_back(0))
+    assert all(e.halted for e in t.engines) and xfer_values(t, 0) == [ADDR, 1, ADDR, 0, 0xFF]

@@ -238,7 +238,7 @@ def lower(desc: Description, prog_depth: int = PROG_DEPTH) -> Lowered:
         err("S-range", desc.steps[-1], f"program has {len(instrs)} words (max {prog_depth})")
     for sp in spans:
         if sp.lead:
-            _check_lead(desc, sp, instrs, pc_step, abort_pc, profiles, lines, lanes, err)
+            _check_lead(desc, sp, instrs, pc_step, abort_pc, profiles, lines, lanes, err, spans)
     sel_master = (lines[desc.bus_cfg[1].index].owner
                   if desc.bus_cfg is not None and desc.bus_cfg[0] == "select" else None)
     for ln in lines:
@@ -436,7 +436,7 @@ def _check_rules(desc, s: Step, lines: list[LineCfg], lanes: list[LaneCfg], err)
 
 
 def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_pc: int,
-                profiles, lines: list[LineCfg], lanes: list[LaneCfg], err) -> None:
+                profiles, lines: list[LineCfg], lanes: list[LaneCfg], err, spans: list[Span]) -> None:
     """R3-lead (isa §5). The others skip the block and follow its fall-through successor S
     speculatively, so S has ABORT, no CHK and max INF. The leader leaves by the fall-through exit
     with no timed step on the way, or runs a bus COND START/STOP and branches to abort_pc. Every
@@ -526,8 +526,11 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
             if asrc == Src.ZERO and adst >= Dst.R0:
                 ack_reg = adst - Dst.R0
 
+    in_lead = {q for s in spans if s.lead and s.roles == sp.roles for q in range(s.start, s.end)}
+
     def back_to_start_ok() -> bool:
-        """From abort_pc the leader reaches S before any COND START of its own."""
+        """From abort_pc the leader reaches S before any COND START of its own, and before any
+        timed step outside its lead blocks: the others, still in S, run none of them."""
         seen, stack = set(), [apc]
         while stack:
             pc = stack.pop()
@@ -538,6 +541,8 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                 continue
             ins = instrs[pc]
             if ins.op == Op.COND and unpack_cond(ins.operand)[0] == CondKind.START:
+                return False
+            if ins.op in TIMED_OPS and pc not in in_lead:
                 return False
             stack.extend(successors(instrs, pc, leader))
         return True
@@ -627,19 +632,22 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
     seen: set[tuple] = set()
     # (pc, a timed step so far, the exit's bus COND kind so far, edges the leader made on S's watch,
     # what the path knows of the ACK, edges its XFERs took on another party's clock (more than S
-    # makes: s_edges + 1), whether one of them may send a 0 on an OD line, a step with ABORT so far)
-    stack: list[tuple] = [(sp.start, False, None, 0, HELD if ack_reg is not None else LOST, 0, False, False)]
+    # makes: s_edges + 1), whether one of them may send a 0 on an OD line, a step with ABORT so far,
+    # whether the exit's bus COND so far is one the leader follows)
+    stack: list[tuple] = [(sp.start, False, None, 0, HELD if ack_reg is not None else LOST, 0, False, False,
+                           False)]
     while stack:
         state = stack.pop()
         if state in seen:
             continue
         seen.add(state)
-        pc, timed, bus, edges, known, taken, sends, aborted = state
+        pc, timed, bus, edges, known, taken, sends, aborted, followed = state
         if apc is not None and pc == apc and bus is not None:  # the exit to abort_pc, checked first
             if kind == "start" and (bus == CondKind.START or not back_to_start_ok()):
                 err("R3-lead", at(sp.end), "a START successor waits through the exit's STOP only: the "
                                            "exit's bus COND must be a STOP, and from abort_pc the leader "
-                                           "must reach this START before any other")
+                                           "must reach this START before any other, and before any timed "
+                                           "step outside its lead blocks (the others are still in S)")
             continue
         if pc == sp.end:
             if timed:
@@ -663,7 +671,7 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                                        "abort_pc: the others have already left")
                 continue
             if ck in (CondKind.START, CondKind.STOP):
-                bus = ck
+                bus, followed = ck, not mine(ins.owner)
                 if mine(ins.owner):
                     if s_from_others:
                         say(at(sp.end), "the exit's bus COND is the leader's own, so the others must wait "
@@ -724,15 +732,20 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                                                "for), so they would run on past it")
                         continue
             timed = True
+        elif followed and not (ins.op == Op.BR and ins.sub == BrCond.ALWAYS):
+            say(at(pc), "after the bus COND it follows, the leader branches to abort_pc at once, with "
+                        "nothing between: its owner goes on there at once, and a leader that is late misses "
+                        "the start of the next frame")
+            continue
         if (known == HELD and ins.op == Op.BR and ins.ra == ack_reg and ins.sub in (BrCond.Z, BrCond.NZ)
                 and ins.operand != pc + 1):
             nonzero = pc + 1 if ins.sub == BrCond.Z else ins.operand
-            stack.extend((nxt, timed, bus, edges, OUT if nxt == nonzero else HELD, taken, sends, aborted)
-                         for nxt in successors(instrs, pc, leader))
+            stack.extend((nxt, timed, bus, edges, OUT if nxt == nonzero else HELD, taken, sends, aborted,
+                          followed) for nxt in successors(instrs, pc, leader))
             continue
         if known == HELD and _taint(ins, 0, True) >> ack_reg & 1:
             known = LOST
-        stack.extend((nxt, timed, bus, edges, known, taken, sends, aborted)
+        stack.extend((nxt, timed, bus, edges, known, taken, sends, aborted, followed)
                      for nxt in successors(instrs, pc, leader))
 
 
