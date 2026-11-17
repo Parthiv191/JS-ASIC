@@ -843,37 +843,12 @@ def test_with_abort_the_followed_stop_leaves_at_the_start():
     assert launch_diags(d) == [GOES_ON]
 
 
-def test_the_owner_of_a_followed_exit_cond_skips_its_ack_branch_when_the_leader_is_away():
-    """The library's pairing (i2c_reg): t's exit leaves S, its ACK from ZERO into r4, unsent, so c
-    reads 1 there and takes its own NACK exit (a STOP, then abort_pc); the branch where c reads 0
-    and runs on into a repeated START isn't c's while t is away. Into r3 (or from ONES), c might
-    read 0 and make that START first."""
-    def c_nack_block(reg):
-        def more(P):
-            d = P.d
-            with d.lead("c"):
-                d.br("go", cond="z", reg=reg)
-                stop_seq(P)
-                d.br("top")
-            d.label("go")
-            d.xfer(8, P.L, owner="c", prof=P.bit, src="ones", abort=True, msb_first=True)
-            repeated = lambda P: (P.d.cond("fall", P.scl, owner="c", prof=P.wait),  # noqa: E731
-                                  P.d.cond("rise", P.scl, owner="c", prof=P.wait),
-                                  P.d.cond("start", owner="c", prof=P.wait))
-            repeated(P)
-            stop_seq(P)
-        return more
-    assert launch_diags(t_leads_then(ack_then(c_nack_block("r4")))) == []
-    assert launch_diags(t_leads_then(ack_then(c_nack_block("r3")))) == [GOES_ON]
-
-
 # ---------------------------------------------------------------- review of the exit rules
-def nack_pairing(ack=ack_bit, before=None, t_body=None, c_first=None, nack_tail=None, go=None, reg="r4",
-                 nack_head=None):
-    """The library's pairing, varied. t leads (exit on r5, cleared, follows c's STOP); S is `ack`
-    (t's ACK bit from ZERO into r4); then c leads: `c_first` before its BR on r4, which goes to
-    `go` (default: a byte of c's and its STOP sequence) on 0; on a NACK `nack_head`, its STOP
-    sequence and `nack_tail` (default: none), then top. `before` runs before t's block, `t_body` in it."""
+def nack_pairing(before=None, t_body=None, nack_tail=None, go=None):
+    """The library's pairing, varied. t leads (exit on r5, cleared, follows c's STOP); S is t's
+    ACK bit from ZERO into r4; then c leads, its BR on r4 going to `go` (default: a byte of c's and
+    its STOP sequence) on 0; on a NACK its STOP sequence and `nack_tail` (default: none), then top.
+    `before` runs before t's block, `t_body` in it."""
     def target(P):
         if before:
             before(P)
@@ -888,11 +863,7 @@ def nack_pairing(ack=ack_bit, before=None, t_body=None, c_first=None, nack_tail=
     def after(P):
         d = P.d
         with d.lead("c"):
-            if c_first:
-                c_first(P)
-            d.br("go", cond="z", reg=reg)
-            if nack_head:
-                nack_head(P)
+            d.br("go", cond="z", reg="r4")
             stop_seq(P)
             if nack_tail:
                 nack_tail(P)
@@ -900,7 +871,7 @@ def nack_pairing(ack=ack_bit, before=None, t_body=None, c_first=None, nack_tail=
         d.label("go")
         (go or (lambda P: d.xfer(8, P.L, owner="c", prof=P.bit, src="ones", abort=True, msb_first=True)))(P)
         stop_and_halt(P)
-    return i2c(target=target, ack=ack, after=after, pre=lambda P: P.d.li("r5", 1))
+    return i2c(target=target, after=after, pre=lambda P: P.d.li("r5", 1))
 
 
 def go_waits_for_t(P):
@@ -916,9 +887,11 @@ def test_the_nack_pairing_compiles_and_runs():
     assert xfer_values(t, 0) == [ADDR, 1, ADDR, 0, 0xFF] and all(e.halted for e in t.engines)
 
 
-def test_the_ack_branch_is_walked_where_the_owner_may_hold_the_line_itself():
+def test_the_owners_branch_on_the_ack_is_walked_both_ways():
     """c pulls SDA low before t's block, and still holds it in S: it reads 0 with t away, takes
-    `go` and waits there in t's COND on x while t waits for the STOP (found by review)."""
+    `go` and waits there in t's COND on x while t waits for the STOP. (A first version guessed
+    that c, with t away, always reads its ACK as 1; review found this and other ways it reads 0,
+    so the walk takes both branches.)"""
     def c_holds_sda(P):
         P.d.cond("fall", P.scl, owner="c", prof=P.wait)
         P.d.hold(P.sda, 0, owner="c", prof=P.hold)
@@ -927,24 +900,6 @@ def test_the_ack_branch_is_walked_where_the_owner_may_hold_the_line_itself():
     assert launch_diags(d) == [WAITS]
     t = run_sys(lower(d).image, max_ticks=20_000)
     assert not any(e.halted for e in t.engines) and not any(e.events for e in t.engines)
-    assert launch_diags(nack_pairing(go=go_waits_for_t)) == []      # c reads 1: `go` isn't c's then
-
-
-def test_the_ack_branch_is_walked_where_the_leader_may_pull_the_line_low_in_its_block():
-    """t's block sends a bit from ZERO on c's clock, which S's edges clock: c reads 0."""
-    zero_bit = lambda P: P.d.xfer(1, P.L, owner="t", prof=P.bit, src="zero")  # noqa: E731
-    assert WAITS in launch_diags(nack_pairing(t_body=zero_bit, go=go_waits_for_t))
-
-
-def test_the_ack_branch_is_walked_where_r4_is_rewritten_first():
-    assert launch_diags(nack_pairing(c_first=lambda P: P.d.li("r4", 0), go=go_waits_for_t)) == [WAITS]
-
-
-def test_the_ack_may_be_read_into_r0():
-    def ack_r0(P):
-        P.d.xfer(1, P.L, owner="t", prof=P.bit, src="zero", dst="r0", abort=True)
-
-    assert launch_diags(nack_pairing(ack=ack_r0, reg="r0", go=go_waits_for_t)) == []
 
 
 EDGES = ("the leader's XFERs on another party's clock in this exit take that party's edges from the block's "
@@ -1002,3 +957,87 @@ def test_the_followed_conds_owner_goes_on_at_abort_pc_past_untimed_steps(timed_a
     want = ["nothing timed between the exit's bus COND and its branch to abort_pc: the others have already left",
             GOES_ON] if timed_after else []
     assert sorted(launch_diags(nack_pairing(nack_tail=tail))) == sorted(want)
+
+
+def test_an_own_exit_with_an_xfer_on_another_partys_clock_deadlocks():
+    """SELECT: a leads, and its exit runs an XFER on a lane b clocks before a's own STOP; S is a's
+    COND, so b waits in S for a, and a in its XFER for b's edges (found by re-review; on main too)."""
+    d = Description("s", parties=("a", "b"), tolerance_ppm=0)
+    cs = d.line("cs", owner="a", idle=1)
+    x = d.line("x", owner="a", idle=1)
+    lane = d.lane("Lb", d.line("ad", owner="a", idle=0), clk=d.line("bclk", owner="b", idle=0))
+    d.bus("select", cs)
+    w = d.profile("W", nom=20, min=0, max=INF)
+    d.abort_to("top")
+    d.li("r2", 1)
+    d.label("top")
+    d.cond("start", owner="a", prof=w)
+    with d.lead("a"):
+        d.br("go", cond="z", reg="r2")
+        d.li("r2", 0)
+        d.xfer(4, lane, owner="a", prof=w, src="ones")
+        d.cond("stop", owner="a", prof=w)
+        d.br("top")
+    d.label("go")
+    d.cond("fall", x, owner="a", prof=w, abort=True)
+    d.cond("rise", x, owner="a", prof=w)
+    d.cond("stop", owner="a", prof=w)
+    d.halt()
+    assert launch_diags(d) == [OWN_CLOCK]
+    t = run_sys(lower(d).image, max_ticks=20_000)
+    assert not any(e.halted for e in t.engines) and not any(e.events for e in t.engines)
+
+
+OWN_CLOCK = ("the leader's XFER on another party's clock in an exit whose bus COND is its own waits for that "
+             "party's edges, while that party waits for the leader in the block's successor: neither moves")
+
+
+def abort_in_exit(abort):
+    """t's exit, on r5, runs its own long COND on x (ABORT if `abort`) and a rise, then follows c's
+    STOP; after S (the ACK bit) c makes a repeated START, sends its address again, reads its own
+    bit and STOPs."""
+    def target(P):
+        d = P.d
+        x = d.line("x", owner="t", idle=1)
+        with d.lead("t"):
+            d.br("ack", cond="z", reg="r5")
+            d.li("r5", 0)
+            d.cond("fall", x, owner="t", prof=d.profile("Long", nom=400, min=0, max=INF), abort=abort)
+            d.cond("rise", x, owner="t", prof=P.wait)
+            d.cond("stop", owner="c", prof=P.wait)
+            d.br("top")
+
+    def after(P):
+        d = P.d
+        d.cond("fall", P.scl, owner="c", prof=P.wait)
+        d.cond("rise", P.scl, owner="c", prof=P.wait)
+        d.cond("start", owner="c", prof=P.wait)
+        d.xfer(8, P.L, owner="c", prof=P.bit, src="r1", msb_first=True)
+        d.xfer(1, P.L, owner="c", prof=P.bit, src="ones", dst="r6")
+        stop_seq(P)
+        d.halt()
+    return i2c(target=target, after=after, pre=lambda P: P.d.li("r5", 1))
+
+
+def test_abort_on_an_earlier_exit_step_makes_the_owners_start_an_exit():
+    """With ABORT on t's COND on x, c's repeated START comes while t is in it: t's bus exit to top,
+    where it takes c's repeated-START frame as top's, reads the address wrong and then, in S during
+    c's STOP sequence, holds SDA with its ACK: t and MON never halt (found by re-review). Without
+    ABORT t sits the frame out, and the program runs clean."""
+    d = abort_in_exit(True)
+    assert launch_diags(d) == [GOES_ON]
+    t = run_sys(lower(d).image, max_ticks=20_000)
+    assert [e.halted for e in t.engines] == [True, False, False]
+    assert launch_diags(abort_in_exit(False)) == []
+    t = run_sys(compile_desc(abort_in_exit(False)), max_ticks=20_000)
+    assert xfer_values(t, 1) == [ADDR] and not any(e.events for e in t.engines)
+
+
+@pytest.mark.parametrize("cond", ["z", "nz"])
+def test_a_branch_on_the_ack_to_the_next_word_says_nothing_about_it(cond):
+    """A BR on r4 to pc + 1 has one successor whatever r4 holds: the r5 exit past it may not make
+    the launching edge (found by re-review; on the model, as in the r5 exit's test)."""
+    def noop(P):
+        P.d.br("past", cond=cond, reg="r4")
+        P.d.label("past")
+    assert launch_diags(c_ends_before_t_sends(before_br=noop)) == [LAUNCH]
