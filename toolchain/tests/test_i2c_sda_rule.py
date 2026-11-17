@@ -853,3 +853,28 @@ def test_a_halt_that_releases_scl_waits_for_the_sda_let_go():
     assert any(m.startswith("wire:") for m in bus_mismatches(img, t))
     compile_desc(halt_after_scl_fall(wait=True), check_timing=False)
 
+
+def test_a_halt_with_scl_high_releases_no_scl():
+    """c halts with SCL high (after t's ACK, a let-go on SDA pending): SCL doesn't rise, so the
+    HALT clause for SCL says nothing (t's own HALT later is R1-bus's)."""
+    from emu.desc import Description
+    from emu.isa import INF
+    d = Description("hs", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=4)
+    w = d.profile("W", nom=30, min=0, max=INF)
+    d.cond("start", owner="c", prof=w)
+    d.xfer(8, lane, owner="c", prof=w, src="ones")
+    d.xfer(1, lane, owner="t", prof=w, src="zero")
+    with d.only("c"):
+        d.halt()
+    d.halt()
+    try:
+        compile_desc(d, check_timing=False)
+        msgs = []
+    except CompileError as e:
+        msgs = [x.msg for x in e.diags]
+    assert not any("releases SCL" in m for m in msgs)
+

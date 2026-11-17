@@ -215,13 +215,34 @@ def _leaves(ins: Instr, ln: int, lines, lanes):
     return None
 
 
-def leaders_away(instrs: list[Instr], spans: list[Span]) -> dict[int, set]:
-    """pc -> the parties that may be away there: a lead block's leader whose exit follows its bus
-    COND (R3-lead), while that COND's owner runs on from the block's successor S without it, up to
-    a COND START/STOP that ends the leader's exit (one of the kind it follows; a START too where
-    that step has ABORT; any, where an earlier step of the exit has ABORT). (The leader's own role
-    blocks on the way are skipped by the others' walks, and their drives taken as maybe there.)"""
-    away: dict[int, set] = {}
+def _halt_after(instrs: list[Instr], ends, role: Role, apc) -> bool:
+    """`role` may halt after one of the CONDs at `ends`, before any timed step or abort_pc."""
+    seen, todo = set(), [n for e in ends for n in successors(instrs, e, role)]
+    while todo:
+        q = todo.pop()
+        if q in seen or q == apc:
+            continue
+        seen.add(q)
+        if instrs[q].op == Op.HALT:
+            return True
+        if instrs[q].op not in TIMED_OPS:
+            todo.extend(successors(instrs, q, role))
+    return False
+
+
+def _halt_release(lines, owner: Role) -> dict:
+    """line -> what a HALT leaves `owner`'s drive of it at (isa §4.1): its OD lines released, its
+    gated lines shut; its PP lines keep their level (absent)."""
+    return {i: 1 if ln.kind == "od" else _SHUT for i, ln in enumerate(lines)
+            if ln.kind == "od" or ln.gated and int(ln.owner) == int(owner)}
+
+
+def away_regions(instrs: list[Instr], spans: list[Span]) -> list[tuple]:
+    """(block, leader, owner, region, ends) for each lead block whose leader's exit follows its
+    bus COND's owner (R3-lead): the pcs on the owner's role path from the block's successor S up
+    to a COND START/STOP that ends the leader's exit (one of the kind it follows; a START too where
+    that step has ABORT; any, where an earlier step of the exit has ABORT), and those ends."""
+    out = []
     for sp in spans:
         if not sp.lead:
             continue
@@ -231,23 +252,35 @@ def leaders_away(instrs: list[Instr], spans: list[Span]) -> dict[int, set]:
         followed = [i for i in bus if i.owner in (Owner.P0, Owner.P1) and int(i.owner) != int(leader)]
         if not followed:
             continue
-        ends = {CondKind(unpack_cond(i.operand)[0]) for i in followed}
+        kinds = {CondKind(unpack_cond(i.operand)[0]) for i in followed}
         if any(i.flags & F_ABORT for i in followed):
-            ends.add(CondKind.START)
+            kinds.add(CondKind.START)
         if any(i.op in TIMED_OPS and i.flags & F_ABORT and all(i is not f for f in followed) for i in body):
-            ends |= {CondKind.START, CondKind.STOP}
+            kinds |= {CondKind.START, CondKind.STOP}
         owner = Role(int(followed[0].owner))
-        seen, todo = set(), [sp.end]
+        region, ends, seen, todo = set(), set(), set(), [sp.end]
         while todo:
             pc = todo.pop()
             if pc in seen or pc >= len(instrs) or instrs[pc].op == Op.HALT:
                 continue
             seen.add(pc)
             ins = instrs[pc]
-            if ins.op == Op.COND and unpack_cond(ins.operand)[0] in ends:
+            if ins.op == Op.COND and unpack_cond(ins.operand)[0] in kinds:
+                ends.add(pc)
                 continue
-            away.setdefault(pc, set()).add(leader)
+            region.add(pc)
             todo.extend(successors(instrs, pc, owner))
+        out.append((sp, leader, owner, region, ends))
+    return out
+
+
+def leaders_away(instrs: list[Instr], spans: list[Span]) -> dict[int, set]:
+    """pc -> the parties that may be away there: a lead block's leader whose exit follows its bus
+    COND, while that COND's owner runs on from the block's successor without it (away_regions)."""
+    away: dict[int, set] = {}
+    for _, leader, _, region, _ in away_regions(instrs, spans):
+        for pc in region:
+            away.setdefault(pc, set()).add(leader)
     return away
 
 
@@ -291,6 +324,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
     span_at = {pc: sp for sp in low.spans for pc in range(sp.start, sp.end)}
     block_at = {sp.role_if_pc: sp for sp in low.spans}
     away = leaders_away(instrs, low.spans)
+    regions = away_regions(instrs, low.spans)
 
     def runs(pc: int) -> tuple:
         sp = span_at.get(pc)
@@ -363,6 +397,13 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         return out
 
     touched = {sp.role_if_pc: block_drives(sp) for sp in low.spans}
+
+    def owner_halt(owner, ends) -> dict:
+        """A followed exit's owner that may halt after that COND instead of going on at abort_pc
+        (R3-lead) leaves the leader, back at abort_pc, its lines as a HALT releases them. (Where it
+        goes on there, the leader's walk gets there too along its fall-through path, the owner's
+        drives made.)"""
+        return _halt_release(lines, owner) if _halt_after(instrs, ends, owner, apc) else {}
     # a party that may HALT in a block another skips has released its lines (isa §4.1), or not
     halted = {sp.role_if_pc: {q for pc in range(sp.start, sp.end) if instrs[pc].op == Op.HALT for q in runs(pc)}
               for sp in low.spans}
@@ -787,7 +828,10 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
             od = lines[ins.ra].kind == "od"
             before = clock_before(st, ins.ra)
-            for q in ex:   # (a RAW is in its doer's role block, which the others' walks skip)
+            for q in ex:
+                if gone(q, pc, walker):  # (in a block the walker runs too, as only(c, t))
+                    st[int(q)][ins.ra] = _join(None, st[int(q)][ins.ra])
+                    continue
                 cur = st[int(q)][ins.ra]
                 if cur == _SHUT:
                     continue  # a shut gate ignores RAW (isa §2)
@@ -823,6 +867,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                         and unpack_cond(instrs[q].operand)[0] in (CondKind.START, CondKind.STOP)
                         and int(instrs[q].owner) in [int(x) for x in sp.roles] for q in range(sp.start, sp.end))}
     exit_state: dict[int, tuple] = {}
+    # a followed exit's leader, back at abort_pc, meets its owner halted there, where it may be
+    owner_at_exit = {sp.role_if_pc: (sp, owner, owner_halt(owner, ends)) for sp, _, owner, _, ends in regions}
     leaders_first = sorted(_PARTIES, key=lambda q: 0 if any(q in sp.roles for sp in own_exit.values()) else 1)
     for r in leaders_first:
         state: dict[int, tuple] = {0: tuple(init)}
@@ -910,6 +956,13 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 kept = exit_state.get(ex.end)    # the leader's exit, on to abort_pc
                 exit_state[ex.end] = out if kept is None else tuple(
                     tuple(_join(x, y) for x, y in zip(o, n)) for o, n in zip(kept, out))
+            fx = owner_at_exit.get(ex.role_if_pc) if ex is not None and ex.lead else None
+            if fx is not None and r in ex.roles and apc in successors(instrs, pc, r):
+                _, owner, vals = fx
+                rows = [list(row) for row in out]
+                for ln, v in vals.items():
+                    rows[int(owner)][ln] = _join(rows[int(owner)][ln], v)
+                nexts = [(s_, tuple(tuple(row) for row in rows) if s_ == apc else o_) for s_, o_ in nexts]
             if pc in own_exit and r not in own_exit[pc].roles and pc in exit_state:
                 rows = []                            # r in S, left by a bus exit
                 for q in _PARTIES:

@@ -1588,3 +1588,208 @@ def test_t5_abort_leaves_the_master_out():
     except CompileError as e:
         assert not [x for x in e.diags if x.rule == "T5-abort" and "P0" in x.msg]
 
+
+# ---------------------------------------------------------------- re-review of the lead-block programs
+def test_an_away_leaders_raw_in_a_block_the_owner_runs_too():
+    """R2-edge: t holds x low; its exit follows c's STOP; on c's path from S, only(c, t): RAW REL x,
+    which c's walk runs for both, then c's COND FALL on x. t, away, never ran the REL, so x stays
+    low and MON hangs in the FALL (found by the re-review: a first fix took the RAW as t's alone)."""
+    def pre(P):
+        P.d.li("r5", 1)
+        P.x = P.d.line("x", "od", owner="shared", idle=1)
+        P.d.cond("fall", P.x, owner="t", prof=P.wait)
+
+    def target(P):
+        with P.d.lead("t"):
+            P.d.br("ack", cond="z", reg="r5")
+            P.d.cond("stop", owner="c", prof=P.wait)
+            P.d.br("top")
+
+    def after(P):
+        with P.d.only("c", "t"):
+            P.d.raw_rel(P.x)
+        P.d.cond("fall", P.x, owner="c", prof=P.wait)
+        P.d.cond("rise", P.x, owner="c", prof=P.wait)
+        stop_and_halt(P)
+    d = i2c(target=target, after=after, pre=pre)
+    assert any("COND FALL by P0: x may not be high here" in m for _, m in level_diags(d))
+    t = run_sys(lower(d).image, roles=(Role.P0, Role.P1, Role.MON), max_ticks=20_000)
+    assert not t.engines[2].halted
+
+
+def test_a_step_on_the_leaders_clock_is_no_followed_cond():
+    """c's exit holds t's 4-bit XFER on c's lane (R3-lead allows a step on a lane the leader
+    clocks), whose operand's low bits read as a STOP: it doesn't make c a leader that follows,
+    so t's SDA steps after S, with SCL low, stay legal (found by the re-review)."""
+    def exit_seq(P):
+        P.d.xfer(4, P.L, owner="t", prof=P.bit, src="ones", msb_first=True)
+        stop_seq(P)
+
+    def after(P):
+        d = P.d
+        with d.lead("c"):
+            d.br("data", cond="z", reg="r4")
+            d.li("r5", 0)
+            exit_seq(P)
+            d.br("top")
+        d.label("data")
+        d.xfer(8, P.L, owner="t", prof=P.bit, src="r6", dst="r7", msb_first=True, abort=True)
+        d.cond("fall", P.scl, owner="c", prof=P.wait)
+        d.cond("fall", P.sda, owner="t", prof=P.wait)
+        d.cond("rise", P.sda, owner="t", prof=P.wait)
+        d.cond("fall", P.sda, owner="c", prof=P.wait)
+        d.cond("rise", P.scl, owner="c", prof=P.wait)
+        d.cond("stop", owner="c", prof=P.wait)
+        d.halt()
+    d = i2c(after=after, pre=lambda P: (P.d.li("r5", 1), P.d.li("r6", 0x3C)), target=lambda P: None)
+    runs_clean_here(d)
+
+
+def runs_clean_here(d):
+    from test_edge_rule import runs_clean
+    runs_clean(d)
+
+
+def test_the_bus_oracle_takes_a_sticky_flag_at_the_step_that_reads_it():
+    """t's exit spends 300 cycles in a RAW DELAY before its followed STOP: c's repeated START comes
+    meanwhile, and t's STOP, without ABORT, waits through it (the flag is sticky, isa §4.2). A
+    correct run, which `bus` must pass (found by the re-review)."""
+    from emu.gen.check import bus_mismatches
+
+    def target(P):
+        with P.d.lead("t"):
+            P.d.br("ack", cond="z", reg="r5")
+            P.d.raw_delay(300)
+            P.d.cond("stop", owner="c", prof=P.wait)
+            P.d.br("top")
+    d = i2c(target=target, ack=ack_then(repeated_start), pre=lambda P: P.d.li("r5", 1))
+    img = compile_desc(d)
+    t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON), max_ticks=40_000)
+    assert [k for _, k in t.engines[1].bus_events] == ["START", "START", "STOP"]
+    assert bus_mismatches(img, t, ignores=True) == []
+
+
+def test_the_leader_back_at_abort_pc_meets_the_owner_as_its_run_on_left_it():
+    """R1-bus: t's exit follows c's STOP; c, alone, runs S (its SCL RISE) and the STOP, then halts,
+    releasing SDA and SCL. t's walk at abort_pc had c's SDA and SCL low as before the block, so t's
+    RAW pulse on SDA passed; on the wire it is a START no COND made (found by the re-review; it
+    compiled on main too)."""
+    from emu.gen.check import bus_mismatches
+    d = Description("i2c", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+    bit = d.profile("B", nom=H, min=0, max=INF)
+    w = d.profile("W", nom=H, min=0, max=INF)
+    hold = d.profile("Ho", nom=H)
+    d.abort_to("retry")
+    d.li("r1", ADDR)
+    d.li("r5", 1)
+    d.cond("start", owner="c", prof=w)
+    d.xfer(8, lane, owner="c", prof=bit, src="r1", dst="r2", msb_first=True)
+    d.xfer(1, lane, owner="t", prof=bit, src="ones", dst="r4")
+    d.cond("fall", scl, owner="c", prof=w)
+    d.hold(sda, 0, owner="c", prof=hold)
+    with d.lead("t"):
+        d.br("s", cond="z", reg="r5")
+        d.cond("stop", owner="c", prof=w)
+        d.br("retry")
+    d.label("s")
+    d.cond("rise", scl, owner="c", prof=w, abort=True)
+    d.cond("stop", owner="c", prof=w)
+    d.halt()
+    d.label("retry")
+    d.nop()
+    with d.only("t"):
+        d.raw_set(sda, 0)
+        d.raw_rel(sda)
+    d.cond("start", owner="c", prof=w)
+    d.xfer(8, lane, owner="c", prof=bit, src="ones", msb_first=True)
+    d.cond("fall", scl, owner="c", prof=w)
+    d.hold(sda, 0, owner="c", prof=hold)
+    d.cond("rise", scl, owner="c", prof=w)
+    d.cond("stop", owner="c", prof=w)
+    d.halt()
+    assert any("RAW SET 0 on SDA (sda) by P1: SCL (scl) may be high here" in m for _, m in level_diags(d))
+    img = compile_desc(d, check_levels=False, check_timing=False)
+    t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON), max_ticks=20_000)
+    assert any(m.startswith("wire:") for m in bus_mismatches(img, t))
+
+
+def test_an_away_leaders_raw_set_in_a_block_both_run_may_have_run():
+    """As above with x released and the RAW a SET 0: t, if there, holds x low through c's RISE,
+    which then makes no edge; skipping the RAW for t would miss that."""
+    def pre(P):
+        P.d.li("r5", 1)
+        P.x = P.d.line("x", "od", owner="shared", idle=1)
+
+    def target(P):
+        with P.d.lead("t"):
+            P.d.br("ack", cond="z", reg="r5")
+            P.d.cond("stop", owner="c", prof=P.wait)
+            P.d.br("top")
+
+    def after(P):
+        with P.d.only("c", "t"):
+            P.d.raw_set(P.x, 0)
+        P.d.cond("rise", P.x, owner="c", prof=P.wait)
+        stop_and_halt(P)
+    d = i2c(target=target, after=after, pre=pre)
+    assert any("x may not be low by the doer's drive alone" in m for _, m in level_diags(d))
+
+
+def test_halt_release_and_halt_after():
+    """`_halt_release`: a HALT releases the party's OD lines and shuts its gated ones, and its PP
+    lines keep their level (isa §4.1). `_halt_after`: it may halt after one of the CONDs, past
+    untimed steps, before a timed one or abort_pc; a loop of untimed steps ends the search."""
+    from emu.analysis import _SHUT, _halt_after, _halt_release
+    from emu.image import LineCfg
+    from emu.isa import BrCond, Instr, Owner
+    lines = [LineCfg("od", "od", Owner.SHARED), LineCfg("g", "pp", Owner.P0, gated=True),
+             LineCfg("g1", "pp", Owner.P1, gated=True), LineCfg("pp", "pp", Owner.P0)]
+    assert _halt_release(lines, Role.P0) == {0: 1, 1: _SHUT}
+    assert _halt_release(lines, Role.P1) == {0: 1, 2: _SHUT}
+    cond, li, halt, nop = Instr(Op.COND, owner=Owner.P0), Instr(Op.LI), Instr(Op.HALT), Instr(Op.NOP)
+    assert _halt_after([cond, li, li, halt], {0}, Role.P0, None)            # past untimed steps
+    assert not _halt_after([cond, cond, halt], {0}, Role.P0, None)          # a timed step first
+    assert not _halt_after([cond, li, nop, halt], {0}, Role.P0, 2)          # abort_pc first
+    loop = Instr(Op.BR, sub=BrCond.ALWAYS, operand=1)
+    assert not _halt_after([cond, li, loop], {0}, Role.P0, None)            # an untimed loop ends it
+
+
+def test_a_halted_owner_leaves_an_untouched_od_line_released():
+    """c halts after its STOP, and t, back at abort_pc, does a COND FALL and RISE on a shared w
+    c never drove: c's w is released (1), not unknown, so both are legal."""
+    d = Description("i2c", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    w_ = d.line("w", "od", owner="shared", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+    bit = d.profile("B", nom=H, min=0, max=INF)
+    w = d.profile("W", nom=H, min=0, max=INF)
+    hold = d.profile("Ho", nom=H)
+    d.abort_to("retry")
+    d.li("r1", ADDR)
+    d.li("r5", 1)
+    d.cond("start", owner="c", prof=w)
+    d.xfer(8, lane, owner="c", prof=bit, src="r1", dst="r2", msb_first=True)
+    d.xfer(1, lane, owner="t", prof=bit, src="ones", dst="r4")
+    d.cond("fall", scl, owner="c", prof=w)
+    d.hold(sda, 0, owner="c", prof=hold)
+    with d.lead("t"):
+        d.br("s", cond="z", reg="r5")
+        d.cond("stop", owner="c", prof=w)
+        d.br("retry")
+    d.label("s")
+    d.cond("rise", scl, owner="c", prof=w, abort=True)
+    d.cond("stop", owner="c", prof=w)
+    d.li("r6", 0)
+    d.halt()
+    d.label("retry")
+    d.cond("fall", w_, owner="t", prof=w)
+    d.cond("rise", w_, owner="t", prof=w)
+    d.halt()
+    assert not any("w " in m or "w)" in m for _, m in level_diags(d))
+

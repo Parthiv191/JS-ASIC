@@ -253,15 +253,18 @@ def bus_mismatches(img, t, ignores: bool = False) -> list[str]:
     instrs, scl = img.instrs(), img.bus.b
 
     def ignored(et, cycle: int, kind: str) -> bool:
-        k = bisect_right([c for _, c in et.starts], cycle) - 1
-        if k < 0:
-            return False
-        ins = instrs[et.starts[k][0]]
-        if ins.op != Op.COND:
-            return False
-        ck = CondKind(unpack_cond(ins.operand)[0])
-        return (ck == CondKind.START and kind == "STOP"
-                or ck == CondKind.STOP and kind == "START" and not ins.flags & F_ABORT)
+        """The flags are sticky: the event is the first step's to read them that runs at or after
+        its confirm (a followed START/STOP, or a step with ABORT), and that step ignores it if it is
+        a followed START and the event a STOP, or a followed STOP without ABORT and it a START."""
+        k = max(bisect_right([c for _, c in et.starts], cycle) - 1, 0)
+        for pc, _ in et.starts[k:]:
+            ins = instrs[pc]
+            bus_cond = ins.op == Op.COND and unpack_cond(ins.operand)[0] in (CondKind.START, CondKind.STOP)
+            if bus_cond or ins.op in (Op.COND, Op.HOLD, Op.XFER) and ins.flags & F_ABORT:
+                ck = CondKind(unpack_cond(ins.operand)[0]) if bus_cond else None
+                return (ck == CondKind.START and kind == "STOP"
+                        or ck == CondKind.STOP and kind == "START" and not ins.flags & F_ABORT)
+        return False
 
     def bus_conds(et) -> list[str]:
         return [k.name for r in et.records if r.op == "COND"
