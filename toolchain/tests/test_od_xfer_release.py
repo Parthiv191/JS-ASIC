@@ -178,3 +178,36 @@ def test_a_lead_blocks_exit_paths_drive_nothing_at_its_successor():
 
 def test_a_drive_on_a_lead_blocks_fall_through_path_still_counts():
     assert any(r == "R2-edge" and f"XFER by P1 on sda: {SAYS}" in m for r, m in diags(after_lead(True)))
+
+
+def test_a_lead_block_whose_successor_is_the_leaders_own_cond_is_paced_too():
+    """S is the controller's COND FALL on x, unclocked: the target waits in it for the controller's
+    edge, which no exit path makes (R3-lead), so the NACK exit's ZERO bit doesn't count at the
+    target's byte after S."""
+    d = Description("lc", parties=("ctl", "tgt"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    x = d.line("x", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=2)
+    half = d.profile("HALF", nom=20, min=0, max=INF)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    d.abort_to("frame")
+    d.label("frame")
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(8, lane, owner="ctl", prof=half, src="zero", abort=True)
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero", dst="r4", abort=True)
+    with d.lead("ctl"):
+        d.br("ok", cond="z", reg="r4")
+        d.xfer(1, lane, owner="ctl", prof=half, src="zero", abort=True)
+        d.cond("stop", owner="ctl", prof=w)
+        d.br("frame")
+    d.label("ok")
+    d.cond("fall", x, owner="ctl", prof=w, abort=True)
+    d.xfer(8, lane, owner="tgt", prof=half, src="ones", abort=True)
+    d.cond("rise", x, owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero", abort=True)
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    assert diags(d) == []
+    runs_clean(d)

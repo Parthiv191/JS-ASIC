@@ -383,10 +383,10 @@ def scl_after(bus_cond, raw, spare=False):
     if spare:
         d.cond("fall", x, owner="ctl", prof=w)
     with d.only("ctl"):
-        if raw == "SET 0":
-            d.raw_set(scl, 0)
-        else:
+        if raw == "REL":
             d.raw_rel(scl)
+        else:
+            d.raw_set(scl, int(raw[-1]))
     if bus_cond == "start":   # then SCL up again, a bit and the STOP
         with d.only("ctl"):
             d.raw_rel(scl)
@@ -412,8 +412,29 @@ def test_scl_low_by_raw_before_the_followers_confirm_a_start_or_stop_is_rejected
     assert hangs(d)
 
 
-def test_scl_released_after_a_stop_is_no_change():
-    assert not any("before the followers confirm" in m for _, m in diags(scl_after("stop", "REL")))
+@pytest.mark.parametrize("raw", ["REL", "SET 1"])
+def test_scl_released_after_a_stop_is_no_change(raw):
+    assert not any("before the followers confirm" in m for _, m in diags(scl_after("stop", raw)))
+    assert not hangs(scl_after("stop", raw))
+
+
+def test_an_untimed_loop_after_a_stop_ends_the_slot_walk():
+    """The walk over a bus COND's slot follows untimed instructions until a timed step: around a
+    loop of them it must still end (the program is rejected for its untimed loop, isa §6)."""
+    import threading
+    d = Description("ul", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.label("L")
+    d.nop()
+    d.br("L")
+    done = []
+    th = threading.Thread(target=lambda: done.append(diags(d)), daemon=True)
+    th.start()
+    th.join(30)
+    assert done, "the slot walk didn't end"
 
 
 def test_scl_low_by_raw_after_the_next_timed_step_is_legal():
