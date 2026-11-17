@@ -447,8 +447,18 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
     leader's bus COND, so an exit path may not complete S for them first: fewer clock edges than
     S needs, no edge on S's COND line, and a START successor only behind a STOP exit whose way
     back from abort_pc reaches S before any START. A COND STOP, HOLD or unclocked XFER of the
-    leader's completes without it, so it can't be S."""
-    from .analysis import successors  # analysis imports this module
+    leader's completes without it, so it can't be S. The exit's bus COND is the leader's own then:
+    the others' S waits for the leader, and the master line's owner runs no detector to leave it.
+    And an exit's own bus COND needs such an S: one the others complete alone lets them run on
+    past it. A bus COND the leader follows is made by its owner from S, on a path that may not
+    wait for the leader before it, is of the exit's kind and goes on at abort_pc after it, as the
+    leader does (a halt only leaves the leader waiting).
+    Where the others send S's data on bus_a (I2C: a byte the target sends), the leader's first edge
+    on S's clock launches their first bit, whose 0 holds bus_a so that the exit's bus COND makes
+    no edge: an exit path makes that edge only past a BR that finds non-zero the register the
+    leader read in the XFER just before the block, sent from ZERO (the target's ACK). The others,
+    in S, ran it with the leader, so they would have read 0."""
+    from .analysis import _taint, successors  # analysis imports this module
 
     (leader,) = sp.roles
     at = lambda pc: desc.steps[pc_step[pc]]  # noqa: E731
@@ -475,6 +485,7 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
 
     succ = instrs[sp.end] if sp.end < len(instrs) else None
     kind, watch, need = None, None, 0  # what S waits for, when its events come from the leader
+    s_from_others = False              # S's events come from another party: they do it on their own
     if succ is None or succ.op not in TIMED_OPS:
         err("R3-lead", at(sp.role_if_pc), "a lead block's fall-through successor must be a timed step: "
                                           "the others follow it while the leader decides")
@@ -484,6 +495,7 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                                    "abort, no check and a profile with max INF")
     if succ is not None:
         clocked = succ.op == Op.XFER and succ.line < len(lanes) and lanes[succ.line].clk is not None
+        s_from_others = not (mine(lines[lanes[succ.line].clk].owner) if clocked else mine(succ.owner))
         if clocked:
             if mine(lines[lanes[succ.line].clk].owner):
                 kind, watch, need = "clock", lanes[succ.line].clk, 2 * unpack_xfer(succ.operand)[0]
@@ -497,6 +509,20 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                 err("R3-lead", at(sp.end), "the step after a lead block must wait for the leader: a "
                                            "COND STOP, HOLD, unclocked XFER, or COND on the bus line "
                                            "would complete before the leader's exit reaches its bus COND")
+
+    # The others send S's data on bus_a (not data2: on I2C SDA's lane is the one OD lane, R1-od-lane,
+    # and no lane uses SELECT's CS). The ACK: the XFER the ROLE_IF is entered from, and only from
+    # (an exit that may make an edge branches to abort_pc, so abort_pc there is an entry too).
+    launch, ack_reg = False, None
+    if kind == "clock":
+        launch = (lanes[succ.line].data == bus_a and not mine(succ.owner)
+                  and unpack_xfer(succ.operand)[1] != Src.ONES)
+        p = sp.role_if_pc - 1  # -1 for a block at pc 0, which no entry set equals
+        entries = {q for q in range(len(instrs)) if sp.role_if_pc in successors(instrs, q)}
+        if launch and instrs[p].op == Op.XFER and entries == {p}:
+            _, asrc, adst = unpack_xfer(instrs[p].operand)
+            if asrc == Src.ZERO and adst >= Dst.R0:
+                ack_reg = adst - Dst.R0
 
     def back_to_start_ok() -> bool:
         """From abort_pc the leader reaches S before any COND START of its own."""
@@ -514,6 +540,87 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
             stack.extend(successors(instrs, pc, leader))
         return True
 
+    said: set[tuple[int, str]] = set()
+
+    def say(step, msg: str) -> None:
+        """Once per step and message: the walk below may reach a pc in several states."""
+        if (step.index, msg) not in said:
+            said.add((step.index, msg))
+            err("R3-lead", step, msg)
+
+    def alone(ins: Instr, m: Owner) -> bool:
+        """`m` makes this timed step's events itself: on a lane it clocks, or its own (or SHARED)."""
+        if ins.op == Op.XFER and ins.line < len(lanes) and lanes[ins.line].clk is not None:
+            return lines[lanes[ins.line].clk].owner == m
+        return ins.owner in (m, Owner.SHARED)
+
+    def goes_on_at_abort(pc: int, role: Role) -> bool:
+        """From the COND at pc, `role` reaches abort_pc with nothing timed between, or halts."""
+        seen, todo = set(), list(successors(instrs, pc, role))
+        while todo:
+            q = todo.pop()
+            if q in seen or q == apc or q >= len(instrs) or instrs[q].op == Op.HALT:
+                continue
+            seen.add(q)
+            if instrs[q].op in TIMED_OPS:
+                return False
+            todo.extend(successors(instrs, q, role))
+        return True
+
+    owner_said: dict[tuple, str | None] = {}
+
+    def owner_path(m: Owner, follows: CondKind) -> str | None:
+        """What is wrong, if anything, on `m`'s role path from S (it skips the leader's blocks) to
+        the bus COND the leader follows: a timed step it can't do alone first, a first COND
+        START/STOP of the other kind, or going on after it elsewhere than at abort_pc, where the
+        leader goes on. A path that halts first leaves the leader waiting, as a target waits for a
+        controller that is done. Where S is the leader's XFER from ZERO into r on an OD line, the
+        leader, away, didn't send it: m reads r as all ones, and takes no branch on r = 0."""
+        if (m, follows) in owner_said:
+            return owner_said[(m, follows)]
+        r = None
+        if succ.op == Op.XFER and mine(succ.owner) and lines[lanes[succ.line].data].kind == "od":
+            _, ssrc, sdst = unpack_xfer(succ.operand)
+            if ssrc == Src.ZERO and sdst >= Dst.R0:
+                r = sdst - Dst.R0
+        role, out = Role(int(m)), None
+        seen, todo = set(), [(sp.end, False)]  # (pc, r known non-zero)
+        while todo and out is None:
+            state = todo.pop()
+            if state in seen:
+                continue
+            seen.add(state)
+            pc, nz = state
+            if pc >= len(instrs) or instrs[pc].op == Op.HALT:
+                continue
+            ins = instrs[pc]
+            nxt = successors(instrs, pc, role)
+            ck = unpack_cond(ins.operand)[0] if ins.op == Op.COND else None
+            if ck in (CondKind.START, CondKind.STOP):
+                out = ("the leader follows the exit's bus COND, but its owner's first COND START/STOP on its "
+                       "path from the block's successor is the other kind: a followed START ignores a STOP, "
+                       "and a followed STOP keeps waiting through a START") if ck != follows else (
+                       None if goes_on_at_abort(pc, role) else
+                       "the leader follows the exit's bus COND and goes on at abort_pc: its owner, after "
+                       "making it on its path from the block's successor, must go on there too (nothing "
+                       "timed first), or halt")
+                continue
+            if ins.op in TIMED_OPS and not alone(ins, m):
+                out = ("the leader follows the exit's bus COND, which its owner makes from the block's "
+                       "successor on its own path; before it that path may not reach a timed step that "
+                       "waits for the leader (not its own, nor on a lane it clocks): the leader isn't "
+                       "there, and neither moves")
+                continue
+            if pc == sp.end:
+                nz = r is not None   # S wrote r
+            elif nz and _taint(ins, 0, True) >> r & 1:
+                nz = False
+            if nz and ins.op == Op.BR and ins.ra == r and ins.sub in (BrCond.Z, BrCond.NZ):
+                nxt = [pc + 1 if ins.sub == BrCond.Z else ins.operand]
+            todo.extend((q, nz) for q in nxt)
+        owner_said[(m, follows)] = out
+        return out
+
     def leaders(ins: Instr) -> bool:
         if ins.owner in (Owner.P0, Owner.P1) and mine(ins.owner):
             return True
@@ -522,15 +629,17 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
             return clk is not None and mine(lines[clk].owner)
         return False
 
+    HELD, OUT, LOST = 0, 1, 2  # the ACK's register still holds it; found non-zero; written since
     seen: set[tuple] = set()
-    # (pc, a timed step so far, the exit's bus COND kind so far, edges the leader made on S's watch)
-    stack: list[tuple] = [(sp.start, False, None, 0)]
+    # (pc, a timed step so far, the exit's bus COND kind so far, edges the leader made on S's watch,
+    # what the path knows of the ACK)
+    stack: list[tuple] = [(sp.start, False, None, 0, HELD if ack_reg is not None else LOST)]
     while stack:
         state = stack.pop()
         if state in seen:
             continue
         seen.add(state)
-        pc, timed, bus, edges = state
+        pc, timed, bus, edges, known = state
         if apc is not None and pc == apc and bus is not None:  # the exit to abort_pc, checked first
             if kind == "start" and (bus == CondKind.START or not back_to_start_ok()):
                 err("R3-lead", at(sp.end), "a START successor waits through the exit's STOP only: the "
@@ -560,16 +669,38 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                 continue
             if ck in (CondKind.START, CondKind.STOP):
                 bus = ck
-                if not mine(ins.owner) and profiles[ins.prof].max != INF:
-                    err("R3-lead", at(pc), "the leader follows the exit's bus COND, which its owner makes "
-                                           "from the block's successor whenever it gets there: it needs "
-                                           "max INF")
+                if mine(ins.owner):
+                    if s_from_others:
+                        say(at(sp.end), "the exit's bus COND is the leader's own, so the others must wait "
+                                        "for the leader in the block's successor: this one completes "
+                                        "without it, and they run on past it into steps the exit's bus "
+                                        "COND doesn't take them out of")
+                elif kind is not None:
+                    err("R3-lead", at(pc), "the leader follows the exit's bus COND, but its owner waits for "
+                                           "the leader in the block's successor and runs no bus detector "
+                                           "to leave it (isa §4.7): neither moves")
+                else:
+                    if profiles[ins.prof].max != INF:
+                        err("R3-lead", at(pc), "the leader follows the exit's bus COND, which its owner makes "
+                                               "from the block's successor whenever it gets there: it needs "
+                                               "max INF")
+                    wrong = owner_path(ins.owner, ck) if succ is not None else None
+                    if wrong:
+                        say(at(pc), wrong)
                 if kind == "clock" and watch == bus_a:
                     edges += 1
             else:
                 if not leaders(ins):
                     err("R3-lead", at(pc), f"a timed step in a lead block is the leader's: owned by "
                                            f"{_name(desc, Owner(int(leader)))!r}, or on a lane it clocks")
+                if launch and known != OUT and edges_on(ins, watch):
+                    err("R3-lead", at(pc), "this exit path's edge on the successor's clock launches its "
+                                           f"first bit at the others, who send it on {lines[bus_a].name!r}: "
+                                           "a 0 there holds the line, so the exit's START or STOP makes "
+                                           "no edge. An exit may make it only where a register the leader "
+                                           "read in the XFER just before the block, sent from ZERO (an "
+                                           "ACK), is not 0: the others, if in S, ran that XFER")
+                    continue
                 if kind in ("clock", "line"):
                     edges = min(need, edges + edges_on(ins, watch))
                     if edges >= need:
@@ -578,7 +709,14 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                                                "for), so they would run on past it")
                         continue
             timed = True
-        stack.extend((nxt, timed, bus, edges) for nxt in successors(instrs, pc, leader))
+        if known == HELD and ins.op == Op.BR and ins.ra == ack_reg and ins.sub in (BrCond.Z, BrCond.NZ):
+            nonzero = pc + 1 if ins.sub == BrCond.Z else ins.operand
+            stack.extend((nxt, timed, bus, edges, OUT if nxt == nonzero else HELD)
+                         for nxt in successors(instrs, pc, leader))
+            continue
+        if known == HELD and _taint(ins, 0, True) >> ack_reg & 1:
+            known = LOST
+        stack.extend((nxt, timed, bus, edges, known) for nxt in successors(instrs, pc, leader))
 
 
 def _name(desc, owner: Owner) -> str:
