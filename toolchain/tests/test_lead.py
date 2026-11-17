@@ -1041,3 +1041,81 @@ def test_a_branch_on_the_ack_to_the_next_word_says_nothing_about_it(cond):
         P.d.br("past", cond=cond, reg="r4")
         P.d.label("past")
     assert launch_diags(c_ends_before_t_sends(before_br=noop)) == [LAUNCH]
+
+
+# ---------------------------------------------------------------- mutation pass over _check_lead
+TIMED_S = "a lead block's fall-through successor must be a timed step: the others follow it while the leader decides"
+
+
+def test_an_own_exit_before_an_untimed_successor_says_only_that():
+    """No timed S at all (a NOP): that is the one error, not also that S doesn't wait for c."""
+    def after(P):
+        d = P.d
+        with d.lead("c"):
+            d.br("data", cond="z", reg="r5")
+            stop_seq(P)
+            d.br("top")
+        d.label("data")
+        d.nop()
+        stop_and_halt(P)
+    assert launch_diags(i2c(after=after, target=lambda P: None, pre=lambda P: P.d.li("r5", 1))) == [TIMED_S]
+
+
+def test_a_message_about_s_is_given_once_however_many_exits_make_it():
+    """Two own exits, each with its STOP, before an S t completes alone: one message."""
+    def after(P):
+        d = P.d
+        x = d.line("x", owner="t", idle=1)
+        with d.lead("c"):
+            d.br("data", cond="z", reg="r5")
+            d.br("two", cond="z", reg="r6")
+            stop_seq(P)
+            d.br("top")
+            d.label("two")
+            stop_seq(P)
+            d.br("top")
+        d.label("data")
+        d.cond("fall", x, owner="t", prof=P.wait, abort=True)
+        stop_and_halt(P)
+    d = i2c(after=after, target=lambda P: None, pre=lambda P: (P.d.li("r5", 1), P.d.li("r6", 1)))
+    assert launch_diags(d) == [RUNS_ON]
+
+
+def spin(P):
+    """An untimed loop that never ends: the walks must still end."""
+    P.d.label("spin")
+    P.d.li("r6", 0)
+    P.d.br("spin")
+
+
+def test_the_walks_end_on_an_untimed_loop_before_or_after_the_owners_stop():
+    assert launch_diags(t_leads_then(ack_then(spin))) == []
+    assert launch_diags(t_leads_then(ack_then(lambda P: (stop_seq(P), spin(P))))) == []
+
+
+def test_past_a_start_the_leader_ignores_the_owners_path_is_still_walked():
+    """After c's repeated START, which t's followed STOP waits through, c meets t's COND on x."""
+    assert launch_diags(t_leads_then(ack_then(lambda P: (repeated_start(P), t_cond_on_x(P))))) == [WAITS]
+
+
+def test_the_edge_budget_is_s_bits_times_two():
+    """b's 8-bit XFER (16 edges) against a 6-bit S (12)."""
+    assert EDGES in launch_diags(spi_lead(s_n=6))
+
+
+def test_a_leader_step_that_is_no_xfer_takes_no_edges():
+    """t's HOLD on SDA, line 0, the index of the lane on c's clock: not an XFER on it."""
+    assert launch_diags(nack_pairing(t_body=lambda P: P.d.hold(P.sda, 1, owner="t", prof=P.hold))) == []
+
+
+def test_a_leader_xfer_on_another_clock_of_the_owners_gets_no_edges_from_s():
+    """c owns a second clock z; S (the ACK) is on SCL, so t's bit on z's lane gets none of S's."""
+    def body(P):
+        lane = P.d.lane("Lz", P.d.line("y", owner="t", idle=0), clk=P.d.line("z", owner="c", idle=0))
+        P.d.xfer(1, lane, owner="t", prof=P.bit, src="ones")
+    assert launch_diags(nack_pairing(t_body=body)) == [EDGES]
+
+
+def test_an_unrelated_instruction_before_a_branch_on_an_ack_in_r0():
+    d = c_ends_before_t_sends(reg="r0", ack=ack_into("r0"), before_br=lambda P: P.d.li("r6", 1))
+    assert launch_diags(d) == []
