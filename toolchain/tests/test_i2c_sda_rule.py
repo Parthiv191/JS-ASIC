@@ -367,3 +367,57 @@ def test_a_block_without_a_halt_leaves_the_skipped_partys_drive_known():
     d.halt()
     assert diags(d) == []
     runs_clean(d)
+
+
+# ---- found by the random I2C programs (emu/gen's bus family)
+def scl_after(bus_cond, raw, spare=False):
+    """A START (and, for a STOP, a bit and the STOP), then at once, in the controller's own block,
+    `raw` on SCL ("SET 0", "REL"); with `spare`, a COND on x first. The followers confirm a START or
+    STOP only if SCL stays high for the confirm window (isa §4.7)."""
+    d = Description("sc", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    d.cond("start", owner="ctl", prof=w)
+    if bus_cond == "stop":
+        d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+        d.cond("stop", owner="ctl", prof=w)
+    if spare:
+        d.cond("fall", x, owner="ctl", prof=w)
+    with d.only("ctl"):
+        if raw == "SET 0":
+            d.raw_set(scl, 0)
+        else:
+            d.raw_rel(scl)
+    if bus_cond == "start":   # then SCL up again, a bit and the STOP
+        with d.only("ctl"):
+            d.raw_rel(scl)
+        d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+        d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+def hangs(d):
+    img = compile_desc(d, check_levels=False, check_timing=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    return not all(et.halted for et in t.engines)
+
+
+@pytest.mark.parametrize("bus_cond", ["start", "stop"])
+def test_scl_low_by_raw_before_the_followers_confirm_a_start_or_stop_is_rejected(bus_cond):
+    """The controller finishes its COND START/STOP at the edge, so its RAW SET 0 on SCL comes in
+    the confirm window: the followers drop the candidate and wait for it forever."""
+    d = scl_after(bus_cond, "SET 0")
+    assert any(r == "R1-bus" and f"RAW SET 0 on SCL (scl) by P0 comes before the followers confirm its "
+               f"COND {bus_cond.upper()}" in m for r, m in diags(d))
+    assert hangs(d)
+
+
+def test_scl_released_after_a_stop_is_no_change():
+    assert not any("before the followers confirm" in m for _, m in diags(scl_after("stop", "REL")))
+
+
+def test_scl_low_by_raw_after_the_next_timed_step_is_legal():
+    """T5-watch has the followers start the COND on x before its edge, so after their confirm."""
+    d = scl_after("stop", "SET 0", spare=True)
+    assert not any("before the followers confirm" in m for _, m in diags(d))
+    assert not hangs(d)

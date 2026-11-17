@@ -138,3 +138,65 @@ def test_a_pop_that_doesnt_wait_fails_only_with_a_late_host(monkeypatch):
     assert any("value" in r.rules for _, r in campaign(seed=5, iters=120, envs=3).failures)
     monkeypatch.setattr(check, "underrun_free", lambda r: False)  # no late host
     assert campaign(seed=5, iters=120, envs=3).failures == []
+
+
+# ---- the bus family: I2C programs with plain drives and HALTs (emu/gen/randdesc.py)
+def test_bus_recipes_are_deterministic_and_round_trip():
+    import random
+    from emu.gen.randdesc import random_bus_recipe
+    assert random_bus_recipe(12345) == random_bus_recipe(12345) != random_bus_recipe(12346)
+    r = random_bus_recipe(77)
+    case = Case(r, Env.draw(random.Random(1), r.ppm))
+    assert Case.from_json(case.to_json()) == case
+
+
+def test_no_generated_bus_program_breaks_a_structural_rule():
+    """R1-bus's structural part (a bus COND by SCL's owner, SDA changed only by its lane), R1-owner,
+    R3-raw-drive (RAW in a role block without MON) and S hold by construction."""
+    from emu.gen.randdesc import random_bus_recipe
+    bad = [(s, res.rules) for s in range(300) if (res := compile_recipe(random_bus_recipe(s))[1]) is not None
+           and res.verdict == "structural"]
+    assert bad == []
+
+
+def test_bus_programs_draw_every_drive_and_a_fair_share_compiles():
+    """Every kind of plain drive on every bus line, by both parties, and HALTs, are drawn; about a
+    fifth compile, enough to exercise the oracles."""
+    from emu.gen.randdesc import random_bus_recipe
+    recipes = [random_bus_recipe(s) for s in range(300)]
+    drawn = {(f.kind, f.line, f.owner) for r in recipes for f in r.frames}
+    for kind in ("cond", "hold", "raw"):
+        assert {(kind, 0, "a"), (kind, 0, "b"), (kind, 1, "a")} <= drawn   # SDA by both, SCL by a
+    assert {("halt", 0, "a"), ("halt", 0, "b"), ("hold", 0, "shared")} <= drawn
+    accepted = [r for r in recipes if compile_recipe(r)[1] is None]
+    assert len(accepted) >= 40
+    assert any(f.kind == "halt" for r in accepted for f in r.frames)
+    assert any(f.kind in ("hold", "raw") and f.line == 0 for r in accepted for f in r.frames)
+
+
+def test_accepted_bus_programs_pass_the_oracles():
+    rep = campaign(seed=3, iters=300, family="i2c")
+    assert rep.accepted >= 40 and rep.structural == []
+    assert [(c.recipe.seed, r.detail) for c, r in rep.failures] == []
+
+
+def test_without_the_level_walk_bus_programs_fail_and_some_only_the_bus_oracle(monkeypatch):
+    """A planted compiler bug: no R2-edge or R1-bus walk. Accepted programs then hang, misread and
+    make STARTs and STOPs no COND made; some of those stray edges fail no oracle but `bus` (the
+    followers' detectors may not even confirm one), and a shrunk one stays small."""
+    import emu.gen.check as check
+    real = check.compile_desc
+    monkeypatch.setattr(check, "compile_desc",
+                        lambda d, **kw: real(d, **{**kw, "check_levels": False}) if kw.get("check_levels", True)
+                        else real(d, **kw))
+    rep = campaign(seed=1, iters=150, family="i2c")
+    rules = [res.rules for _, res in rep.failures]
+    assert len(rules) >= 10 and ("bus",) in rules
+    case = next(c for c, res in rep.failures if res.rules == ("bus",))
+    small = shrink(case)
+    assert run_case(small).rules == ("bus",) and len(small.recipe.frames) <= len(case.recipe.frames)
+
+
+def test_a_planted_follower_bug_fails_the_bus_campaign(flipped_followers):
+    rep = campaign(seed=5, iters=60, family="i2c")
+    assert any("agreement" in r.rules for _, r in rep.failures)

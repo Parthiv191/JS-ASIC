@@ -182,7 +182,9 @@ class Engine:
         if pre is not None:  # a let-go armed this cycle is taken the next one
             self._track_letgo(pre)
         if self._detects and (self._detect() or self._cand is not None):
-            self.idle = False  # a candidate being confirmed, or a flag just set, keeps the run going
+            # a candidate being confirmed, or a flag just set, keeps the run going; but an engine
+            # that halted this cycle never confirms one (it detects nothing more)
+            self.idle = self.halted
 
     def _detect(self) -> bool:
         """The START/STOP detector (isa §4.7), at the end of the cycle, so a flag set now is

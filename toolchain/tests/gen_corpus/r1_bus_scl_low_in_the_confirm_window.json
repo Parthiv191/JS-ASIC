@@ -1,0 +1,226 @@
+{
+ "recipe": {
+  "seed": 678818075,
+  "lines": [
+   {
+    "name": "sda",
+    "kind": "od",
+    "owner": "shared",
+    "idle": 1
+   },
+   {
+    "name": "scl",
+    "kind": "od",
+    "owner": "a",
+    "idle": 1
+   },
+   {
+    "name": "x",
+    "kind": "pp",
+    "owner": "b",
+    "idle": 1
+   }
+  ],
+  "frames": [
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     31,
+     4
+    ],
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     31,
+     4
+    ],
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "hold",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": 0,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "stop",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "raw",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": 0,
+    "imm": 0
+   }
+  ],
+  "P": 20,
+  "H": 23,
+  "lane": {
+   "data": 0,
+   "clk": 1,
+   "cpol": 1,
+   "cpha": 1,
+   "ldelay": 2
+  },
+  "ppm": 20000,
+  "loops": 1,
+  "bus": "i2c"
+ },
+ "env": {
+  "clocks": [
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ]
+  ],
+  "phases": [
+   0,
+   0,
+   0
+  ],
+  "words": [
+   [
+    38280,
+    35268,
+    48296,
+    21735,
+    41313,
+    12742,
+    30542,
+    43059,
+    25452,
+    23133,
+    57837,
+    12560,
+    40649,
+    4316,
+    736,
+    6091,
+    342,
+    23398,
+    29209,
+    32179,
+    48874,
+    51571,
+    50650,
+    31692
+   ],
+   [
+    57862,
+    56664,
+    38095,
+    11671,
+    45049,
+    5720,
+    12599,
+    24209,
+    7261,
+    53266,
+    617,
+    51439,
+    21487,
+    56908,
+    5802,
+    29182,
+    49015,
+    44980,
+    45800,
+    17384,
+    74,
+    45405,
+    47658,
+    12666
+   ]
+  ],
+  "late": null
+ }
+}

@@ -962,3 +962,21 @@ def test_a_followed_start_that_starts_when_the_flag_is_already_set():
     (f,) = conds(t, 1)
     assert start == visible and t.engines[1].bus_events == [(visible - 1, "START")]
     assert (f.cycle, f.tb) == (visible, NOM)
+
+
+@pytest.mark.parametrize("stop_nom", range(CONFIRM, CONFIRM + 26))
+def test_an_engine_that_halts_while_confirming_a_bus_edge_lets_the_run_end(stop_nom):
+    """b follows the START and halts at once, in its own block; a's STOP comes `stop_nom` later
+    (after the START's confirm). Where b's detector has the STOP's candidate when it halts, it
+    never confirms it (a halted engine detects nothing), and the run must still end: before, that
+    candidate kept b from idling, and the run went on to its tick budget (at 15 to 19). Found by
+    the random I2C programs."""
+    from emu.model.system import EngineSpec, System
+
+    def body(d, sda, scl, p):
+        d.cond("start", owner="a", prof=p)
+        with d.only("b"):
+            d.halt()
+        d.cond("stop", owner="a", prof=d.profile("S", nom=stop_nom, min=0, max=INF))
+    t = System([EngineSpec(i2c(body), r) for r in (Role.P0, Role.P1, Role.MON)]).run(20_000)
+    assert all(et.halted for et in t.engines) and t.quiescent

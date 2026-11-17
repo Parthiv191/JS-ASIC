@@ -12,21 +12,25 @@ tolerance and no glitches, these must hold:
 | `completion` | an engine doesn't halt, or the run isn't quiescent, by the tick budget |
 | `agreement` | the engines' timed steps (pc, op, XFER value), wire registers r1-r4 or RX words differ |
 | `value` | an XFER's value isn't what the recipe says (`expected_values`: src, host words, prep ops), so wrong semantics that every role shares fail too |
+| `bus` | on an I2C bus, an SDA edge with SCL high on the wire that no COND START/STOP made, or a follower's detector reporting a START or STOP that its COND START/STOP steps don't match (isa §4.7, §5 R1-bus) |
+
+A party that halts in its own block (the bus family) takes part in every step up to its HALT, so
+its steps are a prefix of MON's, which runs them all.
 """
 from __future__ import annotations
 
 import json
 import random
+from bisect import bisect_right
 from dataclasses import asdict, dataclass, replace
 
 from ..compiler import CompileError, compile_desc
-from ..isa import Dst, Role, unpack_xfer
+from ..isa import BusKind, CondKind, Dst, Role, unpack_cond, unpack_xfer
 from ..model.engine import VIOLATIONS
 from ..model.system import EngineSpec, System
-from .randdesc import PARTIES, Recipe, build, expected_values, random_recipe
+from .randdesc import HOST_WORDS, PARTIES, Recipe, build, expected_values, random_bus_recipe, random_recipe
 
 ROLES = (Role.P0, Role.P1, Role.MON)
-HOST_WORDS = 24      # per party: more than any recipe pops
 MAX_TICKS = 400_000
 
 
@@ -79,13 +83,19 @@ class Result:
 
 
 def compile_recipe(r: Recipe):
-    """(image, None), or (None, Result) when the compiler rejects it."""
+    """(image, None), or (None, Result) when the compiler rejects it. The walks that check levels
+    (R2-edge, R1-bus's) and timing (T1-T5) are left to the compiler; a program that fails without
+    them is a generator bug ("structural")."""
+    d = build(r)
     try:
-        return compile_desc(build(r)), None
+        return compile_desc(d), None
     except CompileError as e:
         rules = tuple(sorted({x.rule for x in e.diags}))
-        # the timing rules and R2-edge are left to the compiler; any other rule is a generator bug
-        verdict = "rejected" if all(x.startswith("T") or x == "R2-edge" for x in rules) else "structural"
+        try:
+            compile_desc(d, check_levels=False, check_timing=False)
+            verdict = "rejected"
+        except CompileError:
+            verdict = "structural"
         return None, Result(verdict, rules, str(e))
 
 
@@ -114,16 +124,20 @@ def run_case(case: Case) -> Result:
     if not (t.quiescent and all(et.halted for et in t.engines)):
         fails.append(("completion", "not halted: " + ", ".join(et.role.name for et in t.engines if not et.halted)))
     steps = [[(r.pc, r.op, r.value if r.op == "XFER" else None) for r in et.records] for et in t.engines]
-    for et, st in zip(t.engines[1:], steps[1:]):
-        if st != steps[0]:
-            k = next((i for i, (x, y) in enumerate(zip(steps[0], st)) if x != y), min(len(st), len(steps[0])))
-            fails.append(("agreement", f"{et.role.name} vs P0 at step {k}: "
-                                       f"{st[k] if k < len(st) else 'end'} vs {steps[0][k] if k < len(steps[0]) else 'end'}"))
+    last = len(img.instrs()) - 1                                 # the final HALT
+    full = [bool(et.starts) and et.starts[-1][0] == last for et in t.engines]
+    ref = steps[2]                                               # MON runs every timed step
+    for i, et in enumerate(t.engines[:2]):
+        st = steps[i]
+        if st != ref and (full[i] or ref[:len(st)] != st):
+            k = next((j for j, (x, y) in enumerate(zip(ref, st)) if x != y), min(len(st), len(ref)))
+            fails.append(("agreement", f"{et.role.name} vs MON at step {k}: "
+                                       f"{st[k] if k < len(st) else 'end'} vs {ref[k] if k < len(ref) else 'end'}"))
             break
     else:
-        for et in t.engines[1:]:
-            if et.regs[1:5] != t.engines[0].regs[1:5]:
-                fails.append(("agreement", f"{et.role.name} vs P0: r1-r4 {et.regs[1:5]} vs {t.engines[0].regs[1:5]}"))
+        for i, et in enumerate(t.engines[:2]):
+            if full[i] and et.regs[1:5] != t.engines[2].regs[1:5]:
+                fails.append(("agreement", f"{et.role.name} vs MON: r1-r4 {et.regs[1:5]} vs {t.engines[2].regs[1:5]}"))
                 break
     instrs = img.instrs()
     for et in t.engines:  # dst = FIFO pushes what a follower received (isa §4.3); the owner pushes nothing
@@ -132,14 +146,52 @@ def run_case(case: Case) -> Result:
         if et.rx != want:
             fails.append(("agreement", f"{et.role.name}: rx {et.rx}, but it followed {want} into the FIFO"))
     want = expected_values(case.recipe, dict(zip(PARTIES, (list(w) for w in env.words))))
-    got = [r.value for r in t.engines[0].records if r.op == "XFER"]
+    got = [r.value for r in t.engines[2].records if r.op == "XFER"]
     if got != want:
         k = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
         fails.append(("value", f"XFER {k}: {got[k] if k < len(got) else 'none'}, the recipe says "
                                  f"{want[k] if k < len(want) else 'none'}"))
+    if img.bus.kind == BusKind.I2C:
+        fails += [("bus", m) for m in bus_mismatches(img, t)]
     if fails:
         return Result("fail", tuple(sorted({f[0] for f in fails})), "; ".join(f"{o}: {d}" for o, d in fails))
     return Result("ok", ())
+
+
+def bus_mismatches(img, t) -> list[str]:
+    """The `bus` oracle on an I2C bus. On the wire, an SDA edge while SCL is high (the tick before
+    and at it) is a START (SDA falls) or a STOP (rises) to every device on the bus, so each must be
+    one of the COND START/STOPs that SCL's owner made (isa §5 R1-bus): a stray one is a failure
+    even where the engines' detectors happen to miss it (SCL fell within their confirm window). And
+    each follower's detector must report exactly the STARTs and STOPs its COND START/STOPs took,
+    in order (a halted engine detects nothing more)."""
+    instrs, sda, scl = img.instrs(), img.bus.a, img.bus.b
+    edges = t.wire_edges
+
+    def level(line: int, tick: int) -> int:  # OD lines, released at RUN: 1 until the first edge
+        return 1 ^ (bisect_right(edges[line], tick) & 1)
+
+    def bus_conds(et) -> list[str]:
+        return [k.name for r in et.records if r.op == "COND"
+                and (k := unpack_cond(instrs[r.pc].operand)[0]) in (CondKind.START, CondKind.STOP)]
+
+    out = []
+    wire = [("START" if level(sda, tk) == 0 else "STOP", tk) for tk in edges[sda]
+            if level(scl, tk) == 1 and level(scl, tk - 1) == 1]
+    master = next(et for et in t.engines if int(et.role) == int(img.lines[scl].owner))
+    made = bus_conds(master)
+    if [k for k, _ in wire] != made:
+        k = next((i for i, (x, y) in enumerate(zip(wire, made)) if x[0] != y), min(len(wire), len(made)))
+        out.append(f"wire: SDA edge {k} with SCL high is "
+                   f"{f'a {wire[k][0]} at tick {wire[k][1]}' if k < len(wire) else 'missing'}, "
+                   f"the controller's COND made {made[k] if k < len(made) else 'none'}")
+    for et in t.engines:
+        if et is master:
+            continue  # the master line's owner runs no detector (isa §4.7)
+        seen, took = [k for _, k in et.bus_events], bus_conds(et)
+        if seen != took:
+            out.append(f"{et.role.name}: its detector saw {seen}, its COND START/STOPs took {took}")
+    return out
 
 
 def simplifications(case: Case):
@@ -201,12 +253,16 @@ def underrun_free(r: Recipe) -> bool:
                    for f in r.frames)
 
 
-def campaign(seed: int, iters: int, envs: int = 2) -> Report:
-    """`iters` random recipes from `seed`, each accepted one in `envs` random environments."""
+FAMILIES = {"lines": random_recipe, "i2c": random_bus_recipe}
+
+
+def campaign(seed: int, iters: int, envs: int = 2, family: str = "lines") -> Report:
+    """`iters` random recipes of `family` from `seed`, each accepted one in `envs` random
+    environments."""
     rng = random.Random(seed)
     rep = Report()
     for _ in range(iters):
-        r = random_recipe(rng.randrange(1 << 30))
+        r = FAMILIES[family](rng.randrange(1 << 30))
         img, rejected = compile_recipe(r)
         if rejected is not None:
             if rejected.verdict == "structural":

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .compiler import Diagnostic, Lowered
+from .compiler import Diagnostic, Lowered, Span
 from .image import Profile
 from .isa import (
     EDGE_LAT as E, F_ABORT, F_CHK, F_REG, INF, ISSUE, NUM_REGS, QUANT as Q, U, BrCond, BusKind, Dst, Instr, Op, Owner,
@@ -258,8 +258,36 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             out += [(q, ins.ra) for q in ex]
         return out
 
-    touched = {sp.role_if_pc: {(q, ln) for pc in range(sp.start, sp.end) for q, ln in drives(pc)}
-               for sp in low.spans}
+    def paced(sp: Span) -> bool:
+        """A lead block whose successor S waits for the leader: it clocks S, or owns it (R3-lead).
+        The others then wait in S until the leader's exit makes its bus COND, so they never run
+        past S on an exit path. (With S another party's, they run on meanwhile: isa §5 R1-bus, open.)"""
+        s = instrs[sp.end] if sp.end < len(instrs) else None
+        if not sp.lead or s is None:
+            return False
+        (leader,) = sp.roles
+        if s.op == Op.XFER and lanes[s.line].clk is not None:
+            return int(lines[lanes[s.line].clk].owner) == int(leader)
+        return s.owner != Owner.SHARED and int(s.owner) == int(leader)
+
+    def to_exit(sp: Span) -> set[int]:
+        """The block's pcs a party that skips it meets the drives of. A paced lead block's other
+        paths run a bus COND and branch to abort_pc (R3-lead), a bus exit for the others before S
+        completes, so only those on a path to its fall-through exit."""
+        if not paced(sp):
+            return set(range(sp.start, sp.end))
+        (leader,) = sp.roles
+        ok: set[int] = set()
+        grew = True
+        while grew:
+            grew = False
+            for pc in range(sp.start, sp.end):
+                if pc not in ok and any(s == sp.end or s in ok for s in _role_successors(instrs, pc, leader)):
+                    ok.add(pc)
+                    grew = True
+        return ok
+
+    touched = {sp.role_if_pc: {(q, ln) for pc in to_exit(sp) for q, ln in drives(pc)} for sp in low.spans}
     # a party that may HALT in a block another skips has released its lines (isa §4.1), or not
     halted = {sp.role_if_pc: {q for pc in range(sp.start, sp.end) if instrs[pc].op == Op.HALT for q in runs(pc)}
               for sp in low.spans}
@@ -398,6 +426,33 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                             f"HOLD {level} at pc {pc} (its owner finishes a HOLD when it starts), "
                                             f"so it changes the line before the HOLD's followers sample it "
                                             f"(isa §4.2)")
+                work += successors(instrs, q, r)
+
+    def raw_in_bus_slots(r: Role) -> None:
+        """R1-bus on I2C: the followers confirm a START or STOP only if SCL stays high for the
+        confirm window (isa §4.7), and its doer finishes a COND START/STOP at the edge, so its
+        untimed instructions up to its next timed step come first (RAW DELAY isn't counted): a RAW
+        SET 0 on SCL there drops their candidate, and they wait for it. (A timed step is T5-watch's:
+        the followers start it before its event, so after their confirm.)"""
+        for pc, ins in enumerate(instrs):
+            if (ins.op != Op.COND or r not in runs(pc) or not does(ins.owner, r)
+                    or edge_line(ins)[0] not in (CondKind.START, CondKind.STOP)):
+                continue
+            seen, work = set(), list(successors(instrs, pc, r))
+            while work:
+                q = work.pop()
+                if q in seen:
+                    continue
+                seen.add(q)
+                nxt = instrs[q]
+                if nxt.op in (Op.COND, Op.HOLD, Op.XFER):
+                    continue
+                if (nxt.op == Op.RAW and nxt.sub == RawOp.SET and not nxt.operand & 1 and nxt.ra == scl
+                        and r in runs(q)):
+                    diags.add("R1-bus", q, f"RAW SET 0 on SCL ({lines[scl].name}) by {r.name} comes before the "
+                                           f"followers confirm its COND {edge_line(ins)[0].name} at pc {pc} (its "
+                                           f"doer finishes it at the edge): SCL falls in their confirm window, so "
+                                           f"they drop it and wait for it (isa §4.7)")
                 work += successors(instrs, q, r)
 
     def clock_before(st, line: int):
@@ -540,6 +595,14 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     diags.add("R2-edge", pc, f"a clocked XFER by {r.name}: its clock {lines[la.clk].name} may "
                                              f"not be at its idle level {la.cpol} here, so its first edge "
                                              f"may not come and the others wait for it (isa §4.3)")
+                # the sender's 1 bits release an OD data line, which reads 0 while another party holds
+                # it low; a let-go is gone before bit 0 is captured (its own edges, T4-profile)
+                if (mine and ins.owner != Owner.SHARED and lines[la.data].kind == "od"
+                        and unpack_xfer(ins.operand)[1] != Src.ZERO
+                        and not all(st[int(q)][la.data] in (1, _LG, _LGX) for q in _PARTIES if q != r)):
+                    diags.add("R2-edge", pc, f"XFER by {r.name} on {lines[la.data].name}: another party may "
+                                             f"hold it low here, so its 1 bits read 0 (an OD line is the wired "
+                                             f"AND of every driver)")
             raw_up = (ins.op == Op.RAW and ins.ra == scl and r in runs(pc)
                       and (ins.sub == RawOp.REL or ins.sub == RawOp.SET and ins.operand & 1))
             if scl is not None and (raw_up or mine and (
@@ -590,6 +653,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         check_cs()
     for r in _PARTIES:
         raw_in_hold_slots(r)
+        if kind == BusKind.I2C:
+            raw_in_bus_slots(r)
     return diags.list()
 
 

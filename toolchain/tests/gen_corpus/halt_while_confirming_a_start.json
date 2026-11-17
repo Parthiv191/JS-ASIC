@@ -1,0 +1,292 @@
+{
+ "recipe": {
+  "seed": 220616277,
+  "lines": [
+   {
+    "name": "sda",
+    "kind": "od",
+    "owner": "shared",
+    "idle": 1
+   },
+   {
+    "name": "scl",
+    "kind": "od",
+    "owner": "a",
+    "idle": 1
+   },
+   {
+    "name": "x",
+    "kind": "pp",
+    "owner": "b",
+    "idle": 1
+   }
+  ],
+  "frames": [
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     107,
+     2
+    ],
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "clocked",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "stop",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "halt",
+    "owner": "b",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "start",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     17,
+     0
+    ],
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     107,
+     2
+    ],
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "hold",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": 1,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "start",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "stop",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     17,
+     0
+    ],
+    "edge": null,
+    "level": null,
+    "imm": 0
+   }
+  ],
+  "P": 20,
+  "H": 38,
+  "lane": {
+   "data": 0,
+   "clk": 1,
+   "cpol": 1,
+   "cpha": 1,
+   "ldelay": 2
+  },
+  "ppm": 0,
+  "loops": 1,
+  "bus": "i2c"
+ },
+ "env": {
+  "clocks": [
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ]
+  ],
+  "phases": [
+   0,
+   0,
+   0
+  ],
+  "words": [
+   [
+    7183,
+    26564,
+    58158,
+    57482,
+    8313,
+    58971,
+    12762,
+    20041,
+    43039,
+    50960,
+    62909,
+    33792,
+    59282,
+    31566,
+    63949,
+    53961,
+    26825,
+    2267,
+    11599,
+    2354,
+    32865,
+    55734,
+    14134,
+    25401
+   ],
+   [
+    8159,
+    29434,
+    58067,
+    39788,
+    21082,
+    3725,
+    48485,
+    44892,
+    60265,
+    21474,
+    16531,
+    1091,
+    17331,
+    26424,
+    12359,
+    26765,
+    30334,
+    60474,
+    21433,
+    44838,
+    18910,
+    12803,
+    7809,
+    38696
+   ]
+  ],
+  "late": null
+ }
+}
