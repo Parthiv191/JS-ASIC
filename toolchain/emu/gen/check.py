@@ -210,28 +210,32 @@ def _wire_bus_events(img, t) -> list[tuple[str, int]]:
 
 def waits_for_master(img, t, et) -> bool:
     """`et`, a lead block's leader whose exit follows the master's bus COND, ends waiting in that
-    COND or in abort_pc's first step after it (a followed COND START/STOP of the master's), with
-    the master halted and no COND of that kind on the wire since that step started."""
+    COND, or in abort_pc's first step after it (an unbounded COND of the master's it follows,
+    T5-abort), with the master halted and no such COND made on the wire since that step started
+    (a START/STOP of that kind; for a FALL/RISE, an edge of its line to that level)."""
     instrs, master = img.instrs(), int(img.lines[img.bus.b].owner)
     if (not et.starts or et.role == Role.MON or int(et.role) == master or not t.engines[master].halted
             or img.bus.kind != BusKind.I2C):
         return False
     pc, cyc = et.starts[-1]
     ins = instrs[pc]
-    if not (ins.op == Op.COND and unpack_cond(ins.operand)[0] in (CondKind.START, CondKind.STOP)
-            and int(ins.owner) == master):
+    if ins.op != Op.COND or int(ins.owner) != master:
         return False
+    kind = CondKind(unpack_cond(ins.operand)[0])
     mine = [(lo, hi) for lo, hi, mask in _lead_blocks(instrs) if mask == 1 << int(et.role)]
     follows = any(instrs[q].op == Op.COND and unpack_cond(instrs[q].operand)[0] in (CondKind.START, CondKind.STOP)
                   and int(instrs[q].owner) == master for lo, hi in mine for q in range(lo, hi))
     first = next((q for q in range(img.abort_pc, len(instrs)) if instrs[q].op in (Op.COND, Op.HOLD, Op.XFER)),
                  None)
-    if not (any(lo <= pc < hi for lo, hi in mine) or follows and pc == first):
+    in_exit = kind in (CondKind.START, CondKind.STOP) and any(lo <= pc < hi for lo, hi in mine)
+    if not (in_exit or follows and pc == first):
         return False
     since = et.cycle_tick[min(max(cyc - 1, 0), len(et.cycle_tick) - 1)] if et.cycle_tick else 0
-    kind = CondKind(unpack_cond(ins.operand)[0]).name
-    return not any(k == kind and tk >= since for k, tk in _wire_bus_events(img, t))
-
+    if kind in (CondKind.START, CondKind.STOP):
+        return not any(k == kind.name and tk >= since for k, tk in _wire_bus_events(img, t))
+    ln = img.lines[ins.line]
+    init, level = (1 if ln.kind == "od" else ln.idle), (0 if kind == CondKind.FALL else 1)
+    return not any(tk >= since and init ^ ((k + 1) & 1) == level for k, tk in enumerate(t.wire_edges[ins.line]))
 
 def bus_mismatches(img, t, ignores: bool = False) -> list[str]:
     """The `bus` oracle on an I2C bus. On the wire, an SDA edge while SCL is high (the tick before

@@ -275,7 +275,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
     COND START/STOP are the edges on `bus_a` (START = FALL, STOP = RISE); on I2C, SCL must be high
     too. On SELECT, a HOLD or RAW SET by CS's owner must keep CS at its level (R1-bus, its own
     walk, which also starts at abort_pc). On I2C, R1-bus: a HOLD, COND FALL/RISE or RAW SET/REL on
-    SDA comes with SCL low or leaves SDA as it is, and a HALT doesn't release SDA with SCL high. Of the
+    SDA comes with SCL low or leaves SDA as it is, and a HALT doesn't release SDA with SCL high (nor,
+    by SCL's owner, SCL before an SDA let-go's release). Of the
     paths from an abort or bus exit into abort_pc, only the others' bus exit from a lead block's
     successor, where its exit makes its own bus COND, is walked (isa §5, open)."""
     instrs = low.instrs
@@ -722,6 +723,15 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                     f"({lines[bus_a].name}), which it may still drive, where SCL "
                                     f"({lines[scl].name}) may be high: a STOP to the others that no COND STOP "
                                     f"times (isa §4.1, §4.7)")
+        # SCL's owner's HALT releases SCL: from low, that is a rise, which another's let-go on SDA
+        # may still be due to release after (as scl_rises)
+        others = [let_go[int(q)][bus_a] for q in _PARTIES]
+        if (any(int(q) == int(lines[scl].owner) for q in qs) and wire(st, scl) != 1
+                and any(_letgo(v) for v in others) and 0 not in others):
+            diags.add("R2-edge", pc, f"HALT by {' and '.join(q.name for q in qs)} releases SCL "
+                                    f"({lines[scl].name}), which may be low, while a let-go may still release "
+                                    f"SDA ({lines[bus_a].name}) after it: an SDA rise with SCL high is a STOP "
+                                    f"to the others (isa §4.1, §4.3, §4.7)")
 
     def gone(q: Role, pc: int, walker: Role) -> bool:
         """q, a lead block's leader, may be away at pc in another party's walk (in its own, it is
