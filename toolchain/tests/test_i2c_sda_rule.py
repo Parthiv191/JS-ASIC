@@ -648,7 +648,7 @@ def test_a_hold_on_scl_drives_at_its_start(level, bad):
         with d.only("ctl"):
             d.raw_delay(104)
         d.hold(scl, level, owner="ctl", prof=d.profile("H", nom=60))
-    assert confirm_flag(window(body), f"HOLD {level}") == bad
+    assert any("before the followers confirm" in m for _, m in diags(window(body))) == bad
 
 
 def test_only_raw_delay_counts_as_a_delay():
@@ -669,3 +669,141 @@ def test_a_lead_hold_moves_the_anchor_not_the_doers_time():
         d.hold(x, 1, owner="ctl", prof=d.profile("H50", nom=50))
         d.raw_set(scl, 0)
     assert confirm_flag(window(body, lead=True, confirm=None), "RAW SET 0")
+
+
+@pytest.mark.parametrize("how", ["HOLD 0", "an XFER"])
+@pytest.mark.parametrize("nom,bad", [(112, True), (113, False)])
+def test_a_lead_hold_moves_the_anchor_by_its_nom(how, nom, bad):
+    """A lead HOLD 1 on x of `nom`, then a HOLD 0 or an unclocked XFER on SCL, which drive at
+    their start, max(t, tb): tb is nom - drift - QUANT, against 107."""
+    def body(d, sda, scl, x, lane, half):
+        d.hold(x, 1, owner="ctl", prof=d.profile(f"H{nom}", nom=nom))
+        if how == "HOLD 0":
+            d.hold(scl, 0, owner="ctl", prof=d.profile("H20", nom=20))
+        else:
+            d.xfer(1, scl, owner="ctl", prof=d.profile("B", nom=60, min=50, max=70), src="zero")
+    assert confirm_flag(window(body, lead=True), how) == bad
+
+
+def test_a_lead_cond_on_another_line_moves_the_time_too():
+    """A lead COND on x of nom 120 acts at tb + 114, past 107: the RAW SET 0 on SCL after it is late
+    enough."""
+    def body(d, sda, scl, x, lane, half):
+        d.cond("fall", x, owner="ctl", prof=prof(d, 120))
+        d.raw_set(scl, 0)
+    assert not any("before the followers confirm" in m for _, m in diags(window(body, lead=True)))
+
+
+@pytest.mark.parametrize("confirm,nom,bad", [(97, 109, True), (97, 110, False), (96, 107, True), (96, 108, False)])
+def test_need_is_the_confirm_window_plus_drift_over_it(confirm, nom, bad):
+    """need = confirm + 1 + QUANT + drift(40000, confirm + 1 + EDGE_LAT): 104 at 97 (drift over 101
+    is 5), 102 at 96 (over 100, 4); a lead COND FALL on SCL comes at nom - drift - QUANT."""
+    d = window(lambda d, sda, scl, x, lane, half: d.cond("fall", scl, owner="ctl", prof=prof(d, nom)),
+               lead=True, confirm=confirm)
+    assert confirm_flag(d, "COND FALL") == bad
+
+
+@pytest.mark.parametrize("delay_first", [False, True])
+def test_two_paths_into_a_pc_keep_both_bounds(delay_first):
+    """One path HOLDs x for 150 (t stays at 10, tb goes to 143), the other waits 90 (t 98, tb 0).
+    After RAW DELAY 10 the first path's RAW SET 0 on SCL comes at 20, the second's past 107: the
+    walk must keep both pairs, in either order."""
+    def body(d, sda, scl, x, lane, half):
+        d.br("b2", cond="nz", reg="r6")
+        if delay_first:
+            d.raw_delay(90)
+        else:
+            d.hold(x, 1, owner="ctl", prof=d.profile("H150", nom=150))
+        d.br("j")
+        d.label("b2")
+        if delay_first:
+            d.hold(x, 1, owner="ctl", prof=d.profile("H150", nom=150))
+        else:
+            d.raw_delay(90)
+        d.label("j")
+        d.raw_delay(10)
+        d.raw_set(scl, 0)
+    assert confirm_flag(window(body, lead=True), "RAW SET 0")
+
+
+
+# ---- the third review
+def own_step_then_scl_low(step):
+    """A START, then the controller's own followed `step` (it finishes a HOLD at its start, an
+    unclocked XFER at its last bit), then at once a RAW SET 0 on SCL in its block."""
+    d = Description("os", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    d.nop()
+    d.cond("start", owner="ctl", prof=w)
+    if step == "hold sda":
+        d.hold(sda, 0, owner="ctl", prof=d.profile("H80", nom=80))
+    elif step == "hold x":
+        d.hold(x, 1, owner="ctl", prof=d.profile("H80", nom=80))
+    else:
+        d.xfer(1, x, owner="ctl", prof=d.profile("B", nom=40, min=36, max=44), src="ones")
+    with d.only("ctl"):
+        d.raw_set(scl, 0)
+    d.cond("fall", x, owner="ctl", prof=w)
+    with d.only("ctl"):
+        d.raw_rel(scl)
+    d.cond("rise", x, owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("step", ["hold sda", "hold x", "xfer x"])
+def test_the_doers_own_hold_or_unclocked_xfer_doesnt_end_the_window(step):
+    """The others are in its step until its sample; the doer is past it at once (found by the third
+    review: on the model the target and MON hang at the START)."""
+    assert confirm_flag(own_step_then_scl_low(step), "RAW SET 0")
+    assert hangs(own_step_then_scl_low(step))
+
+
+@pytest.mark.parametrize("n,P,bad", [(1, 20, True), (1, 40, True), (8, 10, False)])
+def test_a_lead_unclocked_xfer_ends_at_its_last_bit(n, P, bad):
+    """On a lead exit path, an unclocked XFER on z (nobody follows it), then an SCL pulse: its owner
+    is past it at tb + (n - 1) P, and tb moves by n P (8 bits of 10: 80, past the window)."""
+    def body(d, sda, scl, x, lane, half):
+        z = d.line("z", owner="ctl", idle=1)
+        d.xfer(n, z, owner="ctl", prof=d.profile(f"P{P}", nom=P, min=P - 2, max=P + 2), src="ones")
+        d.raw_set(scl, 0)
+        d.raw_delay(2)
+        d.raw_rel(scl)
+    assert confirm_flag(window(body, lead=True, confirm=None), "RAW SET 0") == bad
+
+
+@pytest.mark.parametrize("P,bad", [(112, True), (113, False)])
+def test_a_lead_2_bit_xfer_ends_one_bit_on(P, bad):
+    """2 bits of P on z: its owner is past it at tb + P (less drift and QUANT), against 107."""
+    def body(d, sda, scl, x, lane, half):
+        z = d.line("z", owner="ctl", idle=1)
+        d.xfer(2, z, owner="ctl", prof=d.profile(f"P{P}", nom=P, min=P - 2, max=P + 2), src="ones")
+        d.raw_set(scl, 0)
+    assert confirm_flag(window(body, lead=True), "RAW SET 0") == bad
+
+
+def test_a_lead_unclocked_xfer_moves_the_anchor_by_its_bits():
+    """A bit of 60 on z (tb to 56), then a COND FALL on SCL of 60: it acts at 56 + 56 = 112, past 107."""
+    def body(d, sda, scl, x, lane, half):
+        z = d.line("z", owner="ctl", idle=1)
+        d.xfer(1, z, owner="ctl", prof=d.profile("P60", nom=60, min=58, max=62), src="ones")
+        d.cond("fall", scl, owner="ctl", prof=prof(d, 60))
+    assert not any("before the followers confirm" in m for _, m in diags(window(body, lead=True)))
+
+
+def test_the_doers_followed_clocked_xfer_ends_the_window():
+    """T5-watch has the followers in it by its first edge, so after their confirm: a RAW after it is
+    left to that (here T5-watch rejects the short first bit itself)."""
+    d = Description("cx", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=d.profile("H6", nom=6, min=0, max=INF), src="zero")
+    with d.only("ctl"):
+        d.raw_set(scl, 0)
+        d.raw_rel(scl)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    assert not any("before the followers confirm" in m for _, m in diags(d))

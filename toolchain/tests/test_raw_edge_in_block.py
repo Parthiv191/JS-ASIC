@@ -262,3 +262,85 @@ def test_a_raw_on_a_lead_exit_path_may_make_the_successors_edge():
     d.cond("stop", owner="ctl", prof=w)
     d.halt()
     assert any(r == "R2-edge" and f"RAW SET 0 on x by P0 may take it to 0 {SAYS} COND FALL" in m for r, m in diags(d))
+
+
+def test_the_others_go_past_a_hold_of_the_doer():
+    """a's pulse on x, then a's HOLD on y of 4, then a's COND FALL on x: the followers leave the
+    HOLD at tb + 4 on their own, so they may wait in the COND FALL when the pulse comes."""
+    d = Description("ph", parties=("a", "b"))
+    x = d.line("x", owner="a", idle=1)
+    y = d.line("y", owner="a", idle=1)
+    w = d.profile("W", nom=40, min=30, max=INF)
+    d.nop()
+    with d.only("a"):
+        d.raw_delay(8)
+        d.raw_set(x, 0)
+        d.raw_set(x, 1)
+    d.hold(y, 1, owner="a", prof=d.profile("H4", nom=4))
+    d.cond("fall", x, owner="a", prof=w)
+    d.cond("rise", x, owner="a", prof=w)
+    d.halt()
+    assert any(r == "R2-edge" and f"RAW SET 0 on x by P0 may take it to 0 {SAYS} COND FALL" in m for r, m in diags(d))
+    assert "EARLY" in [e.kind for et in run(d).engines for e in et.events if e.kind in VIOLATIONS]
+
+
+def unclocked(pulse, check, raw_rel_only=False):
+    """b's RAWs on a's OD line x, then a's unclocked XFER on x, with CHK or not."""
+    d = Description("ux", parties=("a", "b"))
+    x = d.line("x", "od", owner="a", idle=1)
+    y = d.line("y", owner="a", idle=1)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    d.nop()
+    d.cond("fall", y, owner="a", prof=w)
+    d.hold(y, 1, owner="a", prof=d.profile("HB", nom=40, min=36, max=44))
+    with d.only("b"):
+        if raw_rel_only:
+            d.raw_rel(x)          # x is released already: no edge
+        elif pulse:
+            d.raw_set(x, 0)
+            d.raw_rel(x)
+        else:
+            d.nop()
+    d.xfer(4, x, owner="a", prof=d.profile("B", nom=40, min=36, max=44), src="zero", **({"check": True} if check else {}))
+    d.halt()
+    return d
+
+
+def test_without_chk_an_unclocked_xfers_followers_dont_watch_its_edges():
+    assert not any(SAYS in m for _, m in diags(unclocked(True, False)))
+    runs_clean(unclocked(True, False))
+
+
+def test_a_raw_that_changes_nothing_is_no_edge_for_chk():
+    assert not any(SAYS in m for _, m in diags(unclocked(False, True, raw_rel_only=True)))
+
+
+
+def test_a_raw_before_a_lead_block_may_make_its_successors_edge():
+    """The controller's pulse on x in its block, then its lead block (a COND on y first), whose
+    successor S is a COND FALL on x: MON skips both blocks and waits in S, so it may take the pulse
+    as S's edge; the walk from the RAW goes on past the lead block's steps to S."""
+    d = Description("lb", parties=("ctl", "tgt"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    x = d.line("x", owner="ctl", idle=1)
+    y = d.line("y", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl)
+    d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    d.abort_to("frame")
+    d.label("frame")
+    d.nop()
+    with d.only("ctl"):
+        d.raw_set(x, 0)
+        d.raw_set(x, 1)
+    with d.lead("ctl"):
+        d.br("go", cond="z", reg="r5")
+        d.cond("fall", y, owner="ctl", prof=w)
+        d.cond("stop", owner="ctl", prof=w)
+        d.br("frame")
+    d.label("go")
+    d.cond("fall", x, owner="ctl", prof=w, abort=True)
+    d.cond("rise", x, owner="ctl", prof=w)
+    d.halt()
+    assert any(r == "R2-edge" and f"RAW SET 0 on x by P0 may take it to 0 {SAYS} COND FALL" in m for r, m in diags(d))

@@ -172,7 +172,9 @@ def bus_mismatches(img, t) -> list[str]:
     each follower's detector must report exactly the STARTs and STOPs its COND START/STOPs took,
     in order (a halted engine detects nothing more), but for one flag per bus exit, which takes a
     flag with no COND: then what they took is in what it saw, in order, with one more for each
-    exit. Kinds and order only: a run where a STOP goes missing and
+    exit (the extra one's kind and place aren't checked, and a COND that takes an exit's flag, as
+    abort_pc's COND START may on a repeated START, would read as a mismatch: no generated program
+    has one). Kinds and order only: a run where a STOP goes missing and
     a stray one comes later matches (the followers then hang on the first, which `completion`
     sees)."""
     instrs, sda, scl = img.instrs(), img.bus.a, img.bus.b
