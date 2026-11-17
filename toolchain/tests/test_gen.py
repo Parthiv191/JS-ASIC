@@ -161,22 +161,24 @@ def test_no_generated_bus_program_breaks_a_structural_rule():
 
 
 def test_bus_programs_draw_every_drive_and_a_fair_share_compiles():
-    """Every kind of plain drive on every bus line, by both parties, and HALTs, are drawn; about one
-    in seven compiles, enough to exercise the oracles."""
+    """Every kind of plain drive on every bus line, by both parties, HALTs and lead blocks of both
+    parties are drawn; about one in seven without lead blocks compiles, enough to exercise the
+    oracles, and some with (most of those break an R3-lead or T rule, as drawn)."""
     from emu.gen.randdesc import random_bus_recipe
-    recipes = [random_bus_recipe(s) for s in range(300)]
+    recipes = [random_bus_recipe(s) for s in range(500)]
     drawn = {(f.kind, f.line, f.owner) for r in recipes for f in r.frames}
     for kind in ("cond", "hold", "raw"):
         assert {(kind, 0, "a"), (kind, 0, "b"), (kind, 1, "a")} <= drawn   # SDA by both, SCL by a
-    assert {("halt", 0, "a"), ("halt", 0, "b"), ("hold", 0, "shared")} <= drawn
+    assert {("halt", 0, "a"), ("halt", 0, "b"), ("hold", 0, "shared"), ("lead", 0, "a"), ("lead", 0, "b")} <= drawn
     accepted = [r for r in recipes if compile_recipe(r)[1] is None]
-    assert len(accepted) >= 40
+    assert len([r for r in accepted if r.abort is None]) >= 40
+    assert len([r for r in accepted if r.abort is not None]) >= 3
     assert any(f.kind == "halt" for r in accepted for f in r.frames)
     assert any(f.kind in ("hold", "raw") and f.line == 0 for r in accepted for f in r.frames)
 
 
 def test_accepted_bus_programs_pass_the_oracles():
-    rep = campaign(seed=3, iters=400, family="i2c")
+    rep = campaign(seed=3, iters=500, family="i2c")
     assert rep.accepted >= 40 and rep.structural == []
     assert [(c.recipe.seed, r.detail) for c, r in rep.failures] == []
 
@@ -282,3 +284,38 @@ def test_a_halt_that_does_nothing_fails_the_bus_campaign(monkeypatch):
     monkeypatch.setattr(engine.Engine, "_op_halt", bad)
     rep = campaign(seed=3, iters=300, family="i2c")
     assert any("completion" in r.rules and "halt in its block" in r.detail for _, r in rep.failures)
+
+
+def lead_cases(seed: int, iters: int):
+    """(recipe, verdict) for the bus family's recipes with lead blocks: each accepted one run once."""
+    import random
+
+    from emu.gen.randdesc import random_bus_recipe
+    rng = random.Random(seed)
+    out = []
+    for _ in range(iters):
+        r = random_bus_recipe(rng.randrange(1 << 30))
+        if r.abort is None or compile_recipe(r)[1] is not None:
+            continue
+        out.append((r, run_case(Case(r, Env.draw(rng, r.ppm)))))
+    return out
+
+
+def test_accepted_lead_programs_pass_the_oracles():
+    """Lead blocks (the library's pairing and blocks of either party at random), with their exits,
+    bus exits and abort_pc. Their first campaigns found five holes, now rules: a followed exit
+    COND's min and a bus exit's abort_pc START's min (EARLY), the leader away while the owner runs
+    on (a stray START), a skipped block's drives, and the others' bus exit into abort_pc (a hang)."""
+    cases = lead_cases(seed=5, iters=3000)
+    assert len(cases) >= 20
+    assert [(r.seed, res.detail) for r, res in cases if res.verdict == "fail"] == []
+
+
+def test_with_r3_lead_planted_off_lead_programs_fail(monkeypatch):
+    """A planted compiler bug: no R3-lead. Accepted lead programs then hang, misframe and misread,
+    which the oracles see."""
+    import emu.compiler as compiler
+    monkeypatch.setattr(compiler, "_check_lead", lambda *a, **k: None)
+    cases = lead_cases(seed=1, iters=1500)
+    failed = [res.rules for _, res in cases if res.verdict == "fail"]
+    assert len(failed) >= 3 and any("completion" in f for f in failed)

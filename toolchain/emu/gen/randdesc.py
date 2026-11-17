@@ -15,7 +15,10 @@ Two families. `random_recipe` draws UART-style frames and clocked XFERs on point
 and ACKs, a STOP or a repeated START) built from clocked XFERs and from plain COND, HOLD and RAW
 drives on SDA, SCL and a spare line, with random drives and edits mixed in and HALTs in role
 blocks. There R1-bus's level walk decides too (isa §5): only COND START/STOP may change SDA while
-SCL may be high."""
+SCL may be high. Some draw lead blocks instead of HALTs (isa §5 R3-lead): the library's pairing
+(the target's block before its ACK, the controller's NACK block after it) and blocks of either
+party at random, each leaving once (a flag in r7) or on a NACK (r0) by an exit whose steps are
+drawn too, back to abort_pc, a START."""
 from __future__ import annotations
 
 import random
@@ -46,8 +49,10 @@ class Line:
 class Frame:
     # "uart": start edge, HOLD, XFER, HOLD back on `line`; "clocked": an XFER on the lane. The bus
     # family's steps: "start" | "stop" (a bus COND), "cond" (`edge` on `line`), "hold" (`level` on
-    # `line`), "raw" (in only(owner): RAW SET `level`, or REL if None), "halt" (in only(owner)) and
-    # "li" (every role: LI `dst`, `imm`, a wire register for `skip_on`)
+    # `line`), "raw" (in only(owner): RAW SET `level`, or REL if None), "halt" (in only(owner)),
+    # "li" (every role: LI `dst`, `imm`, a wire register for `skip_on`; in a lead block, the
+    # leader's) and "lead" (lead(owner): on `on` != 0 the exit, `body`, then abort_pc; the next
+    # frame is its successor S, with ABORT)
     kind: str
     owner: str                     # the step owner (the data line's owner)
     line: int                      # the data line (index into Recipe.lines)
@@ -61,6 +66,9 @@ class Frame:
     edge: str | None = None        # "cond": "fall" | "rise"
     level: int | None = None       # "hold": 0 | 1; "raw": SET 0 | 1, None: REL
     imm: int = 0                   # "li"
+    abort: bool = False            # the step has ABORT (a lead block's successor, or a step in its exit)
+    on: str | None = None          # "lead": the register its exit is taken on (r7: once; r0: an ACK)
+    body: tuple = ()               # "lead": the exit's frames, a bus COND last
 
 
 @dataclass(frozen=True)
@@ -83,16 +91,20 @@ class Recipe:
     ppm: int = 20000
     loops: int = 1                 # the frames run this many times (a backward BR NZ on r0)
     bus: str | None = None         # "i2c": lane.data is SDA and lane.clk SCL (the bus family)
+    abort: int | None = None       # abort_pc's frame (len(frames): the final HALT), with lead blocks
 
     def to_json(self) -> dict:
         return asdict(self)
 
     @staticmethod
     def from_json(d: dict) -> "Recipe":
-        frames = tuple(Frame(**{**f, "prep": tuple(tuple(p) for p in f["prep"]),
-                                "wait": tuple(f["wait"]) if f.get("wait") else None}) for f in d["frames"])
-        return Recipe(d["seed"], tuple(Line(**ln) for ln in d["lines"]), frames, d["P"], d["H"],
-                      Lane(**d["lane"]) if d["lane"] else None, d["ppm"], d.get("loops", 1), d.get("bus"))
+        def frame(f: dict) -> Frame:
+            return Frame(**{**f, "prep": tuple(tuple(p) for p in f["prep"]),
+                            "wait": tuple(f["wait"]) if f.get("wait") else None,
+                            "body": tuple(frame(g) for g in f.get("body", ()))})
+        return Recipe(d["seed"], tuple(Line(**ln) for ln in d["lines"]), tuple(frame(f) for f in d["frames"]),
+                      d["P"], d["H"], Lane(**d["lane"]) if d["lane"] else None, d["ppm"], d.get("loops", 1),
+                      d.get("bus"), d.get("abort"))
 
 
 def random_recipe(seed: int) -> Recipe:
@@ -167,10 +179,11 @@ def random_bus_recipe(seed: int) -> Recipe:
     holds = rng.sample(range(2, 3 * H + 1), 2)
     other = {"a": "b", "b": "a"}
     fr: list[Frame] = []
+    out = [fr]                     # where the helpers below append: fr, or a lead block's exit
     x_level = [1]
 
     def step(kind: str, owner: str, line: int = SDA, **kw) -> None:
-        fr.append(Frame(kind, owner, line, 0, "zero", "discard", **kw))
+        out[0].append(Frame(kind, owner, line, 0, "zero", "discard", **kw))
 
     def cond(line: int, edge: str, owner: str) -> None:
         step("cond", owner, line, edge=edge, wait=rng.choice(waits))
@@ -199,8 +212,8 @@ def random_bus_recipe(seed: int) -> Recipe:
             prep.append(rng.choice((("li", rd, rng.randrange(1 << 16)), ("pop", rd),
                                     ("alu", rng.choice(ALU_OPS), rd, rng.randrange(16)), ("delay", rng.randint(1, 2 * H)))))
         regs = [p[2] if p[0] == "alu" else p[1] for p in prep if p[0] != "delay"]
-        fr.append(Frame("clocked", owner, SDA, n, src or rng.choice(["zero", "ones", "fifo"] + regs),
-                        rng.choice(("discard", "fifo")), rng.random() < 0.5, tuple(prep)))
+        out[0].append(Frame("clocked", owner, SDA, n, src or rng.choice(["zero", "ones", "fifo"] + regs),
+                            rng.choice(("discard", "fifo")), rng.random() < 0.5, tuple(prep)))
 
     def random_drive() -> None:
         line = rng.choice((SDA, SDA, SCL, X))
@@ -278,7 +291,10 @@ def random_bus_recipe(seed: int) -> Recipe:
         elif written and rng.random() < 0.2:
             fr[k] = replace(f, skip_on=rng.choice(written))
     loops = 1
-    if rng.random() < 0.35:  # a party halts in its own block, and no later frame needs it
+    abort = None
+    if random.Random(seed ^ 0x1EAD).random() < LEAD_P:  # its own draw: the other recipes stay as they were
+        fr, abort = add_leads(rng, fr, out, x_owner, step, cond, drive, spare, random_drive, waits)
+    elif rng.random() < 0.35:  # a party halts in its own block, and no later frame needs it
         p = rng.choice(PARTIES)
         stops = [i + 1 for i, f in enumerate(fr) if f.kind == "stop"]
         k = rng.choice(stops) if stops and rng.random() < 0.5 else rng.randrange(len(fr) + 1)
@@ -299,7 +315,129 @@ def random_bus_recipe(seed: int) -> Recipe:
             if left[f.owner] < 0:
                 fr[k] = replace(f, src="ones")
     return Recipe(seed, lines, tuple(fr), H=H, lane=Lane(SDA, SCL, 1, 1, ldelay=ldelay),
-                  ppm=rng.choice((20000, 20000, 5000, 0)), loops=loops, bus="i2c")
+                  ppm=rng.choice((20000, 20000, 5000, 0)), loops=loops, bus="i2c", abort=abort)
+
+
+LEAD_P = 0.4
+
+
+def add_leads(rng, fr, out, x_owner, step, cond, drive, spare, random_drive, waits):
+    """`fr` with lead blocks, and abort_pc's frame. The library's pairing at a target's 1-bit ACK
+    after a byte of the controller's: the target's block before it (once: it waits for the STOP
+    and starts over) and the controller's after it (on the NACK the ACK reads into r0, its STOP);
+    and a block of either party anywhere. Each exit is drawn: the leader's own steps now and then,
+    a bus COND (the controller's), now and then a step after it. The prep registers lose r7, the
+    once flag."""
+    fr = [replace(f, prep=tuple((p[0], "r6", *p[2:]) if p[0] in ("li", "pop") and p[1] == "r7" else
+                                (p[0], p[1], "r6", p[3]) if p[0] == "alu" and p[2] == "r7" else p for p in f.prep),
+                  src="r6" if f.src == "r7" else f.src) for f in fr]
+
+    def exit_of(make) -> tuple:
+        """The exit's frames. A RAW on the push-pull x goes in only(owner) (R3-raw-drive), which a
+        lead block can't hold: none."""
+        out[0] = body = []
+        make()
+        out[0] = fr
+        return tuple(g for g in body if not (g.kind == "raw" and g.line == X))
+
+    def bit(owner: str, n: int, src: str) -> None:
+        out[0].append(Frame("clocked", owner, SDA, n, src, "discard", rng.random() < 0.5))
+
+    def own_steps(p: str) -> None:
+        for _ in range(rng.choice((0, 0, 0, 1, 2))):
+            r = rng.random()
+            if r < 0.3 and x_owner == p:
+                spare()
+            elif r < 0.65:
+                bit(p, 1 if rng.random() < 0.85 else 8, "ones" if rng.random() < 0.8 else "zero")
+            elif r < 0.9:
+                out[0].append(Frame("li", p, SDA, 0, "zero", "r6", imm=1))
+            else:
+                random_drive()
+
+    def tail(p: str) -> None:
+        if rng.random() < 0.1:  # after the bus COND: rejected, but some are drawn
+            own_steps(p) if rng.random() < 0.5 else out[0].append(Frame("li", p, SDA, 0, "zero", "r6"))
+
+    def followed_wait():
+        """A followed exit COND's owner makes it on its own timeline: min 0 (R3-lead), mostly."""
+        nom, lo = rng.choice(waits)
+        return (nom, 0) if rng.random() < 0.85 else (nom, lo)
+
+    def target_block() -> Frame:
+        def make():
+            own_steps("b")
+            step("stop", "a", wait=followed_wait(), abort=rng.random() < 0.15)
+            tail("b")
+        return Frame("lead", "b", SDA, 0, "zero", "discard", on="r7", body=exit_of(make))
+
+    def controller_block(on: str) -> Frame:
+        def make():
+            own_steps("a")
+            end = rng.random()
+            if end < 0.45:   # the library's STOP: a ZERO bit, then SDA up
+                bit("a", 1, "zero")
+            elif end < 0.9:  # by hand: SCL low, SDA low, SCL high
+                cond(SCL, "fall", "a")
+                drive(SDA, 0, "a")
+                cond(SCL, "rise", "a")
+            step("stop", "a", wait=rng.choice(waits))
+            tail("a")
+        return Frame("lead", "a", SDA, 0, "zero", "discard", on=on, body=exit_of(make))
+
+    def any_block() -> Frame:
+        p = rng.choice(PARTIES)
+
+        def make():
+            for _ in range(rng.randint(0, 2)):
+                own_steps(p) if rng.random() < 0.8 else random_drive()
+            step(rng.choice(("stop", "stop", "start")), "a", wait=followed_wait() if p == "b" else rng.choice(waits),
+                 abort=rng.random() < 0.1)
+            tail(p)
+        return Frame("lead", p, SDA, 0, "zero", "discard", on="r7", body=exit_of(make))
+
+    def timed(f: Frame) -> bool:
+        return f.kind in ("clocked", "cond", "start", "stop", "hold")
+
+    new: list[Frame] = []
+    for k, f in enumerate(fr):
+        ack = (f.kind == "clocked" and f.n == 1 and f.owner == "b" and k > 0
+               and fr[k - 1].kind == "clocked" and fr[k - 1].owner == "a")
+        paired = False
+        if ack and rng.random() < 0.5:
+            new.append(target_block())
+            f, paired = replace(f, skip_on=None, prep=()), True
+        nxt = fr[k + 1] if k + 1 < len(fr) else None
+        byte = nxt is not None and nxt.kind == "clocked" and nxt.n >= 4   # the library's: before the next byte
+        if ack and byte and rng.random() < (0.8 if paired else 0.4):
+            new += [replace(f, dst="r0", src="zero"), controller_block("r0")]
+            fr[k + 1] = replace(nxt, skip_on=None, prep=())
+            continue
+        new.append(f)
+    if not any(f.kind == "lead" for f in new) or rng.random() < 0.3:
+        spots = [i for i, f in enumerate(new) if timed(f) and f.kind != "lead"]
+        if spots:
+            i = rng.choice(spots)
+            new[i] = replace(new[i], skip_on=None, prep=())
+            new.insert(i, any_block())
+    if not any(f.kind == "lead" for f in new):
+        return new, None
+    first = min(i for i, f in enumerate(new) if f.kind == "lead")
+    starts = [i for i, f in enumerate(new) if f.kind == "start"]
+    before, after = [i for i in starts if i < first], [i for i in starts if i > first]
+    # back to the transaction's START (a retry), or on to the next one, where a STOP falls into
+    # it: with a target's block, whose followed STOP's owner must go on at abort_pc, mostly that
+    t_led = any(f.kind == "lead" and f.owner == "b" for f in new)
+    if before and (not after or rng.random() < (0.2 if t_led else 0.5)):
+        abort = before[-1] if rng.random() < 0.8 else rng.choice(before)
+    else:
+        abort = after[0] if after else 0
+    # every register is tainted at abort_pc (R2): no branch on a wire register from there on
+    new = [replace(f, skip_on=None) if i >= abort else f for i, f in enumerate(new)]
+    # a bus exit re-anchors at abort_pc's START, whose min must then be 0 (T5-abort): mostly so
+    if abort < len(new) and new[abort].kind == "start" and new[abort].wait and rng.random() < 0.85:
+        new[abort] = replace(new[abort], wait=(new[abort].wait[0], 0))
+    return new, abort
 
 
 def build(r: Recipe) -> Description:
@@ -327,54 +465,80 @@ def build(r: Recipe) -> Description:
     def wait_kw(f: Frame) -> dict:
         return {"prof": prof(f.wait[0], f.wait[1], INF)} if f.wait else {}
 
-    for reg in WIRE_REGS:
-        d.li(reg, 0)
-    if r.loops > 1:
-        d.li("r0", r.loops)
-        d.label("top")
-    for i, f in enumerate(r.frames):
+    def emit(f: Frame, i, in_block: bool = False, abort: bool = False) -> None:
+        """One frame. In a lead block (the leader's exit) RAW and prep go in directly."""
         if f.skip_on is not None:
             d.br(f"after{i}", cond="nz", reg=f.skip_on)
-        if f.prep or f.kind in ("raw", "halt"):
+        ab = {"abort": True} if abort or f.abort else {}
+        if (f.prep or f.kind in ("raw", "halt")) and not in_block:
             with d.only(f.owner):
-                for p in f.prep:
-                    if p[0] == "li":
-                        d.li(p[1], p[2])
-                    elif p[0] == "pop":
-                        d.pop(p[1])
-                    elif p[0] == "alu":
-                        d.alu(p[1], p[2], p[2], p[3])
-                    else:
-                        d.raw_delay(p[1])
-                if f.kind == "raw" and f.level is None:
-                    d.raw_rel(refs[f.line])
-                elif f.kind == "raw":
-                    d.raw_set(refs[f.line], f.level)
-                elif f.kind == "halt":
-                    d.halt()
+                steps_of(f)
+        elif in_block:
+            steps_of(f)
         if f.kind == "uart":
             ln = refs[f.line]
             idle = r.lines[f.line].idle
             wait = d.profile(f"W{i}", nom=f.wait[0], min=f.wait[1], max=INF) if f.wait else None
-            d.cond("fall" if idle else "rise", ln, owner=f.owner, **({"prof": wait} if wait else {}))
+            d.cond("fall" if idle else "rise", ln, owner=f.owner, **({"prof": wait} if wait else {}), **ab)
             d.hold(ln, 1 - idle, owner=f.owner, prof=bit)
             d.xfer(f.n, ln, owner=f.owner, prof=bit, src=f.src, dst=f.dst, msb_first=f.msb)
             d.hold(ln, idle, owner=f.owner, prof=bit)
         elif f.kind == "clocked":
-            d.xfer(f.n, lane, owner=f.owner, prof=half, src=f.src, dst=f.dst, msb_first=f.msb)
+            d.xfer(f.n, lane, owner=f.owner, prof=half, src=f.src, dst=f.dst, msb_first=f.msb, **ab)
         elif f.kind in ("start", "stop"):
-            d.cond(f.kind, owner=f.owner, **wait_kw(f))
+            d.cond(f.kind, owner=f.owner, **wait_kw(f), **ab)
         elif f.kind == "cond":
-            d.cond(f.edge, refs[f.line], owner=f.owner, **wait_kw(f))
+            d.cond(f.edge, refs[f.line], owner=f.owner, **wait_kw(f), **ab)
         elif f.kind == "hold":
             nom = f.wait[0] if f.wait else r.H   # (the shrinker drops `wait`)
-            d.hold(refs[f.line], f.level, owner=f.owner, prof=prof(nom, nom, nom))
+            d.hold(refs[f.line], f.level, owner=f.owner, prof=prof(nom, nom, nom), **ab)
         elif f.kind == "li":
             d.li(f.dst, f.imm)
+        elif f.kind == "lead":
+            with d.lead(f.owner):
+                d.br(f"s{i}", cond="z", reg=f.on)
+                if f.on == "r7":
+                    d.li("r7", 0)
+                for k, g in enumerate(f.body):
+                    emit(g, f"{i}_{k}", in_block=True)
+                d.br("abort")
+            d.label(f"s{i}")
         if f.skip_on is not None:
             d.label(f"after{i}")
             if f.kind in ("raw", "halt"):
                 d.nop()  # or a next block of the same party's merges with this one, and the label is in it
+
+    def steps_of(f: Frame) -> None:
+        for p in f.prep:
+            if p[0] == "li":
+                d.li(p[1], p[2])
+            elif p[0] == "pop":
+                d.pop(p[1])
+            elif p[0] == "alu":
+                d.alu(p[1], p[2], p[2], p[3])
+            else:
+                d.raw_delay(p[1])
+        if f.kind == "raw" and f.level is None:
+            d.raw_rel(refs[f.line])
+        elif f.kind == "raw":
+            d.raw_set(refs[f.line], f.level)
+        elif f.kind == "halt":
+            d.halt()
+
+    for reg in WIRE_REGS:
+        d.li(reg, 0)
+    if r.abort is not None:
+        d.abort_to("abort")
+        d.li("r7", 1)   # the once flag of every lead block
+    if r.loops > 1:
+        d.li("r0", r.loops)
+        d.label("top")
+    for i, f in enumerate(r.frames):
+        if i == r.abort:
+            d.label("abort")
+        emit(f, i, abort=i > 0 and r.frames[i - 1].kind == "lead")
+    if r.abort == len(r.frames):
+        d.label("abort")
     if r.loops > 1:
         d.alu("sub", "r0", "r0", 1)
         d.br("top", cond="nz", reg="r0")

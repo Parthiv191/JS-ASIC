@@ -51,7 +51,7 @@ def test_r1_accepts_shared_on_od():
     d, pp, od, p = base()
     d.hold(od, 0, owner="shared", prof=p)
     d.halt()
-    compile_desc(d, check_timing=False)
+    compile_desc(d, check_timing=False, check_levels=False)   # (R2-edge: the HALT releases it in the HOLD's slot)
 
 
 def test_r1_rejects_clock_line_without_party_owner():
