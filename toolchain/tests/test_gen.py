@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import emu.model.engine as engine
+from emu.compiler import compile_desc
 from emu.gen.check import Case, Env, campaign, compile_recipe, run_case, shrink
 from emu.gen.randdesc import random_recipe
 
@@ -138,3 +139,146 @@ def test_a_pop_that_doesnt_wait_fails_only_with_a_late_host(monkeypatch):
     assert any("value" in r.rules for _, r in campaign(seed=5, iters=120, envs=3).failures)
     monkeypatch.setattr(check, "underrun_free", lambda r: False)  # no late host
     assert campaign(seed=5, iters=120, envs=3).failures == []
+
+
+# ---- the bus family: I2C programs with plain drives and HALTs (emu/gen/randdesc.py)
+def test_bus_recipes_are_deterministic_and_round_trip():
+    import random
+    from emu.gen.randdesc import random_bus_recipe
+    assert random_bus_recipe(12345) == random_bus_recipe(12345) != random_bus_recipe(12346)
+    r = random_bus_recipe(77)
+    case = Case(r, Env.draw(random.Random(1), r.ppm))
+    assert Case.from_json(case.to_json()) == case
+
+
+def test_no_generated_bus_program_breaks_a_structural_rule():
+    """R1-bus's structural part (a bus COND by SCL's owner, SDA changed only by its lane), R1-owner,
+    R3-raw-drive (RAW in a role block without MON) and S hold by construction."""
+    from emu.gen.randdesc import random_bus_recipe
+    bad = [(s, res.rules) for s in range(300) if (res := compile_recipe(random_bus_recipe(s))[1]) is not None
+           and res.verdict == "structural"]
+    assert bad == []
+
+
+def test_bus_programs_draw_every_drive_and_a_fair_share_compiles():
+    """Every kind of plain drive on every bus line, by both parties, and HALTs, are drawn; about one
+    in seven compiles, enough to exercise the oracles."""
+    from emu.gen.randdesc import random_bus_recipe
+    recipes = [random_bus_recipe(s) for s in range(300)]
+    drawn = {(f.kind, f.line, f.owner) for r in recipes for f in r.frames}
+    for kind in ("cond", "hold", "raw"):
+        assert {(kind, 0, "a"), (kind, 0, "b"), (kind, 1, "a")} <= drawn   # SDA by both, SCL by a
+    assert {("halt", 0, "a"), ("halt", 0, "b"), ("hold", 0, "shared")} <= drawn
+    accepted = [r for r in recipes if compile_recipe(r)[1] is None]
+    assert len(accepted) >= 40
+    assert any(f.kind == "halt" for r in accepted for f in r.frames)
+    assert any(f.kind in ("hold", "raw") and f.line == 0 for r in accepted for f in r.frames)
+
+
+def test_accepted_bus_programs_pass_the_oracles():
+    rep = campaign(seed=3, iters=400, family="i2c")
+    assert rep.accepted >= 40 and rep.structural == []
+    assert [(c.recipe.seed, r.detail) for c, r in rep.failures] == []
+
+
+def test_without_the_level_walk_bus_programs_fail_and_some_only_the_bus_oracle(monkeypatch):
+    """A planted compiler bug: no R2-edge or R1-bus walk. Accepted programs then hang, misread and
+    make STARTs and STOPs no COND made; some of those stray edges fail no oracle but `bus` (the
+    followers' detectors may not even confirm one), and a shrunk one stays small."""
+    import emu.gen.check as check
+    real = check.compile_desc
+    monkeypatch.setattr(check, "compile_desc",
+                        lambda d, **kw: real(d, **{**kw, "check_levels": False}) if kw.get("check_levels", True)
+                        else real(d, **kw))
+    rep = campaign(seed=1, iters=150, family="i2c")
+    rules = [res.rules for _, res in rep.failures]
+    assert len(rules) >= 10 and ("bus",) in rules
+    case = next(c for c, res in rep.failures if res.rules == ("bus",))
+    small = shrink(case)
+    assert run_case(small).rules == ("bus",) and len(small.recipe.frames) <= len(case.recipe.frames)
+
+
+def test_a_planted_follower_bug_fails_the_bus_campaign(flipped_followers):
+    rep = campaign(seed=5, iters=60, family="i2c")
+    assert any("agreement" in r.rules for _, r in rep.failures)
+
+
+# ---- the review of the bus family
+def nacked():
+    """The target NACKs; the controller's lead block STOPs and branches to abort_pc, and the
+    target and MON, in the block's successor with ABORT, take the STOP as a bus exit."""
+    from emu.desc import Description
+    from emu.isa import INF
+    d = Description("nx", parties=("ctl", "tgt"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=2)
+    half = d.profile("HALF", nom=20, min=0, max=INF)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    d.abort_to("done")
+    d.nop()
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(8, lane, owner="ctl", prof=half, src="zero", abort=True)
+    d.xfer(1, lane, owner="tgt", prof=half, src="ones", dst="r4", abort=True)   # a NACK
+    with d.lead("ctl"):
+        d.br("ok", cond="z", reg="r4")
+        d.xfer(1, lane, owner="ctl", prof=half, src="zero", abort=True)
+        d.cond("stop", owner="ctl", prof=w)
+        d.br("done")
+    d.label("ok")
+    d.xfer(8, lane, owner="tgt", prof=half, src="ones", abort=True)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero", abort=True)
+    d.cond("stop", owner="ctl", prof=w)
+    d.label("done")
+    d.halt()
+    return d
+
+
+def bus_run(d):
+    from emu.isa import Role
+    from emu.model.system import EngineSpec, System
+    img = compile_desc(d)
+    return img, System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+
+
+def test_the_bus_oracle_lets_a_bus_exit_take_its_flag():
+    """Their detectors saw a STOP that no COND STOP of theirs took, which is right."""
+    from emu.gen.check import bus_mismatches
+    img, t = bus_run(nacked())
+    assert [any(e.kind == "BUS" for e in et.events) for et in t.engines] == [False, True, True]
+    assert bus_mismatches(img, t) == []
+
+
+def test_a_detector_that_reports_twice_fails_the_bus_oracle(monkeypatch):
+    """A planted model bug: each confirmed START or STOP is logged twice. The flags work as before,
+    so every role completes and agrees; only the detector comparison sees it, also in an engine
+    that took a bus exit (found by the re-review: such an engine wasn't compared at all)."""
+    from emu.gen.check import bus_mismatches
+    orig = engine.Engine._confirm_candidate
+
+    def bad(self):
+        ok = orig(self)
+        self.bus_events.append(self.bus_events[-1])
+        return ok
+    monkeypatch.setattr(engine.Engine, "_confirm_candidate", bad)
+    img, t = bus_run(nacked())
+    assert {m.split(":")[0] for m in bus_mismatches(img, t)} == {"P1", "MON"}
+    rep = campaign(seed=3, iters=150, family="i2c")
+    assert rep.failures and all(r.rules == ("bus",) for _, r in rep.failures)
+
+
+def test_a_halt_that_does_nothing_fails_the_bus_campaign(monkeypatch):
+    """A planted model bug: HALT anywhere but the last word is a NOP. Every role still agrees and
+    halts at the end, so only the recipe's own halts see it (found by the review)."""
+    orig = engine.Engine._op_halt
+
+    def bad(self, ins):
+        if self.pc != len(self.instrs) - 1:
+            self.pc += 1
+            yield
+        else:
+            yield from orig(self, ins)
+    monkeypatch.setattr(engine.Engine, "_op_halt", bad)
+    rep = campaign(seed=3, iters=300, family="i2c")
+    assert any("completion" in r.rules and "halt in its block" in r.detail for _, r in rep.failures)

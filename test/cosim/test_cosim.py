@@ -465,14 +465,15 @@ async def test_role_branches(dut):
 
 # ---------------------------------------------------------------- random programs (emu/gen)
 RANDOM_RUNS = int(os.environ.get("COSIM_RANDOM", "24"))
+RANDOM_BUS_RUNS = int(os.environ.get("COSIM_RANDOM_BUS", "12"))
 
 
-def random_case(k: int):
-    """The k-th random program for co-sim: the first recipe from seed 1000 + 100 k that the
-    compiler accepts and whose RTL party needs at most 4 host words (all the harness writes before
-    RUN), the RTL in role k mod 3, the peers at a tolerance corner (slow on odd k)."""
-    from emu.gen.check import compile_recipe
-    from emu.gen.randdesc import random_recipe
+def random_case(k: int, family: str = "lines"):
+    """The k-th random program of `family` for co-sim: the first recipe from seed 1000 + 100 k that
+    the compiler accepts and whose RTL party needs at most 4 host words (all the harness writes
+    before RUN), the RTL in role k mod 3, the peers at a tolerance corner (slow on odd k)."""
+    from emu.gen.check import FAMILIES, compile_recipe
+    random_recipe = FAMILIES[family]
     role = (Role.P0, Role.P1, Role.MON)[k % 3]
     party = {Role.P0: "a", Role.P1: "b"}.get(role)
 
@@ -499,6 +500,18 @@ async def test_random_program(dut, k):
     peers: what the oracles on the model can't see, such as a latency every model role shares, shows
     here. COSIM_RANDOM sets the count."""
     r, rep, role = random_case(k)
+    assert rep.expected, f"recipe {r.seed}: nothing to compare"
+    assert not rep.trace.contention, f"recipe {r.seed}: contention on the model"
+    await cosim(dut, rep, role)
+
+
+@cocotb.test()
+@cocotb.parametrize(k=list(range(RANDOM_BUS_RUNS)))
+async def test_random_bus_program(dut, k):
+    """A random I2C program (emu/gen's bus family: plain drives on SDA and SCL by both parties,
+    HALTs in role blocks) in one role: the RTL's detector and OD drives against the model's.
+    COSIM_RANDOM_BUS sets the count."""
+    r, rep, role = random_case(k, "i2c")
     assert rep.expected, f"recipe {r.seed}: nothing to compare"
     assert not rep.trace.contention, f"recipe {r.seed}: contention on the model"
     await cosim(dut, rep, role)

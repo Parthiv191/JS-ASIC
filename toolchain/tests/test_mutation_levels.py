@@ -385,12 +385,16 @@ def test_an_unclocked_od_xfer_from_a_register_leaves_its_line_unknown():
 
 
 def test_raw_set_1_drives_the_line_high():
+    """(A COND on y between: the others skip a's block and wait in the next timed step, and would
+    take the pulse on x as a COND FALL on x's edge, R2-edge.)"""
     d = Description("r1", parties=("a", "b"))
     x = d.line("x", owner="a", idle=1)
+    y = d.line("y", owner="a", idle=1)
     w = d.profile("W", nom=20, min=0, max=INF)
     with d.only("a"):
         d.raw_set(x, 0)
         d.raw_set(x, 1)
+    d.cond("fall", y, owner="a", prof=w)
     d.cond("fall", x, owner="a", prof=w)
     d.cond("rise", x, owner="a", prof=w)
     d.halt()
@@ -398,9 +402,11 @@ def test_raw_set_1_drives_the_line_high():
 
 
 def test_raw_rel_releases_an_od_line_where_paths_meet():
-    """One path RAW SETs s low and RAW RELs it, the other leaves it: released on both."""
+    """One path RAW SETs s low and RAW RELs it, the other leaves it: released on both. (A COND on
+    y between, as above.)"""
     d = Description("rr", parties=("a", "b"))
     s = d.line("s", "od", owner="a", idle=1)
+    y = d.line("y", owner="a", idle=1)
     w = d.profile("W", nom=20, min=0, max=INF)
     d.li("r3", 0)
     d.br("skip", "nz", "r3")
@@ -408,6 +414,7 @@ def test_raw_rel_releases_an_od_line_where_paths_meet():
         d.raw_set(s, 0)
         d.raw_rel(s)
     d.label("skip")
+    d.cond("fall", y, owner="a", prof=w)
     d.cond("fall", s, owner="a", prof=w)
     d.cond("rise", s, owner="a", prof=w)
     d.halt()

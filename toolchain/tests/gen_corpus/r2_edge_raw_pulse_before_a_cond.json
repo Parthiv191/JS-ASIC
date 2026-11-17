@@ -1,0 +1,241 @@
+{
+ "recipe": {
+  "seed": 352936483,
+  "lines": [
+   {
+    "name": "sda",
+    "kind": "od",
+    "owner": "shared",
+    "idle": 1
+   },
+   {
+    "name": "scl",
+    "kind": "od",
+    "owner": "a",
+    "idle": 1
+   },
+   {
+    "name": "x",
+    "kind": "pp",
+    "owner": "a",
+    "idle": 1
+   }
+  ],
+  "frames": [
+   {
+    "kind": "raw",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": 0,
+    "imm": 0
+   },
+   {
+    "kind": "raw",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     46,
+     33
+    ],
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     46,
+     33
+    ],
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "hold",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": 0,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "stop",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   }
+  ],
+  "P": 20,
+  "H": 27,
+  "lane": {
+   "data": 0,
+   "clk": 1,
+   "cpol": 1,
+   "cpha": 1,
+   "ldelay": 1
+  },
+  "ppm": 5000,
+  "loops": 1,
+  "bus": "i2c"
+ },
+ "env": {
+  "clocks": [
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ]
+  ],
+  "phases": [
+   0,
+   0,
+   0
+  ],
+  "words": [
+   [
+    12786,
+    23206,
+    19626,
+    32037,
+    40075,
+    18941,
+    49190,
+    37150,
+    26566,
+    17605,
+    25632,
+    8121,
+    14251,
+    54094,
+    31578,
+    8465,
+    64990,
+    19916,
+    30541,
+    59028,
+    17375,
+    13173,
+    39822,
+    56891
+   ],
+   [
+    5951,
+    3225,
+    3175,
+    6130,
+    31845,
+    48970,
+    3924,
+    33954,
+    936,
+    15472,
+    64781,
+    57667,
+    14954,
+    32245,
+    53107,
+    6494,
+    23482,
+    52653,
+    11577,
+    61804,
+    6589,
+    24539,
+    33195,
+    34918
+   ]
+  ],
+  "late": null
+ }
+}

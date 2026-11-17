@@ -1,5 +1,6 @@
-"""`python -m emu.gen run --iters N --seed S [--out DIR]`: a campaign of random programs. Each
-failure is shrunk and saved as `DIR/<oracles>-<seed>.json`; exit 1 if any.
+"""`python -m emu.gen run --iters N --seed S [--family lines|i2c] [--out DIR]`: a campaign of random
+programs (`lines`: UART frames and clocked lanes; `i2c`: bus programs with plain drives and HALTs).
+Each failure is shrunk and saved as `DIR/<oracles>-<seed>.json`; exit 1 if any.
 `python -m emu.gen replay FILE...`: run saved cases again; exit 1 if any fails."""
 from __future__ import annotations
 
@@ -7,7 +8,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .check import Case, campaign, run_case, shrink
+from .check import FAMILIES, Case, campaign, run_case, shrink
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,6 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--iters", type=int, default=500)
     r.add_argument("--seed", type=int, default=1)
     r.add_argument("--envs", type=int, default=2, help="environments per accepted program")
+    r.add_argument("--family", choices=sorted(FAMILIES), default="lines")
     r.add_argument("--out", type=Path, default=Path("gen-out"))
     p = sub.add_parser("replay")
     p.add_argument("files", nargs="+", type=Path)
@@ -28,8 +30,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{f.name}: {res.verdict} {' '.join(res.rules)}")
             bad += res.verdict in ("fail", "structural")
         return 1 if bad else 0
-    rep = campaign(a.seed, a.iters, a.envs)
-    print(f"{a.iters} recipes from seed {a.seed}: {rep.accepted} accepted, {rep.runs} runs, "
+    rep = campaign(a.seed, a.iters, a.envs, a.family)
+    print(f"{a.iters} {a.family} recipes from seed {a.seed}: {rep.accepted} accepted, {rep.runs} runs, "
           f"{len(rep.failures)} failures, {len(rep.structural)} generator bugs")
     print("rejected by: " + ", ".join(f"{k} {v}" for k, v in sorted(rep.rejected.items(), key=lambda x: -x[1])))
     if rep.failures or rep.structural:

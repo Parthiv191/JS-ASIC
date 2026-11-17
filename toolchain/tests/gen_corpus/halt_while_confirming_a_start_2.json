@@ -1,0 +1,259 @@
+{
+ "recipe": {
+  "seed": 459536717,
+  "lines": [
+   {
+    "name": "sda",
+    "kind": "od",
+    "owner": "shared",
+    "idle": 1
+   },
+   {
+    "name": "scl",
+    "kind": "od",
+    "owner": "a",
+    "idle": 1
+   },
+   {
+    "name": "x",
+    "kind": "pp",
+    "owner": "b",
+    "idle": 1
+   }
+  ],
+  "frames": [
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "raw",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": 0,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "stop",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "halt",
+    "owner": "b",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "start",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     18,
+     6
+    ],
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     18,
+     6
+    ],
+    "edge": "fall",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "cond",
+    "owner": "a",
+    "line": 1,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": [
+     18,
+     6
+    ],
+    "edge": "rise",
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "stop",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   }
+  ],
+  "P": 20,
+  "H": 26,
+  "lane": {
+   "data": 0,
+   "clk": 1,
+   "cpol": 1,
+   "cpha": 1,
+   "ldelay": 12
+  },
+  "ppm": 0,
+  "loops": 1,
+  "bus": "i2c"
+ },
+ "env": {
+  "clocks": [
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ]
+  ],
+  "phases": [
+   0,
+   0,
+   0
+  ],
+  "words": [
+   [
+    43213,
+    23714,
+    33281,
+    9926,
+    34816,
+    16195,
+    10981,
+    63192,
+    15047,
+    44989,
+    46592,
+    25742,
+    32344,
+    60206,
+    54181,
+    39806,
+    16686,
+    57430,
+    1625,
+    50430,
+    14128,
+    20763,
+    6398,
+    14346
+   ],
+   [
+    14417,
+    9427,
+    34610,
+    51073,
+    41895,
+    21190,
+    46463,
+    36217,
+    54543,
+    51986,
+    50082,
+    6352,
+    30740,
+    19994,
+    27839,
+    47046,
+    42332,
+    26054,
+    44116,
+    30517,
+    23519,
+    13129,
+    48750,
+    48178
+   ]
+  ],
+  "late": null
+ }
+}

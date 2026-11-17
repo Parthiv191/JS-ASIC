@@ -1,0 +1,175 @@
+{
+ "recipe": {
+  "seed": 562103891,
+  "lines": [
+   {
+    "name": "sda",
+    "kind": "od",
+    "owner": "shared",
+    "idle": 1
+   },
+   {
+    "name": "scl",
+    "kind": "od",
+    "owner": "a",
+    "idle": 1
+   },
+   {
+    "name": "x",
+    "kind": "pp",
+    "owner": "b",
+    "idle": 1
+   }
+  ],
+  "frames": [
+   {
+    "kind": "start",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "clocked",
+    "owner": "b",
+    "line": 0,
+    "n": 8,
+    "src": "fifo",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "clocked",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   },
+   {
+    "kind": "stop",
+    "owner": "a",
+    "line": 0,
+    "n": 1,
+    "src": "zero",
+    "dst": "discard",
+    "msb": false,
+    "prep": [],
+    "skip_on": null,
+    "wait": null,
+    "edge": null,
+    "level": null,
+    "imm": 0
+   }
+  ],
+  "P": 20,
+  "H": 32,
+  "lane": {
+   "data": 0,
+   "clk": 1,
+   "cpol": 1,
+   "cpha": 1,
+   "ldelay": 1
+  },
+  "ppm": 0,
+  "loops": 1,
+  "bus": "i2c"
+ },
+ "env": {
+  "clocks": [
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    1
+   ]
+  ],
+  "phases": [
+   0,
+   0,
+   0
+  ],
+  "words": [
+   [
+    4326,
+    20164,
+    65151,
+    57218,
+    39499,
+    48044,
+    53175,
+    46665,
+    25951,
+    37563,
+    36735,
+    34636,
+    63348,
+    20009,
+    46738,
+    18546,
+    51084,
+    8019,
+    9469,
+    34106,
+    9876,
+    64700,
+    27286,
+    59485
+   ],
+   [
+    40306,
+    5277,
+    35242,
+    44184,
+    560,
+    64932,
+    56548,
+    56540,
+    55527,
+    48054,
+    63694,
+    25372,
+    56695,
+    51325,
+    37910,
+    12599,
+    10603,
+    21112,
+    44192,
+    47887,
+    56283,
+    50070,
+    16135,
+    49337
+   ]
+  ],
+  "late": null
+ }
+}
