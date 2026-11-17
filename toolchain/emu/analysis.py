@@ -803,10 +803,10 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 row.append(ln.idle)
         init.append(tuple(row))
     # A lead block whose exits make their own bus COND (R3-lead): the others, waiting in its
-    # successor S, leave it by a bus exit for abort_pc. Their drives there are as they entered S (the
-    # block is the leader's alone), and the leader's are its exit's: the joint state its own walk
-    # carries to abort_pc along the exit. So the leader's walk goes first and keeps that state, and
-    # the others' walks go on from S to abort_pc with it.
+    # successor S, leave it by a bus exit for abort_pc. The leader's drives there are its exit's (its
+    # own walk carries them to abort_pc along the exit, so it goes first and keeps them); the others'
+    # are theirs in S, which may have driven some (a PP data bit at a cpha 0 start), and the bus
+    # exit releases their OD lines and shuts their gates (isa §4.1, §4.7).
     apc = img.abort_pc if any(_aborts(ins) for ins in instrs) else None
     own_exit = {sp.end: sp for sp in low.spans if sp.lead and apc is not None and sp.end < len(instrs)
                 and any(instrs[q].op == Op.COND
@@ -819,7 +819,8 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         work = [0]
         while work:
             pc = work.pop()
-            st = [list(row) for row in state[pc]]
+            entry = state[pc]
+            st = [list(row) for row in entry]
             ins = instrs[pc]
             mine = r in runs(pc) and does(ins.owner, r)
             if ins.op == Op.COND and r in runs(pc):
@@ -900,7 +901,19 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 exit_state[ex.end] = out if kept is None else tuple(
                     tuple(_join(x, y) for x, y in zip(o, n)) for o, n in zip(kept, out))
             if pc in own_exit and r not in own_exit[pc].roles and pc in exit_state:
-                nexts.append((apc, exit_state[pc]))   # r in S, left by a bus exit
+                rows = []                            # r in S, left by a bus exit
+                for q in _PARTIES:
+                    if q in own_exit[pc].roles:
+                        rows.append(exit_state[pc][int(q)])
+                        continue
+                    row = [_join(a, b) for a, b in zip(entry[int(q)], out[int(q)])]
+                    for i, ln in enumerate(lines):
+                        if ln.kind == "od":
+                            row[i] = 1
+                        elif ln.gated and int(ln.owner) == int(q):
+                            row[i] = _SHUT
+                    rows.append(tuple(row))
+                nexts.append((apc, tuple(rows)))
             for s, o_ in nexts:
                 old = state.get(s)
                 new = o_ if old is None else tuple(tuple(_join(x, y) for x, y in zip(o, n))
@@ -1228,6 +1241,10 @@ def check_timing(desc, low: Lowered) -> list[Diagnostic]:
     aborting = {r for s in steps.values() if s.abort for r in ROLES if not s.does(r)}
     apc = low.image.abort_pc
     bus_on = int(low.image.bus.kind) != 0
+    if bus_on:  # a bus exit takes any role but the master's out of a step with ABORT, its data owner too
+        master_ln = low.image.bus.b if low.image.bus.kind == BusKind.I2C else low.image.bus.a
+        aborting |= {r for s in steps.values() if s.abort for r in ROLES
+                     if r == Role.MON or int(r) != int(low.image.lines[master_ln].owner)}
     # FZ ops that cost more than U on the way to that step: the timing rules don't time the path
     # from an abort or a bus exit into abort_pc, so its 40-48 cycles could miss the re-sync
     no_fz = [Instr(Op.NOP) if ins.op == Op.FZ else ins for ins in instrs]

@@ -391,8 +391,8 @@ def add_leads(rng, fr, out, x_owner, step, cond, drive, spare, random_drive, wai
         def make():
             for _ in range(rng.randint(0, 2)):
                 own_steps(p) if rng.random() < 0.8 else random_drive()
-            step(rng.choice(("stop", "stop", "start")), "a", wait=followed_wait() if p == "b" else rng.choice(waits),
-                 abort=rng.random() < 0.1)
+            # STOP: a START exit's abort_pc, a START, would come with SDA low, and none compiles
+            step("stop", "a", wait=followed_wait() if p == "b" else rng.choice(waits), abort=rng.random() < 0.1)
             tail(p)
         return Frame("lead", p, SDA, 0, "zero", "discard", on="r7", body=exit_of(make))
 

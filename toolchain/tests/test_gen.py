@@ -319,3 +319,35 @@ def test_with_r3_lead_planted_off_lead_programs_fail(monkeypatch):
     cases = lead_cases(seed=1, iters=1500)
     failed = [res.rules for _, res in cases if res.verdict == "fail"]
     assert len(failed) >= 3 and any("completion" in f for f in failed)
+
+
+@pytest.mark.parametrize("plant", ["double", "droplast"])
+def test_planted_detector_bugs_fail_lead_programs(monkeypatch, plant):
+    """A detector that logs a bus exit's event twice (`bus` sees it: only the events a followed
+    START or STOP ignores may go untaken), and P1's detector dropping its STOPs after the second
+    (`completion`: only a lead block's leader may end waiting, and only with no such COND on the
+    wire since). Both passed every lead run before the review tightened those oracles."""
+    if plant == "double":
+        orig = engine.Engine._bus_exit
+
+        def bad(self):
+            if self.bus_events:
+                self.bus_events.append(self.bus_events[-1])
+            return orig(self)
+        monkeypatch.setattr(engine.Engine, "_bus_exit", bad)
+    else:
+        from emu.isa import Role
+        orig = engine.Engine._confirm_candidate
+
+        def bad(self):
+            _, bit, _ = self._cand
+            if bit != engine.START_BIT and self.role == Role.P1:
+                self._nstop = getattr(self, "_nstop", 0) + 1
+                if self._nstop >= 2:
+                    self._cand = None
+                    return False
+            return orig(self)
+        monkeypatch.setattr(engine.Engine, "_confirm_candidate", bad)
+    failed = [res.rules for _, res in lead_cases(seed=1, iters=3000) if res.verdict == "fail"]
+    assert len(failed) >= 3
+

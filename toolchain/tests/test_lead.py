@@ -1266,3 +1266,116 @@ def test_the_leaders_steps_on_the_owners_run_on_may_not_run():
     img = compile_desc(d, check_levels=False)
     t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON), max_ticks=20_000)
     assert any(m.startswith("wire:") for m in bus_mismatches(img, t))
+
+
+# ---------------------------------------------------------------- review of the lead-block programs
+def own_exit_then(lines_and_s, at_abort):
+    """c (or a, on SELECT) leads an own exit (its STOP) before S; at abort_pc its START, then
+    `at_abort`; the others leave S by a bus exit. `lines_and_s(d)` declares the bus and lines and
+    returns (the master's party name, S's builder)."""
+    d = Description("ox", parties=("c", "t"))
+    master, s_step, w = lines_and_s(d)
+    d.abort_to("abort")
+    d.li("r7", 1)
+    d.cond("start", owner=master, prof=w)
+    with d.lead(master):
+        d.br("s", cond="z", reg="r7")
+        d.li("r7", 0)
+        d.cond("stop", owner=master, prof=w)
+        d.br("abort")
+    d.label("s")
+    s_step(d)
+    d.cond("stop", owner=master, prof=w)
+    d.br("end")
+    d.label("abort")
+    d.cond("start", owner=master, prof=w)
+    at_abort(d)
+    d.cond("stop", owner=master, prof=w)
+    d.label("end")
+    d.halt()
+    return d
+
+
+def test_a_bus_exit_releases_the_others_od_lines_on_the_way_to_abort_pc():
+    """R2-edge: t holds its OD IRQ low into S; c's own exit STOP is t's bus exit, which releases
+    IRQ (isa §4.1), so t's COND RISE on it at abort_pc makes no edge, and MON hangs (found by the
+    review; it compiled on main, which didn't walk that path, and with the first version of it,
+    which took t's drives as they entered S)."""
+    def bus(d):
+        sda = d.line("sda", "od", owner="shared", idle=1)
+        scl = d.line("scl", "od", owner="c", idle=1)
+        d.irq = d.line("irq", "od", owner="t", idle=1)
+        d.bus("i2c", sda, scl)
+        lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+        w = d.profile("W", nom=20, min=0, max=INF)
+        d.hold(d.irq, 0, owner="t", prof=d.profile("Ho", nom=20, min=20, max=20))
+        return "c", lambda d: d.xfer(8, lane, owner="c", prof=d.profile("B", nom=40, min=0, max=INF),
+                                     src="ones", abort=True), w
+    d = own_exit_then(bus, lambda d: d.cond("rise", d.irq, owner="t", prof=d.profile("W2", nom=20, min=0, max=INF)))
+    assert "irq may not be low by the doer's drive alone here" in " ".join(m for _, m in level_diags(d))
+    t = run_sys(lower(d).image, roles=(Role.P0, Role.P1, Role.MON), max_ticks=20_000)
+    assert not t.engines[2].halted
+
+
+def test_a_bus_exit_keeps_a_pp_bit_s_drove():
+    """R2-edge, SELECT: b's cpha 0 XFER S drives its bit 0 (a 0) on MISO, a PP line, at S's start;
+    a's own exit STOP ends S, and MISO stays 0 (a bus exit keeps PP drives), so b's COND FALL on it
+    at abort_pc makes no edge (found by the review)."""
+    def bus(d):
+        cs = d.line("cs", owner="c", idle=1)
+        sck = d.line("sck", owner="c", idle=0)
+        d.miso = d.line("miso", owner="t", idle=1)
+        d.bus("select", cs)
+        lane = d.lane("L", d.miso, clk=sck, cpol=0, cpha=0)
+        w = d.profile("W", nom=20, min=0, max=INF)
+        return "c", lambda d: d.xfer(8, lane, owner="t", prof=d.profile("H", nom=20, min=0, max=INF),
+                                     src="zero", abort=True), w
+    d = own_exit_then(bus, lambda d: d.cond("fall", d.miso, owner="t", prof=d.profile("W2", nom=20, min=0, max=INF)))
+    assert "miso may not be high here" in " ".join(m for _, m in level_diags(d))
+    t = run_sys(lower(d).image, roles=(Role.P0, Role.P1, Role.MON), max_ticks=20_000)
+    assert not any(e.halted for e in t.engines)
+
+
+def level_diags(d):
+    try:
+        compile_desc(d, check_timing=False)
+    except CompileError as e:
+        return [(x.rule, x.msg) for x in e.diags]
+    return []
+
+
+def test_t5_abort_covers_s_s_data_owner_too():
+    """t's FZ between abort_pc and the START: t takes a bus exit from S, its own byte, as the
+    others do from theirs (found by the review)."""
+    def build(t_sends):
+        def pre(P):
+            P.d.li("r5", 1)
+        d = Description("i2c", parties=("c", "t"))
+        sda = d.line("sda", "od", owner="shared", idle=1)
+        scl = d.line("scl", "od", owner="c", idle=1)
+        d.bus("i2c", sda, scl)
+        P = SimpleNamespace(d=d, sda=sda, scl=scl, L=d.lane("L", sda, clk=scl, cpol=1, cpha=1),
+                            bit=d.profile("B", nom=H, min=0, max=INF), wait=d.profile("W", nom=H, min=0, max=INF),
+                            hold=d.profile("Ho", nom=H))
+        d.abort_to("top")
+        d.li("r1", ADDR)
+        pre(P)
+        d.label("top")
+        with d.only("t"):
+            d.fz_next("r3")
+        d.cond("start", owner="c", prof=P.wait)
+        d.xfer(8, P.L, owner="c", prof=P.bit, src="r1", dst="r2", msb_first=True)
+        d.xfer(1, P.L, owner="t", prof=P.bit, src="zero")
+        with d.lead("c"):
+            d.br("data", cond="z", reg="r5")
+            d.li("r5", 0)
+            stop_seq(P)
+            d.br("top")
+        d.label("data")
+        d.xfer(8, P.L, owner="t" if t_sends else "c", prof=P.bit, src="ones", abort=True)
+        stop_and_halt(P)
+        return d
+    for t_sends in (False, True):
+        with pytest.raises(CompileError, match=r"\[T5-abort\] .*P1 can run fz.next"):
+            compile_desc(build(t_sends))
+
