@@ -15,7 +15,15 @@ tolerance and no glitches, these must hold:
 | `bus` | on an I2C bus, an SDA edge with SCL high on the wire that no COND START/STOP made, or a follower's detector reporting a START or STOP that its COND START/STOP steps don't match (isa §4.7, §5 R1-bus) |
 
 A party that halts in its own block (the bus family) takes part in every step up to its HALT, so
-its steps are a prefix of MON's, which runs them all.
+its steps are a prefix of MON's, which runs them all. With lead blocks (the bus family again), the
+steps in role blocks are the leader's alone, and a party that took an exit, or waited one out in
+the successor (a bus exit), skips some of MON's: outside the blocks, each party's steps are then a
+subsequence of MON's. The path then depends on the exits, which `expected_values` doesn't follow,
+so `value` sits those out. A lead block's leader whose exit follows the master's bus COND may end
+waiting in that COND, or at abort_pc's first step after it, once the master has halted with no
+such COND made since: a target waiting for a controller that is done (isa §5 R3-lead), which
+`completion` takes as an end. And `bus` lets a detector report a STOP that a followed START
+ignored, or a START that a followed STOP without ABORT did (§4.2), in that step.
 """
 from __future__ import annotations
 
@@ -25,7 +33,7 @@ from bisect import bisect_right
 from dataclasses import asdict, dataclass, replace
 
 from ..compiler import CompileError, compile_desc
-from ..isa import BusKind, CondKind, Dst, Role, unpack_cond, unpack_xfer
+from ..isa import F_ABORT, BusKind, CondKind, Dst, Op, Role, unpack_cond, unpack_role_if, unpack_xfer
 from ..model.engine import VIOLATIONS
 from ..model.system import EngineSpec, System
 from .randdesc import (HOST_WORDS, PARTIES, Recipe, build, expected_halts, expected_values, random_bus_recipe,
@@ -95,8 +103,10 @@ def compile_recipe(r: Recipe):
         try:
             compile_desc(d, check_levels=False, check_timing=False)
             verdict = "rejected"
-        except CompileError:
-            verdict = "structural"
+        except CompileError as st:
+            # lead blocks are drawn with their exits at random, for R3-lead to judge
+            verdict = ("rejected" if r.abort is not None and {x.rule for x in st.diags} <= {"R3-lead"}
+                       else "structural")
         return None, Result(verdict, rules, str(e))
 
 
@@ -122,25 +132,33 @@ def run_case(case: Case) -> Result:
         if bad:
             e = bad[0]
             fails.append(("violation", f"{et.role.name}: {e.kind} at pc {e.pc}, cycle {e.cycle} (measured {e.measured})"))
-    if not (t.quiescent and all(et.halted for et in t.engines)):
+    instrs = img.instrs()
+    lead = case.recipe.abort is not None
+    if not (t.quiescent and all(et.halted or lead and waits_for_master(img, t, et) for et in t.engines)):
         fails.append(("completion", "not halted: " + ", ".join(et.role.name for et in t.engines if not et.halted)))
-    steps = [[(r.pc, r.op, r.value if r.op == "XFER" else None) for r in et.records] for et in t.engines]
-    last = len(img.instrs()) - 1                                 # the final HALT
+    blocks = {q for pc, ins in enumerate(instrs) if ins.op == Op.ROLE_IF
+              for q in range(pc + 1, pc + 1 + unpack_role_if(ins.operand)[1])} if lead else set()
+    steps = [[(r.pc, r.op, r.value if r.op == "XFER" else None) for r in et.records if r.pc not in blocks]
+             for et in t.engines]
+    last = len(instrs) - 1                                       # the final HALT
     full = [bool(et.starts) and et.starts[-1][0] == last for et in t.engines]
     ref = steps[2]                                               # MON runs every timed step
     for i, et in enumerate(t.engines[:2]):
         st = steps[i]
-        if st != ref and (full[i] or ref[:len(st)] != st):
+        if lead and not _subsequence(st, ref):
+            fails.append(("agreement", f"{et.role.name}'s steps outside the lead blocks aren't a "
+                                       f"subsequence of MON's: {st[:12]} vs {ref[:12]}"))
+            break
+        if not lead and st != ref and (full[i] or ref[:len(st)] != st):
             k = next((j for j, (x, y) in enumerate(zip(ref, st)) if x != y), min(len(st), len(ref)))
             fails.append(("agreement", f"{et.role.name} vs MON at step {k}: "
                                        f"{st[k] if k < len(st) else 'end'} vs {ref[k] if k < len(ref) else 'end'}"))
             break
     else:
-        for i, et in enumerate(t.engines[:2]):
-            if full[i] and et.regs[1:5] != t.engines[2].regs[1:5]:
+        for i, et in enumerate(t.engines[:2]):  # (with lead blocks every register is tainted at abort_pc, R2)
+            if full[i] and not lead and et.regs[1:5] != t.engines[2].regs[1:5]:
                 fails.append(("agreement", f"{et.role.name} vs MON: r1-r4 {et.regs[1:5]} vs {t.engines[2].regs[1:5]}"))
                 break
-    instrs = img.instrs()
     for et in t.engines:  # dst = FIFO pushes what a follower received (isa §4.3); the owner pushes nothing
         want = [r.value for r in et.records if r.op == "XFER" and r.mode == "follow"
                 and unpack_xfer(instrs[r.pc].operand)[2] == Dst.FIFO]
@@ -153,18 +171,73 @@ def run_case(case: Case) -> Result:
                                         f"but the recipe has it {'halt in its block' if full[i] else 'run to the end'}"))
     want = expected_values(case.recipe, dict(zip(PARTIES, (list(w) for w in env.words))))
     got = [r.value for r in t.engines[0 if full[0] else 2].records if r.op == "XFER"]
-    if got != want:
+    if not lead and got != want:
         k = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
         fails.append(("value", f"XFER {k}: {got[k] if k < len(got) else 'none'}, the recipe says "
                                  f"{want[k] if k < len(want) else 'none'}"))
     if img.bus.kind == BusKind.I2C:
-        fails += [("bus", m) for m in bus_mismatches(img, t)]
+        fails += [("bus", m) for m in bus_mismatches(img, t, ignores=lead)]
     if fails:
         return Result("fail", tuple(sorted({f[0] for f in fails})), "; ".join(f"{o}: {d}" for o, d in fails))
     return Result("ok", ())
 
 
-def bus_mismatches(img, t) -> list[str]:
+def _subsequence(a: list, b: list) -> bool:
+    rest = iter(b)
+    return all(x in rest for x in a)
+
+
+def _lead_blocks(instrs) -> list[tuple[int, int, int]]:
+    """(ROLE_IF pc, body end, role mask) of the role blocks that hold a timed step: lead blocks."""
+    out = []
+    for pc, ins in enumerate(instrs):
+        if ins.op == Op.ROLE_IF:
+            mask, n = unpack_role_if(ins.operand)
+            if any(instrs[q].op in (Op.COND, Op.HOLD, Op.XFER) for q in range(pc + 1, pc + 1 + n)):
+                out.append((pc, pc + 1 + n, mask))
+    return out
+
+
+def _wire_bus_events(img, t) -> list[tuple[str, int]]:
+    """The START/STOPs on an I2C wire: SDA edges with SCL high (the tick before and at it)."""
+    sda, scl, edges = img.bus.a, img.bus.b, t.wire_edges
+
+    def level(line: int, tick: int) -> int:  # OD lines, released at RUN: 1 until the first edge
+        return 1 ^ (bisect_right(edges[line], tick) & 1)
+    return [("START" if level(sda, tk) == 0 else "STOP", tk) for tk in edges[sda]
+            if level(scl, tk) == 1 and level(scl, tk - 1) == 1]
+
+
+def waits_for_master(img, t, et) -> bool:
+    """`et`, a lead block's leader whose exit follows the master's bus COND, ends waiting in that
+    COND, or in abort_pc's first step after it (an unbounded COND of the master's it follows,
+    T5-abort), with the master halted and no such COND made on the wire since that step started
+    (a START/STOP of that kind; for a FALL/RISE, an edge of its line to that level)."""
+    instrs, master = img.instrs(), int(img.lines[img.bus.b].owner)
+    if (not et.starts or et.role == Role.MON or int(et.role) == master or not t.engines[master].halted
+            or img.bus.kind != BusKind.I2C):
+        return False
+    pc, cyc = et.starts[-1]
+    ins = instrs[pc]
+    if ins.op != Op.COND or int(ins.owner) != master:
+        return False
+    kind = CondKind(unpack_cond(ins.operand)[0])
+    mine = [(lo, hi) for lo, hi, mask in _lead_blocks(instrs) if mask == 1 << int(et.role)]
+    follows = any(instrs[q].op == Op.COND and unpack_cond(instrs[q].operand)[0] in (CondKind.START, CondKind.STOP)
+                  and int(instrs[q].owner) == master for lo, hi in mine for q in range(lo, hi))
+    first = next((q for q in range(img.abort_pc, len(instrs)) if instrs[q].op in (Op.COND, Op.HOLD, Op.XFER)),
+                 None)
+    in_exit = kind in (CondKind.START, CondKind.STOP) and any(lo <= pc < hi for lo, hi in mine)
+    if not (in_exit or follows and pc == first):
+        return False
+    since = et.cycle_tick[min(max(cyc - 1, 0), len(et.cycle_tick) - 1)] if et.cycle_tick else 0
+    if kind in (CondKind.START, CondKind.STOP):
+        return not any(k == kind.name and tk >= since for k, tk in _wire_bus_events(img, t))
+    ln = img.lines[ins.line]
+    init, level = (1 if ln.kind == "od" else ln.idle), (0 if kind == CondKind.FALL else 1)
+    return not any(tk >= since and init ^ ((k + 1) & 1) == level for k, tk in enumerate(t.wire_edges[ins.line]))
+
+def bus_mismatches(img, t, ignores: bool = False) -> list[str]:
     """The `bus` oracle on an I2C bus. On the wire, an SDA edge while SCL is high (the tick before
     and at it) is a START (SDA falls) or a STOP (rises) to every device on the bus, so each must be
     one of the COND START/STOPs that SCL's owner made (isa §5 R1-bus): a stray one is a failure
@@ -177,19 +250,28 @@ def bus_mismatches(img, t) -> list[str]:
     has one). Kinds and order only: a run where a STOP goes missing and
     a stray one comes later matches (the followers then hang on the first, which `completion`
     sees)."""
-    instrs, sda, scl = img.instrs(), img.bus.a, img.bus.b
-    edges = t.wire_edges
+    instrs, scl = img.instrs(), img.bus.b
 
-    def level(line: int, tick: int) -> int:  # OD lines, released at RUN: 1 until the first edge
-        return 1 ^ (bisect_right(edges[line], tick) & 1)
+    def ignored(et, cycle: int, kind: str) -> bool:
+        """The flags are sticky: the event is the first step's to read them that runs at or after
+        its confirm (a followed START/STOP, or a step with ABORT), and that step ignores it if it is
+        a followed START and the event a STOP, or a followed STOP without ABORT and it a START."""
+        k = max(bisect_right([c for _, c in et.starts], cycle) - 1, 0)
+        for pc, _ in et.starts[k:]:
+            ins = instrs[pc]
+            bus_cond = ins.op == Op.COND and unpack_cond(ins.operand)[0] in (CondKind.START, CondKind.STOP)
+            if bus_cond or ins.op in (Op.COND, Op.HOLD, Op.XFER) and ins.flags & F_ABORT:
+                ck = CondKind(unpack_cond(ins.operand)[0]) if bus_cond else None
+                return (ck == CondKind.START and kind == "STOP"
+                        or ck == CondKind.STOP and kind == "START" and not ins.flags & F_ABORT)
+        return False
 
     def bus_conds(et) -> list[str]:
         return [k.name for r in et.records if r.op == "COND"
                 and (k := unpack_cond(instrs[r.pc].operand)[0]) in (CondKind.START, CondKind.STOP)]
 
     out = []
-    wire = [("START" if level(sda, tk) == 0 else "STOP", tk) for tk in edges[sda]
-            if level(scl, tk) == 1 and level(scl, tk - 1) == 1]
+    wire = _wire_bus_events(img, t)
     master = next(et for et in t.engines if int(et.role) == int(img.lines[scl].owner))
     made = bus_conds(master)
     if [k for k, _ in wire] != made:
@@ -200,7 +282,10 @@ def bus_mismatches(img, t) -> list[str]:
     for et in t.engines:
         if et is master:
             continue  # the master line's owner runs no detector (isa §4.7)
-        seen, took = [k for _, k in et.bus_events], bus_conds(et)
+        # `ignores` (lead blocks): a detector event that came while the engine was in a followed
+        # START, a STOP, or in a followed STOP without ABORT, a START, is that step's to ignore (§4.2)
+        seen = [k for c, k in et.bus_events if not (ignores and ignored(et, c, k))]
+        took = bus_conds(et)
         exits = sum(e.kind == "BUS" for e in et.events)
         rest = iter(seen)
         if len(seen) != len(took) + exits or not all(k in rest for k in took):

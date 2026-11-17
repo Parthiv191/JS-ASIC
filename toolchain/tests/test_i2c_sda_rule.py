@@ -807,3 +807,74 @@ def test_the_doers_followed_clocked_xfer_ends_the_window():
     d.cond("stop", owner="ctl", prof=w)
     d.halt()
     assert not any("before the followers confirm" in m for _, m in diags(d))
+
+
+def halt_after_scl_fall(wait: bool = False):
+    """c's address byte, t's ACK from ZERO (its let-go holds SDA to the next SCL fall + ldelay),
+    c's COND FALL on SCL, then (with `wait`, after its COND FALL on its own line y, 40 cycles on)
+    c halts in its block, which releases SCL."""
+    from emu.desc import Description
+    from emu.isa import INF
+    d = Description("hs", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    x = d.line("x", owner="t", idle=1)
+    y = d.line("y", owner="c", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=12)
+    w = d.profile("W", nom=30, min=0, max=INF)
+    b = d.profile("B", nom=27, min=0, max=INF)
+    d.cond("start", owner="c", prof=w)
+    d.xfer(8, lane, owner="c", prof=b, src="ones")
+    d.xfer(1, lane, owner="t", prof=b, src="zero")
+    d.cond("fall", scl, owner="c", prof=w)
+    if wait:
+        d.cond("fall", y, owner="c", prof=d.profile("Y", nom=40, min=0, max=INF))
+    with d.only("c"):
+        d.halt()
+    d.cond("fall", x, owner="t", prof=w)     # t goes on alone, as in the program found
+    d.cond("rise", x, owner="t", prof=w)
+    d.halt()
+    return d
+
+
+def test_a_halt_that_releases_scl_waits_for_the_sda_let_go():
+    """R2-edge: c's HALT right after its SCL fall lets SCL rise before t's let-go releases SDA,
+    ldelay after the fall: an SDA rise with SCL high, a STOP no COND made (found by the random bus
+    programs; it compiled on main). A step of c's long enough for the release first, and it's fine."""
+    from emu.compiler import CompileError, compile_desc
+    from emu.gen.check import bus_mismatches
+    from emu.isa import Role
+    from simutil import run_sys
+    with pytest.raises(CompileError, match=r"\[R2-edge\] .*HALT by P0 releases SCL"):
+        compile_desc(halt_after_scl_fall(), check_timing=False)
+    img = compile_desc(halt_after_scl_fall(), check_levels=False, check_timing=False)
+    t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON))
+    assert any(m.startswith("wire:") for m in bus_mismatches(img, t))
+    compile_desc(halt_after_scl_fall(wait=True), check_timing=False)
+
+
+def test_a_halt_with_scl_high_releases_no_scl():
+    """c halts with SCL high (after t's ACK, a let-go on SDA pending): SCL doesn't rise, so the
+    HALT clause for SCL says nothing (t's own HALT later is R1-bus's)."""
+    from emu.desc import Description
+    from emu.isa import INF
+    d = Description("hs", parties=("c", "t"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=4)
+    w = d.profile("W", nom=30, min=0, max=INF)
+    d.cond("start", owner="c", prof=w)
+    d.xfer(8, lane, owner="c", prof=w, src="ones")
+    d.xfer(1, lane, owner="t", prof=w, src="zero")
+    with d.only("c"):
+        d.halt()
+    d.halt()
+    try:
+        compile_desc(d, check_timing=False)
+        msgs = []
+    except CompileError as e:
+        msgs = [x.msg for x in e.diags]
+    assert not any("releases SCL" in m for m in msgs)
+

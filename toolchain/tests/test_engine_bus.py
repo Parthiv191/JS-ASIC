@@ -504,9 +504,11 @@ def test_t5_abort_on_a_bus_needs_a_bus_cond_or_no_abort():
 
 
 # ---------------------------------------------------------------- gated lines (isa §2, §4.7)
-def select_desc(body, abort_label=None):
+def select_desc(body, abort_label=None, levels=True):
     """SELECT: CS (line 0) owned by a; MISO (line 1) a gated PP line owned by b; x (line 2) a
-    plain PP line owned by b. `body(d, cs, miso, x, p)` builds the program."""
+    plain PP line owned by b. `body(d, cs, miso, x, p)` builds the program. `levels=False` for a
+    model test whose b HOLDs MISO 0 and halts in its slot (R2-edge rejects that: the HALT releases
+    MISO before the followers sample it)."""
     d = Description("sel", parties=("a", "b"))
     cs = d.line("cs", owner="a", idle=1)
     miso = d.line("miso", owner="b", idle=1, gated=True)
@@ -516,7 +518,7 @@ def select_desc(body, abort_label=None):
         d.abort_to(abort_label)
     body(d, cs, miso, x, d.profile("P", nom=NOM, min=0, max=INF))
     d.halt()
-    return compile_desc(d, check_timing=False)
+    return compile_desc(d, check_timing=False, check_levels=levels)
 
 
 def stops(t, i):
@@ -612,6 +614,7 @@ def cs_after_abort(variant):
     x = d.line("x", owner="b", idle=1)
     d.bus("select", cs)
     cnd = d.profile("C", nom=12, min=4, max=0xFFFF)
+    start = d.profile("CS0", nom=12, min=0, max=0xFFFF)   # min 0 at abort_pc (T5-abort)
     setup = d.profile("SU", nom=20, min=10, max=0xFFFF)
     hp = d.profile("H", nom=20, min=0, max=INF)
     d.abort_to("exit" if variant == "exit" else "top")
@@ -619,7 +622,7 @@ def cs_after_abort(variant):
     if variant == "top":
         with d.only("a"):
             d.raw_set(cs, 1)
-    d.cond("start", owner="a", prof=cnd)
+    d.cond("start", owner="a", prof=start)
     d.hold(cs, 0, owner="a", prof=setup)
     d.hold(x, 0, owner="b", prof=hp, abort=True)
     d.cond("stop", owner="a", prof=cnd)
@@ -647,7 +650,7 @@ def test_without_a_drive_on_cs_at_abort_pc_it_compiles():
 def test_the_rejected_abort_program_makes_a_stop_no_cond_stop_timed():
     """On the model: a aborts with CS low, its RAW SET at abort_pc raises CS, and b's detector
     takes that as the STOP before a's COND STOP, which b then follows EARLY."""
-    img = compile_desc(cs_after_abort("top"), check_levels=False)
+    img = compile_desc(cs_after_abort("top"), check_levels=False, check_timing=False)   # (T5-abort too)
     t = run_sys(img, roles=(Role.P0, Role.P1, Role.MON), glitches=[Glitch(1, 41, 3, 1)])
     assert "ABORT" in kinds(t, 0)
     assert "EARLY" in kinds(t, 1)
@@ -734,7 +737,7 @@ def test_a_stop_mid_step_keeps_the_gated_line_released_until_the_next_owned_step
         d.cond("start", owner="a", prof=p)
         d.xfer(8, miso, owner="b", prof=d.profile("U", nom=10), src="zero")
         d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
-    t = run_sys(select_desc(body), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 400, 1)])
+    t = run_sys(select_desc(body, levels=False), roles=(Role.P0, Role.P1), glitches=[Glitch(0, 40, 400, 1)])
     (c,) = stops(t, 1)
     first = next(now for pc, now in t.engines[1].starts if pc == 1)
     xfer, hold = [r for r in t.engines[1].records if r.op in ('XFER', 'HOLD')]
@@ -798,7 +801,7 @@ def test_halt_releases_gated_lines():
     otherwise a target that halts mid-frame would hold MISO forever."""
     def body(d, cs, miso, x, p):
         d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
-    t = run_sys(select_desc(body), roles=(Role.P0, Role.P1))
+    t = run_sys(select_desc(body, levels=False), roles=(Role.P0, Role.P1))
     halt = t.engines[1].starts[-1][1]
     assert t.wire_edges[1] == [3, halt + 1]
 
@@ -826,7 +829,7 @@ def test_the_gate_starts_shut_at_run():
             d.raw_set(miso, 0)
             d.raw_delay(20)
         d.hold(miso, 0, owner="b", prof=d.profile("H", nom=10))
-    t = run_sys(select_desc(body), roles=(Role.P0, Role.P1))
+    t = run_sys(select_desc(body, levels=False), roles=(Role.P0, Role.P1))
     (hold,) = [r for r in t.engines[1].records if r.op == "HOLD"]
     start = dict(t.engines[1].starts)[hold.pc]
     halt = t.engines[1].starts[-1][1]
@@ -841,7 +844,7 @@ def test_a_stop_confirmed_as_a_step_starts_cuts_that_step():
         h = d.profile("H", nom=10)
         for _ in range(4):
             d.hold(miso, 0, owner="b", prof=h)
-    img = select_desc(body)
+    img = select_desc(body, levels=False)
     plain = run_sys(img, roles=(Role.P0, Role.P1))
     s2 = dict(plain.engines[1].starts)[3]           # the third HOLD's start
     t = run_sys(img, roles=(Role.P0, Role.P1), glitches=[Glitch(0, s2 - 3, 2000, 1)])

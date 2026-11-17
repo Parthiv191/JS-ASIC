@@ -687,10 +687,10 @@ def _check_lead(desc, sp: Span, instrs: list[Instr], pc_step: list[int], abort_p
                                            "the leader in the block's successor and runs no bus detector "
                                            "to leave it (isa §4.7): neither moves")
                 else:
-                    if profiles[ins.prof].max != INF:
+                    if profiles[ins.prof].max != INF or profiles[ins.prof].min > 0:
                         err("R3-lead", at(pc), "the leader follows the exit's bus COND, which its owner makes "
                                                "from the block's successor whenever it gets there: it needs "
-                                               "max INF")
+                                               "max INF and min 0")
                     wrong = (owner_path(ins.owner, ck, bool(ins.flags & F_ABORT), aborted)
                              if succ is not None else None)
                     if wrong:

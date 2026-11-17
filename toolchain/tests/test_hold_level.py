@@ -199,3 +199,26 @@ def test_an_untimed_loop_after_a_hold_ends_the_slot_walk():
     th.start()
     th.join(30)
     assert done, "the slot walk didn't end"
+
+
+def halt_after_hold(level: int, kind: str = "od"):
+    """a's COND FALL on l, its HOLD `level` on l, then its HALT."""
+    d = Description("h", parties=("a", "b"))
+    ln = d.line("l", kind, owner="a", idle=1)
+    d.cond("fall", ln, owner="a", prof=d.profile("W", nom=20, min=0, max=INF))
+    d.hold(ln, level, owner="a", prof=d.profile("Ho", nom=20, min=20, max=20))
+    d.halt()
+    return d
+
+
+def test_a_halt_in_a_hold_0_s_slot_releases_the_od_line_before_the_followers_sample_it():
+    """R2-edge: a HOLD's owner finishes it when it starts, so its HALT right after comes in the
+    HOLD's slot, and a HALT releases OD lines (isa §4.1): the followers sample 1 and log LEVEL
+    (found by the random bus programs)."""
+    with pytest.raises(CompileError, match=r"\[R2-edge\] .*HALT by P0 comes in the slot of its HOLD 0"):
+        compile_desc(halt_after_hold(0))
+    img = compile_desc(halt_after_hold(0), check_levels=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(10_000)
+    assert ("LEVEL", 1) in [(e.kind, e.pc) for e in t.engines[1].events]
+    compile_desc(halt_after_hold(1))            # released already: no change
+    compile_desc(halt_after_hold(0, "pp"))      # a PP line keeps its level at HALT
