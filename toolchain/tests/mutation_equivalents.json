@@ -212,5 +212,13 @@
  {"file": "emu/compiler.py", "func": "_check_lead", "desc": "1 -> 2", "code": "taken = min(s_edges + 1, taken + (2 * n_bits if la.clk == s_clk else s_edges + 1))", "nth": 1,
   "why": "an XFER on another clock costs more than S's edges either way (s_edges + 1 or + 2, under the cap), so it is rejected either way"},
  {"file": "emu/compiler.py", "func": "_check_lead", "desc": "and -> or", "code": "in_lead = {q for s in spans if s.lead and s.roles == sp.roles for q in range(s.start, s.end)}", "nth": 0,
-  "why": "the leader's walk back skips the other party's blocks, and a role block that isn't a lead block holds no timed step (R2), so the extra pcs are never a timed step it meets"}
+  "why": "the leader's walk back skips the other party's blocks, and a role block that isn't a lead block holds no timed step (R2), so the extra pcs are never a timed step it meets"},
+ {"file": "emu/analysis.py", "func": "leaders_away", "desc": "and -> or", "code": "bus = [i for i in body if i.op == Op.COND and unpack_cond(i.operand)[0] in (CondKind.START, CondKind.STOP)]", "nth": 0,
+  "why": "check_levels runs only on programs lower() accepts, where a lead block holds no step of another party's but a bus COND (R3-lead), and an untimed instruction has no party owner: `followed` is the same"},
+ {"file": "emu/analysis.py", "func": "leaders_away", "desc": ">= -> >", "code": "if pc in seen or pc >= len(instrs) or instrs[pc].op == Op.HALT:", "nth": 0,
+  "why": "successors() never returns a pc past the last word, so the walk never meets one"},
+ {"file": "emu/analysis.py", "func": "check_levels", "desc": "< -> <=", "code": "own_exit = {sp.end: sp for sp in low.spans if sp.lead and apc is not None and sp.end < len(instrs)", "nth": 0,
+  "why": "a block ending at the last word has no successor S, so no pc the walk reaches is that end"},
+ {"file": "emu/analysis.py", "func": "check_levels", "desc": "1 -> 2", "code": "leaders_first = sorted(_PARTIES, key=lambda q: 0 if any(q in sp.roles for sp in own_exit.values()) else 1)", "nth": 0,
+  "why": "the sort only has to put the leaders' walks first: any key above theirs (0) does"}
 ]

@@ -195,12 +195,32 @@ def _join(x, y):
 _PARTIES = (Role.P0, Role.P1)
 
 
-def leaders_away(instrs: list[Instr], spans: list[Span], block_at: dict[int, Span]) -> dict[int, set]:
+def _leaves(ins: Instr, ln: int, lines, lanes):
+    """What `ins` leaves line `ln` at for a party that drives it there, as check_levels' step()
+    has it: a COND its post-edge level, a HOLD its level, an XFER its clock at cpol, a PP data line
+    or a bit from ONES at that, an OD data line's let-go of a 0 or an unknown bit (clocked), or
+    unknown (unclocked); a RAW: unknown."""
+    if ins.op == Op.COND:
+        return 0 if CondKind(unpack_cond(ins.operand)[0]) in (CondKind.FALL, CondKind.START) else 1
+    if ins.op == Op.HOLD:
+        return ins.operand & 1
+    if ins.op == Op.XFER:
+        la = lanes[ins.line]
+        const = {Src.ZERO: 0, Src.ONES: 1}.get(unpack_xfer(ins.operand)[1])
+        if ln == la.clk:
+            return la.cpol
+        if lines[ln].kind == "pp" or const == 1:
+            return const
+        return (_LG if const == 0 else _LGX) if la.clk is not None else None
+    return None
+
+
+def leaders_away(instrs: list[Instr], spans: list[Span]) -> dict[int, set]:
     """pc -> the parties that may be away there: a lead block's leader whose exit follows its bus
     COND (R3-lead), while that COND's owner runs on from the block's successor S without it, up to
     a COND START/STOP that ends the leader's exit (one of the kind it follows; a START too where
-    that step has ABORT; any, where an earlier step of the exit has ABORT). The leader's own role
-    blocks on the way don't run either."""
+    that step has ABORT; any, where an earlier step of the exit has ABORT). (The leader's own role
+    blocks on the way are skipped by the others' walks, and their drives taken as maybe there.)"""
     away: dict[int, set] = {}
     for sp in spans:
         if not sp.lead:
@@ -227,10 +247,6 @@ def leaders_away(instrs: list[Instr], spans: list[Span], block_at: dict[int, Spa
             if ins.op == Op.COND and unpack_cond(ins.operand)[0] in ends:
                 continue
             away.setdefault(pc, set()).add(leader)
-            blk = block_at.get(pc)
-            if blk is not None and leader in blk.roles:
-                for q in range(blk.start, blk.end):
-                    away.setdefault(q, set()).add(leader)
             todo.extend(successors(instrs, pc, owner))
     return away
 
@@ -273,7 +289,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
     scl = img.bus.b if kind == BusKind.I2C else None
     span_at = {pc: sp for sp in low.spans for pc in range(sp.start, sp.end)}
     block_at = {sp.role_if_pc: sp for sp in low.spans}
-    away = leaders_away(instrs, low.spans, block_at)
+    away = leaders_away(instrs, low.spans)
 
     def runs(pc: int) -> tuple:
         sp = span_at.get(pc)
@@ -336,30 +352,12 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                     grew = True
         return ok
 
-    def leaves(pc: int, ln: int):
-        """What the instruction at pc leaves `ln` at for a party that drives it there, as step()
-        has it (a RAW: unknown)."""
-        ins = instrs[pc]
-        if ins.op == Op.COND:
-            return 0 if edge_line(ins)[0] in (CondKind.FALL, CondKind.START) else 1
-        if ins.op == Op.HOLD:
-            return ins.operand & 1
-        if ins.op == Op.XFER:
-            la = lanes[ins.line]
-            const = {Src.ZERO: 0, Src.ONES: 1}.get(unpack_xfer(ins.operand)[1])
-            if ln == la.clk:
-                return la.cpol
-            if lines[ln].kind == "pp" or const == 1:
-                return const
-            return (_LG if const == 0 else _LGX) if la.clk is not None else None
-        return None
-
     def block_drives(sp: Span) -> dict:
         """(party, line) -> what the block may leave it at: any of its drives there (or none)."""
         out: dict = {}
         for pc in to_exit(sp):
             for q, ln in drives(pc):
-                v = leaves(pc, ln)
+                v = _leaves(instrs[pc], ln, lines, lanes)
                 out[(q, ln)] = _join(out[(q, ln)], v) if (q, ln) in out else v
         return out
 
@@ -725,7 +723,12 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                                     f"({lines[scl].name}) may be high: a STOP to the others that no COND STOP "
                                     f"times (isa §4.1, §4.7)")
 
-    def step(st, pc: int) -> None:
+    def gone(q: Role, pc: int, walker: Role) -> bool:
+        """q, a lead block's leader, may be away at pc in another party's walk (in its own, it is
+        there: that is its path through the block's fall-through)."""
+        return q != walker and q in away.get(pc, ())
+
+    def step(st, pc: int, walker: Role) -> None:
         ins, ex = instrs[pc], runs(pc)
         if ins.op in (Op.COND, Op.HOLD, Op.XFER):
             # a timed step opens the gate of every engine that runs it (isa §2): its gated lines
@@ -745,7 +748,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             before = clock_before(st, line)
             for q in ex:
                 if does(ins.owner, q):
-                    st[int(q)][line] = _join(level, st[int(q)][line]) if q in away.get(pc, ()) else level
+                    st[int(q)][line] = _join(level, st[int(q)][line]) if gone(q, pc, walker) else level
             clock_after(st, line, before, pc)
             # the STOP shuts the gate it opened: for a follower that holds only because T5-watch
             # has it start the COND STOP by the confirm cycle (a later start would reopen it)
@@ -770,14 +773,11 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
                 else:
                     v = None
                 # a party that may be away (in its lead block's exit) may not drive it at all
-                st[int(q)][dl] = _join(v, st[int(q)][dl]) if q in away.get(pc, ()) else v
+                st[int(q)][dl] = _join(v, st[int(q)][dl]) if gone(q, pc, walker) else v
         elif ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL):
             od = lines[ins.ra].kind == "od"
             before = clock_before(st, ins.ra)
-            for q in ex:
-                if q in away.get(pc, ()):
-                    st[int(q)][ins.ra] = _join(None, st[int(q)][ins.ra])   # it may run it, or not
-                    continue
+            for q in ex:   # (a RAW is in its doer's role block, which the others' walks skip)
                 cur = st[int(q)][ins.ra]
                 if cur == _SHUT:
                     continue  # a shut gate ignores RAW (isa §2)
@@ -870,7 +870,7 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
             raw_drive = ins.op == Op.RAW and ins.sub in (RawOp.SET, RawOp.REL) and r in runs(pc)
             if raw_drive:
                 raw_was = wire(st, ins.ra)
-            step(st, pc)
+            step(st, pc, r)
             if raw_drive:
                 raw_edges(pc, r, raw_was, wire(st, ins.ra))
             if on_sda and scl_was != 0 and (sda_was is None or wire(st, bus_a) != sda_was):
