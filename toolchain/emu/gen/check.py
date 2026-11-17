@@ -170,8 +170,9 @@ def bus_mismatches(img, t) -> list[str]:
     one of the COND START/STOPs that SCL's owner made (isa §5 R1-bus): a stray one is a failure
     even where the engines' detectors happen to miss it (SCL fell within their confirm window). And
     each follower's detector must report exactly the STARTs and STOPs its COND START/STOPs took,
-    in order (a halted engine detects nothing more; one that took a bus exit isn't checked, as
-    the exit takes a flag with no COND). Kinds and order only: a run where a STOP goes missing and
+    in order (a halted engine detects nothing more), but for one flag per bus exit, which takes a
+    flag with no COND: then what they took is in what it saw, in order, with one more for each
+    exit. Kinds and order only: a run where a STOP goes missing and
     a stray one comes later matches (the followers then hang on the first, which `completion`
     sees)."""
     instrs, sda, scl = img.instrs(), img.bus.a, img.bus.b
@@ -195,11 +196,14 @@ def bus_mismatches(img, t) -> list[str]:
                    f"{f'a {wire[k][0]} at tick {wire[k][1]}' if k < len(wire) else 'missing'}, "
                    f"the controller's COND made {made[k] if k < len(made) else 'none'}")
     for et in t.engines:
-        if et is master or any(e.kind == "BUS" for e in et.events):
-            continue  # the master line's owner runs no detector (isa §4.7); a bus exit took a flag
+        if et is master:
+            continue  # the master line's owner runs no detector (isa §4.7)
         seen, took = [k for _, k in et.bus_events], bus_conds(et)
-        if seen != took:
-            out.append(f"{et.role.name}: its detector saw {seen}, its COND START/STOPs took {took}")
+        exits = sum(e.kind == "BUS" for e in et.events)
+        rest = iter(seen)
+        if len(seen) != len(took) + exits or not all(k in rest for k in took):
+            out.append(f"{et.role.name}: its detector saw {seen}, its COND START/STOPs took {took}"
+                       + (f" and {exits} bus exits" if exits else ""))
     return out
 
 

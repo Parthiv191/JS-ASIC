@@ -160,5 +160,13 @@
  {"file": "emu/analysis.py", "func": "check_levels.halt_sda", "desc": "1 -> 2", "code": "let_go[int(q)][bus_a] = let_go[int(q)][scl] = 1", "nth": 0,
   "why": "wire() reads an OD drive that is neither 0, a held let-go nor unknown as released, so 2 reads as 1 does"},
  {"file": "emu/analysis.py", "func": "check_levels.paced", "desc": "< -> <=", "code": "s = instrs[sp.end] if sp.end < len(instrs) else None", "nth": 0,
-  "why": "R3-lead gives every lead block a timed successor, and the walks run only on a program that lowered without errors, so sp.end is always in range"}
+  "why": "R3-lead gives every lead block a timed successor, and the walks run only on a program that lowered without errors, so sp.end is always in range"},
+ {"file": "emu/analysis.py", "func": "check_levels.raw_in_bus_slots", "desc": ">= -> >", "code": "if t >= need or best.get(q, need) <= t:", "nth": 0,
+  "why": "the walk only prunes there: at t == need nothing it reaches can fall before need, as the flag needs t + offset < need"},
+ {"file": "emu/analysis.py", "func": "check_levels.raw_in_bus_slots", "desc": "<= -> <", "code": "if t >= need or best.get(q, need) <= t:", "nth": 0,
+  "why": "revisiting a pc at the same time finds nothing new, and every instruction takes at least U, so the walk still ends"},
+ {"file": "emu/analysis.py", "func": "check_levels.raw_in_bus_slots", "desc": "or -> and", "code": "if t >= need or best.get(q, need) <= t:", "nth": 0,
+  "why": "without the visited prune the walk revisits pcs at later times, which flag nothing an earlier visit didn't; t still grows by U per instruction to need, so it ends"},
+ {"file": "emu/analysis.py", "func": "check_levels.raw_in_bus_slots", "desc": "statement -> pass", "code": "best[q] = t", "nth": 0,
+  "why": "without the visited times the walk revisits pcs at later times, which flag nothing an earlier visit didn't; t still grows by U per instruction to need, so it ends"}
 ]

@@ -540,3 +540,132 @@ def test_the_doers_time_counts_toward_the_confirm_window(ppm):
     for n in (15, 16, 40):
         assert diags(raw_delay_then_scl_low(n, ppm)) == []
         assert not hangs_at_a_corner(raw_delay_then_scl_low(n, ppm))
+
+
+# ---- the confirm window's bound, at its edges (the mutation run of this rule)
+CONF = 100   # at 2%: need = CONF + 1 + QUANT + drift(40000, CONF + 1 + EDGE_LAT) = 107 of the doer's cycles
+
+
+def window(body, lead=False, confirm=CONF):
+    """A START, then `body(d, sda, scl, x, lane, half)`: in line (`lead` False), or on the exit
+    path of the controller's lead block, which starts 6 cycles after the edge (ROLE_IF, BR, LI);
+    only the confirm message matters here."""
+    d = Description("cw", parties=("ctl", "tgt"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    x = d.line("x", owner="ctl", idle=1)
+    d.bus("i2c", sda, scl, confirm=confirm)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=2)
+    half = d.profile("HALF", nom=20, min=0, max=INF)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    if not lead:
+        d.cond("start", owner="ctl", prof=w)
+        body(d, sda, scl, x, lane, half)
+        d.halt()
+        return d
+    with d.only("ctl"):
+        d.li("r5", 1)
+    d.abort_to("frame")
+    d.label("frame")
+    d.cond("start", owner="ctl", prof=w)
+    with d.lead("ctl"):
+        d.br("go", cond="z", reg="r5")
+        d.li("r5", 0)
+        body(d, sda, scl, x, lane, half)
+        d.cond("rise", scl, owner="ctl", prof=w)
+        d.cond("stop", owner="ctl", prof=w)
+        d.br("frame")
+    d.label("go")
+    d.xfer(8, lane, owner="ctl", prof=d.profile("H300", nom=300, min=0, max=INF), src="zero", abort=True)
+    d.halt()
+    return d
+
+
+def confirm_flag(d, what):
+    return any(r == "R1-bus" and f"{what} on SCL (scl) by P0" in m and "before the followers confirm" in m
+               for r, m in diags(d))
+
+
+def prof(d, nom):
+    return d.profile(f"N{nom}", nom=nom, min=0, max=INF)
+
+
+@pytest.mark.parametrize("nom,bad", [(112, True), (113, False)])
+def test_a_lead_cond_fall_on_scl_counts_its_nom_less_drift(nom, bad):
+    """A COND acts at tb + nom (its start, at 6, if later): nom - drift(40000, nom) - QUANT against
+    107. The untimed instructions before it don't add to its nom (found by the re-review)."""
+    d = window(lambda d, sda, scl, x, lane, half: d.cond("fall", scl, owner="ctl", prof=prof(d, nom)), lead=True)
+    assert confirm_flag(d, "COND FALL") == bad
+
+
+def test_a_lead_cond_fall_of_nom_1_counts_nothing():
+    """After RAW DELAY 100 the COND comes at 106; its nom 1 counts as 0, so its edge is at 106."""
+    def body(d, sda, scl, x, lane, half):
+        d.raw_delay(100)
+        d.cond("fall", scl, owner="ctl", prof=prof(d, 1))
+    assert confirm_flag(window(body, lead=True), "COND FALL")
+
+
+@pytest.mark.parametrize("H,bad", [(56, True), (57, False)])
+def test_a_lead_xfer_on_another_lane_counts_2nh(H, bad):
+    """A bit on lane M (y, c), then a COND FALL of nom 1 on SCL: the XFER ends at tb + 2H (less
+    drift and QUANT), against 107."""
+    def body(d, sda, scl, x, lane, half):
+        y = d.line("y", owner="ctl", idle=0)
+        c = d.line("c", owner="ctl", idle=0)
+        m = d.lane("M", y, clk=c)
+        d.xfer(1, m, owner="ctl", prof=prof(d, H), src="zero")
+        d.cond("fall", scl, owner="ctl", prof=prof(d, 1))
+    assert confirm_flag(window(body, lead=True), "COND FALL") == bad
+
+
+@pytest.mark.parametrize("H,bad", [(112, True), (113, False)])
+def test_a_lead_clocked_xfer_on_scl_falls_after_h(H, bad):
+    """Its first leading edge at tb + H, less drift and QUANT."""
+    d = window(lambda d, sda, scl, x, lane, half: d.xfer(1, lane, owner="ctl", prof=prof(d, H), src="zero"), lead=True)
+    assert confirm_flag(d, "a clocked XFER") == bad
+
+
+def test_a_lead_cond_on_another_line_is_no_scl_fall():
+    d = window(lambda d, sda, scl, x, lane, half: d.cond("fall", x, owner="ctl", prof=prof(d, 4)), lead=True)
+    assert not any("before the followers confirm" in m for _, m in diags(d))
+
+
+@pytest.mark.parametrize("src,bad", [("zero", True), ("ones", False)])
+def test_an_unclocked_xfer_on_scl_drives_at_its_start(src, bad):
+    """After RAW DELAY 104 (106 with its ROLE_IF), bit 0 at once: 106 < 107. From ONES, SCL stays up."""
+    def body(d, sda, scl, x, lane, half):
+        with d.only("ctl"):
+            d.raw_delay(104)
+        d.xfer(1, scl, owner="ctl", prof=d.profile("B", nom=60, min=50, max=70), src=src)
+    assert confirm_flag(window(body), "an XFER") == bad
+
+
+@pytest.mark.parametrize("level,bad", [(0, True), (1, False)])
+def test_a_hold_on_scl_drives_at_its_start(level, bad):
+    """After RAW DELAY 104 (106 with its ROLE_IF): a HOLD 0 falls at 106; a HOLD 1 is no change."""
+    def body(d, sda, scl, x, lane, half):
+        with d.only("ctl"):
+            d.raw_delay(104)
+        d.hold(scl, level, owner="ctl", prof=d.profile("H", nom=60))
+    assert confirm_flag(window(body), f"HOLD {level}") == bad
+
+
+def test_only_raw_delay_counts_as_a_delay():
+    """An LI of 0x3FFF has DELAY's sub field (3) and 0xFFF in its operand: it still takes U."""
+    def body(d, sda, scl, x, lane, half):
+        with d.only("ctl"):
+            d.li("r5", 0x3FFF)
+            d.raw_set(scl, 0)
+    assert confirm_flag(window(body), "RAW SET 0")
+
+
+def test_a_lead_hold_moves_the_anchor_not_the_doers_time():
+    """A lead COND on x, then a HOLD 1 on x of 50: its owner finishes it at its start, so the RAW
+    SET 0 on SCL after it comes some 6 cycles after the START, not 55, inside the default confirm
+    window (found by the re-review)."""
+    def body(d, sda, scl, x, lane, half):
+        d.cond("fall", x, owner="ctl", prof=prof(d, 4))
+        d.hold(x, 1, owner="ctl", prof=d.profile("H50", nom=50))
+        d.raw_set(scl, 0)
+    assert confirm_flag(window(body, lead=True, confirm=None), "RAW SET 0")

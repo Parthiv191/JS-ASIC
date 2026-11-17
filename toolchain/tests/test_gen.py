@@ -204,14 +204,11 @@ def test_a_planted_follower_bug_fails_the_bus_campaign(flipped_followers):
 
 
 # ---- the review of the bus family
-def test_the_bus_oracle_lets_a_bus_exit_take_its_flag():
+def nacked():
     """The target NACKs; the controller's lead block STOPs and branches to abort_pc, and the
-    target and MON, in the block's successor with ABORT, take the STOP as a bus exit: their
-    detectors saw a STOP that no COND STOP of theirs took, which is right."""
+    target and MON, in the block's successor with ABORT, take the STOP as a bus exit."""
     from emu.desc import Description
-    from emu.gen.check import bus_mismatches
-    from emu.isa import INF, Role
-    from emu.model.system import EngineSpec, System
+    from emu.isa import INF
     d = Description("nx", parties=("ctl", "tgt"))
     sda = d.line("sda", "od", owner="shared", idle=1)
     scl = d.line("scl", "od", owner="ctl", idle=1)
@@ -235,10 +232,40 @@ def test_the_bus_oracle_lets_a_bus_exit_take_its_flag():
     d.cond("stop", owner="ctl", prof=w)
     d.label("done")
     d.halt()
+    return d
+
+
+def bus_run(d):
+    from emu.isa import Role
+    from emu.model.system import EngineSpec, System
     img = compile_desc(d)
-    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    return img, System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+
+
+def test_the_bus_oracle_lets_a_bus_exit_take_its_flag():
+    """Their detectors saw a STOP that no COND STOP of theirs took, which is right."""
+    from emu.gen.check import bus_mismatches
+    img, t = bus_run(nacked())
     assert [any(e.kind == "BUS" for e in et.events) for et in t.engines] == [False, True, True]
     assert bus_mismatches(img, t) == []
+
+
+def test_a_detector_that_reports_twice_fails_the_bus_oracle(monkeypatch):
+    """A planted model bug: each confirmed START or STOP is logged twice. The flags work as before,
+    so every role completes and agrees; only the detector comparison sees it, also in an engine
+    that took a bus exit (found by the re-review: such an engine wasn't compared at all)."""
+    from emu.gen.check import bus_mismatches
+    orig = engine.Engine._confirm_candidate
+
+    def bad(self):
+        ok = orig(self)
+        self.bus_events.append(self.bus_events[-1])
+        return ok
+    monkeypatch.setattr(engine.Engine, "_confirm_candidate", bad)
+    img, t = bus_run(nacked())
+    assert {m.split(":")[0] for m in bus_mismatches(img, t)} == {"P1", "MON"}
+    rep = campaign(seed=3, iters=150, family="i2c")
+    assert rep.failures and all(r.rules == ("bus",) for _, r in rep.failures)
 
 
 def test_a_halt_that_does_nothing_fails_the_bus_campaign(monkeypatch):

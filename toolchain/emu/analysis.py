@@ -436,105 +436,164 @@ def check_levels(desc, low: Lowered) -> list[Diagnostic]:
         """At least this many of the doer's cycles, for a nominal x (less drift and QUANT)."""
         return max(0, x - drift(2 * ppm, x) - Q)
 
-    def scl_falls(q: int, r: Role) -> tuple[str, int] | None:
-        """If r's instruction at q may take SCL low: what it is, and how long after its start at
-        the least (a RAW SET 0, a HOLD 0 or an unclocked XFER on SCL at once, a COND FALL at its
-        nom, a clocked XFER at its first leading edge, H)."""
+    def scl_falls(q: int, r: Role, t: int, tb: int) -> str | None:
+        """What r's instruction at q is, if it may take SCL low before `need`, with r at t and its
+        anchor at tb: a RAW SET 0 at t; a HOLD 0 or an unclocked XFER on SCL at its start,
+        max(t, tb); a COND FALL at max(t, tb + nom); a clocked XFER at its first leading edge,
+        max(t, tb + H) (isa §4.2, §4.3)."""
         ins = instrs[q]
         if r not in runs(q):
             return None
         if ins.op == Op.RAW:
-            return ("RAW SET 0", 0) if ins.sub == RawOp.SET and not ins.operand & 1 and ins.ra == scl else None
+            ok = ins.sub == RawOp.SET and not ins.operand & 1 and ins.ra == scl
+            return "RAW SET 0" if ok and t < need else None
         if ins.op == Op.HOLD:
-            return ("HOLD 0", 0) if ins.line == scl and not ins.operand & 1 and does(ins.owner, r) else None
+            ok = ins.line == scl and not ins.operand & 1 and does(ins.owner, r)
+            return "HOLD 0" if ok and max(t, tb) < need else None
         if ins.op == Op.COND:
-            return ("COND FALL", lb(nom_of(ins))) if edge_line(ins) == (CondKind.FALL, scl) and does(ins.owner, r) else None
+            ok = edge_line(ins) == (CondKind.FALL, scl) and does(ins.owner, r)
+            return "COND FALL" if ok and max(t, tb + lb(nom_of(ins))) < need else None
         if ins.op == Op.XFER:
-            la = lanes[ins.line]
-            if la.clk == scl and int(lines[scl].owner) == int(r):
-                return "a clocked XFER", lb(nom_of(ins))
-            if la.clk is None and la.data == scl and does(ins.owner, r) and unpack_xfer(ins.operand)[1] != Src.ONES:
-                return "an XFER", 0
+            ln = lanes[ins.line]
+            if ln.clk == scl and int(lines[scl].owner) == int(r):
+                return "a clocked XFER" if max(t, tb + lb(nom_of(ins))) < need else None
+            if ln.clk is None and ln.data == scl and does(ins.owner, r) and unpack_xfer(ins.operand)[1] != Src.ONES:
+                return "an XFER" if max(t, tb) < need else None
         return None
 
-    def took(q: int) -> int:
-        """At least how long r's instruction at q takes: U untimed (RAW DELAY n: n rounded up to
-        U), a timed step its nom, a clocked XFER 2nH (less drift)."""
+    def after(q: int, t: int, tb: int) -> tuple[int, int]:
+        """r's time and anchor after its instruction at q, at the least: U untimed (RAW DELAY n:
+        n rounded up to U); a COND done at max(t, tb + nom); a HOLD starts at max(t, tb) and moves
+        tb by nom; an XFER moves tb by its length (a clocked one 2nH) and ends there."""
         ins = instrs[q]
-        if ins.op == Op.XFER and lanes[ins.line].clk is not None:
-            return lb(2 * unpack_xfer(ins.operand)[0] * nom_of(ins))
-        if ins.op in (Op.COND, Op.HOLD, Op.XFER):
-            return lb(nom_of(ins))
+        if ins.op == Op.COND:
+            act = max(t, tb + lb(nom_of(ins)))
+            return act, act
+        if ins.op == Op.HOLD:
+            return max(t, tb), tb + lb(nom_of(ins))
+        if ins.op == Op.XFER:
+            n = 2 * unpack_xfer(ins.operand)[0] if lanes[ins.line].clk is not None else 1
+            end = tb + lb(n * nom_of(ins))
+            return max(t, end), end
         if ins.op == Op.RAW and ins.sub == RawOp.DELAY:
-            return max(U, -(-ins.operand // U) * U)
-        return U
+            return t + max(U, -(-ins.operand // U) * U), tb
+        return t + U, tb
+
+    need = img.bus.confirm_cycles + 1 + Q + drift(2 * ppm, img.bus.confirm_cycles + 1 + E)
 
     def raw_in_bus_slots(r: Role) -> None:
         """R1-bus on I2C: the followers confirm a START or STOP only if SCL stays high for the
-        confirm window (isa §4.7), and its doer finishes a COND START/STOP at the edge. So until
-        then SCL may not fall: by an untimed instruction before its next followed timed step, a
-        timed step in its lead block (nobody follows it), or a HOLD or an unclocked XFER with SCL
-        as data next, which drive at their start. The doer's time is counted from the edge, at the
-        least: U per untimed instruction, RAW DELAY, the lead steps' noms. (Any other followed step
-        is T5-watch's: the followers start it before its event, so after their confirm.)"""
-        need = img.bus.confirm_cycles + 1 + Q + drift(2 * ppm, img.bus.confirm_cycles + 1 + E)
+        confirm window (isa §4.7), and its doer finishes a COND START/STOP at the edge. So SCL may
+        not fall before `need` of the doer's cycles from the edge: by an untimed instruction before
+        its next followed timed step, a timed step in its lead block (nobody follows it), or a HOLD
+        or an unclocked XFER with SCL as data next, which drive at their start. Its time t and
+        anchor tb are walked at the least, each the smallest over the paths (`after`). (Any other
+        followed step is T5-watch's: the followers start it before its event, so after their
+        confirm.)"""
         for pc, ins in enumerate(instrs):
             if (ins.op != Op.COND or r not in runs(pc) or not does(ins.owner, r)
                     or edge_line(ins)[0] not in (CondKind.START, CondKind.STOP)):
                 continue
-            best: dict[int, int] = {}
-            work = [(q, 0) for q in successors(instrs, pc, r)]
+            best: dict[int, tuple[int, int]] = {}
+            work = [(q, 0, 0) for q in successors(instrs, pc, r)]
             while work:
-                q, t = work.pop()
-                if t >= need or best.get(q, need) <= t:
+                q, t, tb = work.pop()
+                if t >= need or q >= len(instrs):
                     continue
-                best[q] = t
+                if q in best:
+                    bt, btb = best[q]
+                    if bt <= t and btb <= tb:
+                        continue
+                    t, tb = min(t, bt), min(tb, btb)
+                best[q] = t, tb
                 nxt = instrs[q]
                 timed = nxt.op in (Op.COND, Op.HOLD, Op.XFER)
-                falls = scl_falls(q, r)
-                if (falls and t + falls[1] < need
-                        and (not timed or q in lead_pcs or falls[0] in ("HOLD 0", "an XFER"))):
+                falls = scl_falls(q, r, t, tb)
+                if falls and (not timed or q in lead_pcs or falls in ("HOLD 0", "an XFER")):
                     where = " in a lead block (nobody follows it)" if timed and q in lead_pcs else ""
-                    diags.add("R1-bus", q, f"{falls[0]} on SCL ({lines[scl].name}) by {r.name}{where} comes before "
+                    diags.add("R1-bus", q, f"{falls} on SCL ({lines[scl].name}) by {r.name}{where} comes before "
                                            f"the followers confirm its COND {edge_line(ins)[0].name} at pc {pc} (its "
                                            f"doer finishes it at the edge): SCL falls in their confirm window, so "
                                            f"they drop it and wait for it (isa §4.7)")
                 if timed and q not in lead_pcs:
                     continue
-                work += [(s2, t + took(q)) for s2 in successors(instrs, q, r)]
+                t2, tb2 = after(q, t, tb)
+                work += [(s2, t2, tb2) for s2 in successors(instrs, q, r)]
 
-    def next_timed(pc: int, r: Role) -> set[int]:
-        """The timed steps r may reach first after pc."""
+    def next_timed(pc: int, role: Role, through_lead: bool = False) -> set[int]:
+        """The timed steps `role` may reach first after pc (`through_lead`: walking on past lead
+        blocks' steps, which nobody but the leader runs)."""
         out: set[int] = set()
-        seen, work = set(), list(successors(instrs, pc, r))
+        seen, work = set(), list(successors(instrs, pc, role))
         while work:
             q = work.pop()
             if q in seen or q >= len(instrs):
                 continue
             seen.add(q)
-            if instrs[q].op in (Op.COND, Op.HOLD, Op.XFER):
+            if instrs[q].op in (Op.COND, Op.HOLD, Op.XFER) and not (through_lead and q in lead_pcs):
                 out.add(q)
             else:
-                work += successors(instrs, q, r)
+                work += successors(instrs, q, role)
+        return out
+
+    def waits_for(q: int, block: frozenset) -> bool:
+        """Whether the others need a party of `block` (the RAW's role block, which they finish
+        first) to complete the timed step at q: a COND it does, a clocked XFER it clocks. A HOLD,
+        an unclocked XFER or a step of a party outside the block completes without them."""
+        s2 = instrs[q]
+        if s2.op == Op.XFER and lanes[s2.line].clk is not None:
+            who = lines[lanes[s2.line].clk].owner
+        elif s2.op == Op.COND and s2.owner != Owner.SHARED:
+            who = s2.owner
+        else:
+            return False
+        return any(int(who) == int(q2) for q2 in block)
+
+    def waiting_in(pc: int, r: Role) -> set[int]:
+        """The timed steps the others may be in when r's RAW at pc acts. MON and any party not in
+        its block skip it, so they are in r's next timed step (past its lead blocks' steps, and at a
+        lead block's successor S for a RAW in it), or, where that completes without r, past it on
+        their own paths."""
+        others = [q for q in ROLES if q != r]
+        sp = next((sp for sp in low.spans if sp.start <= pc < sp.end), None)
+        block = frozenset(sp.roles) if sp is not None else frozenset({r})
+        out: set[int] = set()
+        work = sorted(next_timed(pc, r, through_lead=True)
+                      | ({sp.end} if sp is not None and sp.lead and sp.end < len(instrs) else set()))
+        while work:
+            q = work.pop()
+            if q in out:
+                continue
+            out.add(q)
+            if not waits_for(q, block):
+                for o in others:
+                    work += sorted(next_timed(q, o))
         return out
 
     def raw_edges(pc: int, r: Role, was, now) -> None:
         """R2-edge: a RAW SET/REL is in a role block, which MON (and any party not in it) skips, so
-        they already wait in the next timed step when it acts. An edge it may make there that the
-        step waits for (a COND FALL/RISE's on its line, a clocked XFER's leading edge on its clock)
-        is taken as the step's own (isa §4.2, §4.3): a pulse, say, though the level is back by then."""
-        ins = instrs[pc]
-        for q in sorted(next_timed(pc, r)):
+        they already wait in a later timed step when it acts (`waiting_in`). An edge it may make
+        that such a step waits for is taken as the step's own (isa §4.2, §4.3), a pulse too, though
+        the level is back by then: a COND FALL/RISE's on its line, a clocked XFER's leading edge on
+        its clock, and any edge on an unclocked XFER's data line with CHK (its followers check every
+        edge from its start)."""
+        raw = instrs[pc]
+        for q in sorted(waiting_in(pc, r)):
             nxt = instrs[q]
-            if nxt.op == Op.COND and edge_line(nxt)[0] in (CondKind.FALL, CondKind.RISE) and nxt.line == ins.ra:
+            if nxt.op == Op.COND and edge_line(nxt)[0] in (CondKind.FALL, CondKind.RISE) and nxt.line == raw.ra:
                 to, step_is = (0 if edge_line(nxt)[0] == CondKind.FALL else 1), f"COND {edge_line(nxt)[0].name}"
-            elif nxt.op == Op.XFER and lanes[nxt.line].clk == ins.ra:
+            elif nxt.op == Op.XFER and lanes[nxt.line].clk == raw.ra:
                 to, step_is = 1 - lanes[nxt.line].cpol, "clocked XFER"
+            elif (nxt.op == Op.XFER and lanes[nxt.line].clk is None and lanes[nxt.line].data == raw.ra
+                  and nxt.flags & F_CHK):
+                to, step_is = None, "XFER with CHK"
             else:
                 continue
-            if q not in lead_pcs and was != to and (now is None or now == to):
-                what = f"RAW SET {ins.operand & 1}" if ins.sub == RawOp.SET else "RAW REL"
-                diags.add("R2-edge", pc, f"{what} on {lines[ins.ra].name} by {r.name} may take it to {to} while "
+            edge = (was != now or was is None) if to is None else (was != to and (now is None or now == to))
+            if edge:
+                what = f"RAW SET {raw.operand & 1}" if raw.sub == RawOp.SET else "RAW REL"
+                where = f"take it to {to}" if to is not None else "make an edge"
+                diags.add("R2-edge", pc, f"{what} on {lines[raw.ra].name} by {r.name} may {where} while "
                                          f"the others already wait in the {step_is} at pc {q} (they skip its "
                                          f"role block, MON every one), so they take it as that step's edge "
                                          f"(isa §4.2)")
