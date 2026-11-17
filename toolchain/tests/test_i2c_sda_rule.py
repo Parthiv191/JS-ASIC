@@ -442,3 +442,101 @@ def test_scl_low_by_raw_after_the_next_timed_step_is_legal():
     d = scl_after("stop", "SET 0", spare=True)
     assert not any("before the followers confirm" in m for _, m in diags(d))
     assert not hangs(d)
+
+
+def hold_scl_after(bus_cond):
+    """A START (or a bit and a STOP), then at once a HOLD 0 on SCL: a HOLD drives when it starts,
+    ISSUE after the edge, and T5-watch times only its sample (found by the review)."""
+    d = Description("hs", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    d.cond("start", owner="ctl", prof=w)
+    if bus_cond == "stop":
+        d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+        d.cond("stop", owner="ctl", prof=w)
+    d.hold(scl, 0, owner="ctl", prof=d.profile("H0", nom=60))
+    d.hold(scl, 1, owner="ctl", prof=d.profile("H1", nom=60))
+    if bus_cond == "start":
+        d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+        d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("bus_cond", ["start", "stop"])
+def test_a_hold_0_on_scl_right_after_a_start_or_stop_is_rejected(bus_cond):
+    assert any(r == "R1-bus" and f"HOLD 0 on SCL (scl) by P0 comes before the followers confirm its "
+               f"COND {bus_cond.upper()}" in m for r, m in diags(hold_scl_after(bus_cond)))
+    assert hangs(hold_scl_after(bus_cond))
+
+
+def lead_after_start(nom):
+    """A START, then the controller's lead block, whose exit path first takes SCL low by a COND
+    FALL of `nom`: nobody follows a lead block's steps, so T5-watch doesn't time it. The exit
+    STOPs and retries; S, the controller's byte, is the fall-through (found by the review)."""
+    d = Description("ls", parties=("ctl", "tgt"))
+    sda, scl, x, lane, half, w = bus(d)
+    with d.only("ctl"):
+        d.li("r5", 1)
+    d.abort_to("frame")
+    d.label("frame")
+    d.cond("start", owner="ctl", prof=w)
+    with d.lead("ctl"):
+        d.br("go", cond="z", reg="r5")
+        d.li("r5", 0)
+        d.cond("fall", scl, owner="ctl", prof=d.profile("S", nom=nom, min=0, max=INF))
+        d.cond("rise", scl, owner="ctl", prof=w)
+        d.cond("stop", owner="ctl", prof=w)
+        d.br("frame")
+    d.label("go")
+    d.xfer(8, lane, owner="ctl", prof=d.profile("H30", nom=30, min=0, max=INF), src="zero", abort=True)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+def test_a_lead_blocks_scl_fall_in_a_starts_confirm_window_is_rejected():
+    flagged = lambda d: any(r == "R1-bus" and "COND FALL on SCL (scl) by P0 in a lead block" in m for r, m in diags(d))
+    assert flagged(lead_after_start(4))
+    img = compile_desc(lead_after_start(4), check_levels=False, check_timing=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    assert [k for _, k in t.engines[1].bus_events][0] != "START"   # the target dropped the first START
+    assert not flagged(lead_after_start(40))                       # its edge 40 later: after the confirm
+
+
+def raw_delay_then_scl_low(n, ppm):
+    d = Description("rb", parties=("ctl", "tgt"), tolerance_ppm=ppm)
+    sda, scl, x, lane, half, w = bus(d)
+    d.cond("start", owner="ctl", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    with d.only("ctl"):
+        if n:
+            d.raw_delay(n)
+        d.raw_set(scl, 0)
+        d.raw_rel(scl)
+    d.cond("fall", x, owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+@pytest.mark.parametrize("ppm", [0, 20000])
+def test_the_doers_time_counts_toward_the_confirm_window(ppm):
+    """The doer's time from the edge counts: U per untimed instruction and RAW DELAY. With the
+    default confirm of 15, a RAW SET 0 on SCL after RAW DELAY 15 or more is accepted, and runs
+    clean at the tolerance corners; on the model the followers hang up to RAW DELAY 10 (the
+    compiler leaves out ISSUE, so it is 4 cycles safe)."""
+    lo = 1000 - ppm // 1000
+    corners = [((1, 1),) * 3, ((1000, 1000), (lo, 1000), (lo, 1000)), ((lo, 1000), (1000, 1000), (1000, 1000))]
+
+    def hangs_at_a_corner(d):
+        img = compile_desc(d, check_levels=False, check_timing=False)
+        return any(not all(et.halted for et in System([EngineSpec(img, r, clock=c) for r, c in
+                                                       zip((Role.P0, Role.P1, Role.MON), cs)]).run(50_000).engines)
+                   for cs in corners)
+    for n in (0, 10, 14):
+        assert any(r == "R1-bus" for r, _ in diags(raw_delay_then_scl_low(n, ppm)))
+    assert hangs_at_a_corner(raw_delay_then_scl_low(10, ppm))
+    for n in (15, 16, 40):
+        assert diags(raw_delay_then_scl_low(n, ppm)) == []
+        assert not hangs_at_a_corner(raw_delay_then_scl_low(n, ppm))

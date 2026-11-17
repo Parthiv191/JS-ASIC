@@ -211,3 +211,88 @@ def test_a_lead_block_whose_successor_is_the_leaders_own_cond_is_paced_too():
     d.halt()
     assert diags(d) == []
     runs_clean(d)
+
+
+# ---- the review of this PR
+def start_after_lead(exit_low):
+    """S is the controller's COND START. The lead block's exit path holds y low by a RAW SET 0
+    (`exit_low`), STOPs from idle and branches to abort_pc, then goes the other way. The target in
+    S ignores the STOP (a followed START does, §4.2) and completes S when the controller comes back,
+    with y still low: its COND FALL y makes no edge."""
+    d = Description("sl", parties=("ctl", "tgt"))
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="ctl", idle=1)
+    y = d.line("y", "od", owner="shared", idle=1)
+    d.bus("i2c", sda, scl)
+    lane = d.lane("L", sda, clk=scl, cpol=1, cpha=1, ldelay=2)
+    half = d.profile("HALF", nom=20, min=0, max=INF)
+    w = d.profile("W", nom=40, min=0, max=INF)
+    with d.only("ctl"):
+        d.li("r5", 1)
+    d.abort_to("frame")
+    d.label("frame")
+    with d.lead("ctl"):
+        d.br("go", cond="z", reg="r5")
+        d.li("r5", 0)
+        if exit_low:
+            d.raw_set(y, 0)
+        d.cond("fall", scl, owner="ctl", prof=w)
+        d.cond("fall", sda, owner="ctl", prof=w)
+        d.cond("rise", scl, owner="ctl", prof=w)
+        d.cond("stop", owner="ctl", prof=w)
+        d.br("frame")
+    d.label("go")
+    d.cond("start", owner="ctl", prof=w, abort=True)
+    d.xfer(8, lane, owner="ctl", prof=half, src="zero")
+    d.xfer(1, lane, owner="tgt", prof=half, src="zero")
+    d.cond("fall", y, owner="tgt", prof=w)
+    d.cond("rise", y, owner="tgt", prof=w)
+    d.xfer(1, lane, owner="ctl", prof=half, src="zero")
+    d.cond("stop", owner="ctl", prof=w)
+    d.halt()
+    return d
+
+
+def test_a_lead_block_before_a_cond_start_still_counts_its_exit_paths():
+    """The others complete a COND START S after the leader's exit and its way back from abort_pc,
+    so the exit path's drives are still there (found by the review: the first cut of the lead-block
+    refinement accepted this, which main rejects)."""
+    assert any(r == "R2-edge" and "y may not be high here" in m for r, m in diags(start_after_lead(True)))
+    assert diags(start_after_lead(False)) == []
+    img = compile_desc(start_after_lead(True), check_levels=False, check_timing=False)
+    t = System([EngineSpec(img, r) for r in (Role.P0, Role.P1, Role.MON)]).run(100_000)
+    assert not all(et.halted for et in t.engines)
+
+
+def test_a_let_go_isnt_released_by_an_unclocked_xfer():
+    """a's clocked XFER leaves a let-go on s, which only the lane's clock releases; b's unclocked
+    XFER on s makes no clock edge, so its ONES read 0 (found by the review)."""
+    d = Description("ul", parties=("a", "b"), tolerance_ppm=0)
+    s = d.line("s", "od", owner="shared", idle=1)
+    c = d.line("c", owner="a", idle=0)
+    x = d.line("x", owner="b", idle=1)
+    lane = d.lane("L", s, clk=c, cpol=0, cpha=1, ldelay=2)
+    d.nop()
+    d.xfer(4, lane, owner="a", prof=d.profile("HALF", nom=20, min=0, max=INF), src="zero")
+    d.cond("fall", x, owner="b", prof=d.profile("W", nom=40, min=0, max=INF))
+    d.xfer(4, s, owner="b", prof=d.profile("BIT", nom=40, min=30, max=50), src="ones")
+    d.halt()
+    assert any(r == "R2-edge" and f"XFER by P1 on s: {SAYS}" in m for r, m in diags(d))
+    assert values(d) == [0, 0]
+
+
+def test_a_duplex_xfers_data2_needs_the_others_released_too():
+    """data2 is its line owner's to send; a holds it low by a RAW, so b's ONES read 0 (found by the
+    review)."""
+    d = Description("dx", parties=("a", "b"), tolerance_ppm=0)
+    s1 = d.line("s1", "od", owner="a", idle=1)
+    s2 = d.line("s2", "od", owner="b", idle=1)
+    c = d.line("c", owner="a", idle=0)
+    lane = d.lane("L", s1, clk=c, cpol=0, cpha=1, data2=s2)
+    d.nop()
+    with d.only("a"):
+        d.raw_set(s2, 0)
+    d.xfer(4, lane, owner="a", prof=d.profile("HALF", nom=20, min=0, max=INF), src="ones")
+    d.halt()
+    assert any(r == "R2-edge" and f"XFER by P1 on s2: {SAYS}" in m for r, m in diags(d))
+    assert values(d) == [0x0F]   # s1's ONES, s2's read 0

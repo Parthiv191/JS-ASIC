@@ -9,7 +9,7 @@ tolerance and no glitches, these must hold:
 |---|---|
 | `violation` | an engine logs a violation (isa §7: OVERRUN, EARLY, TIMEOUT, LEVEL, EDGE, ...) |
 | `contention` | two drivers fight on a wire |
-| `completion` | an engine doesn't halt, or the run isn't quiescent, by the tick budget |
+| `completion` | an engine doesn't halt, or the run isn't quiescent, by the tick budget, or a party halts early where the recipe has it run to the end, or the reverse (`expected_halts`) |
 | `agreement` | the engines' timed steps (pc, op, XFER value), wire registers r1-r4 or RX words differ |
 | `value` | an XFER's value isn't what the recipe says (`expected_values`: src, host words, prep ops), so wrong semantics that every role shares fail too |
 | `bus` | on an I2C bus, an SDA edge with SCL high on the wire that no COND START/STOP made, or a follower's detector reporting a START or STOP that its COND START/STOP steps don't match (isa §4.7, §5 R1-bus) |
@@ -28,7 +28,8 @@ from ..compiler import CompileError, compile_desc
 from ..isa import BusKind, CondKind, Dst, Role, unpack_cond, unpack_xfer
 from ..model.engine import VIOLATIONS
 from ..model.system import EngineSpec, System
-from .randdesc import HOST_WORDS, PARTIES, Recipe, build, expected_values, random_bus_recipe, random_recipe
+from .randdesc import (HOST_WORDS, PARTIES, Recipe, build, expected_halts, expected_values, random_bus_recipe,
+                       random_recipe)
 
 ROLES = (Role.P0, Role.P1, Role.MON)
 MAX_TICKS = 400_000
@@ -145,8 +146,13 @@ def run_case(case: Case) -> Result:
                 and unpack_xfer(instrs[r.pc].operand)[2] == Dst.FIFO]
         if et.rx != want:
             fails.append(("agreement", f"{et.role.name}: rx {et.rx}, but it followed {want} into the FIFO"))
+    early = expected_halts(case.recipe)
+    for i, (et, p) in enumerate(zip(t.engines[:2], PARTIES)):
+        if et.halted and full[i] == (p in early):
+            fails.append(("completion", f"{et.role.name} {'ran to the end' if full[i] else 'halted early'}, "
+                                        f"but the recipe has it {'halt in its block' if full[i] else 'run to the end'}"))
     want = expected_values(case.recipe, dict(zip(PARTIES, (list(w) for w in env.words))))
-    got = [r.value for r in t.engines[2].records if r.op == "XFER"]
+    got = [r.value for r in t.engines[0 if full[0] else 2].records if r.op == "XFER"]
     if got != want:
         k = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
         fails.append(("value", f"XFER {k}: {got[k] if k < len(got) else 'none'}, the recipe says "
@@ -164,7 +170,10 @@ def bus_mismatches(img, t) -> list[str]:
     one of the COND START/STOPs that SCL's owner made (isa §5 R1-bus): a stray one is a failure
     even where the engines' detectors happen to miss it (SCL fell within their confirm window). And
     each follower's detector must report exactly the STARTs and STOPs its COND START/STOPs took,
-    in order (a halted engine detects nothing more)."""
+    in order (a halted engine detects nothing more; one that took a bus exit isn't checked, as
+    the exit takes a flag with no COND). Kinds and order only: a run where a STOP goes missing and
+    a stray one comes later matches (the followers then hang on the first, which `completion`
+    sees)."""
     instrs, sda, scl = img.instrs(), img.bus.a, img.bus.b
     edges = t.wire_edges
 
@@ -186,8 +195,8 @@ def bus_mismatches(img, t) -> list[str]:
                    f"{f'a {wire[k][0]} at tick {wire[k][1]}' if k < len(wire) else 'missing'}, "
                    f"the controller's COND made {made[k] if k < len(made) else 'none'}")
     for et in t.engines:
-        if et is master:
-            continue  # the master line's owner runs no detector (isa §4.7)
+        if et is master or any(e.kind == "BUS" for e in et.events):
+            continue  # the master line's owner runs no detector (isa §4.7); a bus exit took a flag
         seen, took = [k for _, k in et.bus_events], bus_conds(et)
         if seen != took:
             out.append(f"{et.role.name}: its detector saw {seen}, its COND START/STOPs took {took}")

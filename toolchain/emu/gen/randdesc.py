@@ -210,8 +210,18 @@ def random_bus_recipe(seed: int) -> Recipe:
         else:
             drive(line, rng.randint(0, 1), owner)
 
+    def scl_pulse() -> None:
+        """SCL low and up again right after a bus COND, now and then a spare edge first: in the
+        followers' confirm window, unless enough time passes (isa §4.7)."""
+        if rng.random() < 0.5:
+            spare()
+        drive(SCL, 0, "a")
+        drive(SCL, 1, "a")
+
     for _ in range(rng.randint(1, 2)):
         step("start", "a", wait=rng.choice(waits))
+        if rng.random() < 0.1:
+            scl_pulse()
         for k in range(rng.randint(1, 3)):
             sender = "a" if k == 0 else rng.choice(PARTIES)
             xfer(sender, 8 if rng.random() < 0.7 else rng.randint(1, 8))
@@ -234,6 +244,8 @@ def random_bus_recipe(seed: int) -> Recipe:
             drive(SDA, 0, "a")
             cond(SCL, "rise", "a")
         step("stop", "a", wait=rng.choice(waits))
+        if rng.random() < 0.1:
+            scl_pulse()
         if rng.random() < 0.3:
             spare()
     for _ in range(rng.choice((0, 0, 0, 1, 1, 2, 3))):
@@ -368,6 +380,21 @@ def build(r: Recipe) -> Description:
         d.br("top", cond="nz", reg="r0")
     d.halt()
     return d
+
+
+def expected_halts(r: Recipe) -> set[str]:
+    """The parties that halt in their own block, from the recipe alone (a halt frame that its
+    `skip_on` doesn't skip; halt frames come only with loops = 1)."""
+    wire = {reg: 0 for reg in WIRE_REGS}
+    out: set[str] = set()
+    for f in r.frames:
+        if f.skip_on is not None and wire[f.skip_on]:
+            continue
+        if f.kind == "li":
+            wire[f.dst] = f.imm & MASK16
+        elif f.kind == "halt":
+            out.add(f.owner)
+    return out
 
 
 def _alu(op: str, a: int, b: int) -> int:

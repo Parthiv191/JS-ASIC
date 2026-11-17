@@ -513,6 +513,7 @@ async def test_random_bus_program(dut, k):
     COSIM_RANDOM_BUS sets the count."""
     r, rep, role = random_case(k, "i2c")
     assert rep.expected, f"recipe {r.seed}: nothing to compare"
+    assert not rep.trace.contention, f"recipe {r.seed}: contention on the model"
     await cosim(dut, rep, role)
 
 
