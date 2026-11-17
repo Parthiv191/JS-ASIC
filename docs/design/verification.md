@@ -66,7 +66,7 @@ A name in a test shows that a test expects the rule, not that the test is strong
 | `OVERRUN` | `test_analysis.py`, `test_engine_timed.py`, `test_hold_level.py`, `test_mutation_gaps.py` |
 | `EARLY` | `test_engine_bus.py`, `test_engine_timed.py`, `test_fuzz_unit.py`, `test_mutation_gaps.py`, `test_raw_edge_in_block.py`, `test_startup.py` |
 | `TIMEOUT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fuzz_unit.py`, `test_fz.py`, `test_lead.py`, `test_mutation_analysis.py`, `test_mutation_gaps.py` |
-| `LEVEL` | `test_engine_timed.py`, `test_hold_level.py`, `test_mutation_gaps.py`, `test_protocols.py` |
+| `LEVEL` | `test_engine_timed.py`, `test_hold_level.py`, `test_lead.py`, `test_mutation_gaps.py`, `test_protocols.py` |
 | `EDGE` | `test_engine_timed.py`, `test_mutation_gaps.py`, `test_raw_edge_in_block.py` |
 | `CLK_PHASE` | `test_engine_clocked.py`, `test_mutation_gaps.py` |
 | `ABORT` | `test_engine_bus.py`, `test_engine_clocked.py`, `test_engine_timed.py`, `test_fuzz_devices.py`, `test_fz.py`, `test_mutation_gaps.py`, `test_protocols.py` |

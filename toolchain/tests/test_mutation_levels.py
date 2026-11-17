@@ -515,36 +515,33 @@ def test_a_let_go_met_with_a_plain_drive_may_still_release(layout):
 
 # ---------------------------------------------------------------- a block the walker skips
 def lead_exit(drive_y):
-    """SELECT. In a lead block the controller may leave by an exit (a STOP, then abort_pc); if
-    `drive_y`, that exit first pulls the shared OD line y low. The block's successor S is the
-    peripheral's own COND, so the peripheral completes it and runs on whichever way the
-    controller left, then drives y low and high. The model takes the exit (found by the review
-    of this pass)."""
+    """SELECT. The peripheral leads a block: on r3 it leaves by an exit that follows the
+    controller's STOP and branches to abort_pc; if `drive_y`, that exit first pulls the shared OD
+    line y low. The block's successor S is the controller's own COND, which it completes and runs
+    on from, while the peripheral decides, to drive y low and high and make the STOP; abort_pc
+    comes next. The model takes the exit (found by the review of #74, where the controller led and
+    S was the peripheral's: R3-lead now rejects that)."""
     d = Description("ld", parties=("ctl", "per"))
-    if not drive_y:
-        y = d.line("y", "od", owner="shared", idle=1)     # line 0, where a START/STOP's line field points
+    y = d.line("y", "od", owner="shared", idle=1)
     cs = d.line("cs", owner="ctl", idle=1)
-    if drive_y:
-        y = d.line("y", "od", owner="shared", idle=1)
-    z = d.line("z", owner="per", idle=1)
+    z = d.line("z", owner="ctl", idle=1)
     d.bus("select", cs)
     w = d.profile("W", nom=40, min=0, max=INF)
     d.abort_to("ab")
     d.li("r3", 1)
     d.cond("start", owner="ctl", prof=w)
-    with d.lead("ctl"):
+    with d.lead("per"):
         d.br("fin", "z", "r3")
         if drive_y:
-            d.cond("fall", y, owner="ctl", prof=w)
+            d.cond("fall", y, owner="per", prof=w)
         d.cond("stop", owner="ctl", prof=w)
         d.br("ab")
     d.label("fin")
-    d.cond("fall", z, owner="per", prof=w, abort=True)
-    d.cond("rise", z, owner="per", prof=w)
-    d.cond("fall", y, owner="per", prof=w)
-    d.cond("rise", y, owner="per", prof=w)
+    d.cond("fall", z, owner="ctl", prof=w, abort=True)
+    d.cond("rise", z, owner="ctl", prof=w)
+    d.cond("fall", y, owner="ctl", prof=w)
+    d.cond("rise", y, owner="ctl", prof=w)
     d.cond("stop", owner="ctl", prof=w)
-    d.halt()
     d.label("ab")
     d.cond("start", owner="ctl", prof=d.profile("L", nom=400, min=0, max=INF))
     d.cond("stop", owner="ctl", prof=w)
@@ -553,16 +550,53 @@ def lead_exit(drive_y):
 
 
 def test_a_drive_in_a_lead_block_the_walker_skips_is_unknown_after_it():
-    """The exit's y low may still hold when the peripheral's COND FALL comes: no edge, and the
-    monitor waits for one."""
+    """The exit's y low may still hold when the controller's COND FALL comes: no edge, and the
+    monitor waits for one. Without it the program runs clean."""
     assert said(lead_exit(True), "y may not be high here")
     assert model_goes_wrong(lead_exit(True))
+    runs_clean(lead_exit(False))
+
+
+def start_successor_exit():
+    """I2C, with the spare OD line x as line 0, where a START/STOP's line field points. The
+    controller leads a block whose successor S is its own START; on r5 its exit clears the bus
+    (SCL low, SDA low, SCL high, STOP) and comes back to S, abort_pc. A START S doesn't pace the
+    block (the others complete it when the leader comes back), so all its drives count at S."""
+    d = Description("ss", parties=("c", "t"))
+    x = d.line("x", "od", owner="shared", idle=1)
+    sda = d.line("sda", "od", owner="shared", idle=1)
+    scl = d.line("scl", "od", owner="c", idle=1)
+    d.bus("i2c", sda, scl)
+    d.lane("L", sda, clk=scl, cpol=1, cpha=1)
+    w = d.profile("W", nom=20, min=0, max=INF)
+    ho = d.profile("Ho", nom=20)
+
+    def stop():
+        d.cond("fall", scl, owner="c", prof=w)
+        d.hold(sda, 0, owner="c", prof=ho)
+        d.cond("rise", scl, owner="c", prof=w)
+        d.cond("stop", owner="c", prof=w)
+    d.abort_to("top")
+    d.li("r5", 1)
+    with d.lead("c"):
+        d.br("top", cond="z", reg="r5")
+        d.li("r5", 0)
+        stop()
+        d.br("top")
+    d.label("top")
+    d.cond("start", owner="c", prof=w, abort=True)
+    d.cond("fall", x, owner="t", prof=w)
+    d.cond("rise", x, owner="t", prof=w)
+    stop()
+    d.halt()
+    return d
 
 
 def test_a_start_or_stop_in_a_lead_block_drives_bus_a_not_line_0():
-    """Its line field is 0, here y: the exit's STOP leaves y alone, so the peripheral's COND FALL
-    on y is legal."""
-    assert diags(lead_exit(False)) == []
+    """The exit's STOP has line field 0, here x: it drives SDA and leaves x alone, so the target's
+    COND FALL on x after S is legal."""
+    assert diags(start_successor_exit()) == []
+    runs_clean(start_successor_exit())
 
 
 def test_a_short_xfer_on_scl_with_sda_possibly_held_is_rejected():
