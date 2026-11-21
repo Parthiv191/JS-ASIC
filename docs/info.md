@@ -46,7 +46,11 @@ returns one dummy byte first.
 
 - A host that speaks SPI mode 0: the TT demo board's microcontroller, or any microcontroller or
   FPGA.
-- Pull-up resistors on open-drain protocol lines: 2.2–4.7 kΩ for I2C. The demo board's I/O is 3.3 V.
+- **The pads have no pull-ups or pull-downs**, so the board supplies them. The demo board's I/O is 3.3 V.
+  - Open-drain protocol lines need pull-ups: 2.2–4.7 kΩ for I2C SDA and SCL.
+  - Drive the straps `ui[4]` (BOOT) and `ui[7]` (TESTMODE) low unless you mean to use them; a floating
+    TESTMODE enters the pad test at reset.
+  - Unused `uio` pins are inputs and may float; nothing reads them.
 - The device under test on `uio`: a sensor, EEPROM, SPI flash or microcontroller.
 - Optional, for standalone mode (planned): an SPI flash on `ui[3]` and `uo[3..5]`, and a
   USB-UART adapter on `uo[6]` REPORT (115200 baud).
