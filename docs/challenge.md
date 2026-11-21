@@ -57,7 +57,7 @@ Brief: https://blog.janestreet.com/protocol-emulator-asic-competition/ (posted S
 | IHP SRAM macros allowed, several, if they fit and pass precheck | 2 × `RM_IHPSG13_1P_512x32` (architecture §3) | Met on the harness (#10 re-checks at 8x4) |
 | Precheck clean | CI `gds.yaml` | Met on every passing gds run |
 | Timing at `clock_hz` (40 MHz) | sign-off clock 40 MHz (verification, 11-11, #45); slow corner on `main` (one engine) +2.24 ns at 25 ns; devOps's local two-engine run about +0.5 ns | Met on `main`; the two-engine margin is thin (plan risk 2) |
-| Open-source license | `LICENSE`, Apache 2.0 | Met |
+| Open-source license: **Apache 2.0 is required** for TT designs (11-21) | `LICENSE` (Apache 2.0), `NOTICE` (our copyright and the third-party files); every file in the repo is Apache-2.0 (§6) | Met |
 
 ## 4. Open questions
 
@@ -93,3 +93,25 @@ before tapeout.
   the MCU). A floating TESTMODE strap could enter the pad test at reset.
 - **Flash MISO** floats while CS_N is high; it is only sampled with CS_N low. With BOOT high and no
   flash fitted, the magic check (E1) or the CRC (E3) stops the boot.
+
+## 6. Apache 2.0
+
+TT requires designs to be Apache 2.0 (11-21). The repo already is: `LICENSE` is Apache 2.0, the
+toolchain's package says `Apache-2.0`, and the toolchain has no runtime dependencies.
+
+| What's in the repo | Licence | Kept as Apache asks |
+|---|---|---|
+| our RTL, toolchain, tests and docs | Apache-2.0 | `LICENSE`, `NOTICE` |
+| TT IHP Verilog template files | Apache-2.0 | `NOTICE` |
+| `src/pdn_cfg.tcl`, from 2AMLogic | Apache-2.0 (no upstream NOTICE file) | source and commit in the file's header and in `NOTICE` |
+| `test/sram/*.v`, IHP SRAM models | Apache-2.0 | headers kept, unmodified; `NOTICE` |
+| IHP PDK cells and SRAM macros, used through the flow | Apache-2.0 | not copied into the repo |
+
+**Rules for anything new** (proposed to every role, plan A15):
+- Bring in only Apache-2.0, MIT, BSD or ISC files. Keep their headers and add a `NOTICE` line in
+  the same PR.
+- No GPL, LGPL, CC-BY-SA, non-commercial or unlicensed code. Other entries' repos are often
+  unlicensed: read them, but don't copy from them.
+- Don't add licence headers to our own files (team rule). `LICENSE` and `NOTICE` cover them.
+- AI-assisted code is ours, under the same licence. Its use is documented in `decisions.md` and
+  the writeup (R14).
