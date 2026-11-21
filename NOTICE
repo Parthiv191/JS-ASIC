@@ -1,0 +1,16 @@
+JS-ASIC: a programmable protocol emulator for Tiny Tapeout (IHP SG13CMOS5L)
+Copyright 2026 the JS-ASIC authors (info.yaml `author`)
+
+Licensed under the Apache License, Version 2.0 (LICENSE).
+
+This project includes third-party files, each under its own licence:
+
+- The Tiny Tapeout IHP Verilog template (https://github.com/TinyTapeout/ttihp-verilog-template):
+  the starting point for info.yaml, docs/info.md, src/config.json, src/project.v, test/tb.v,
+  test/Makefile, .github/workflows/ and .devcontainer/. Apache-2.0.
+- src/pdn_cfg.tcl: the part below its second ruler is copied unchanged from
+  2AMLogic/sg13cmos5l-protocol-emulator, src/pdn_cfg.tcl at commit 21a2a635aa0b.
+  Apache-2.0, Copyright 2026 2AMLogic.
+- test/sram/*.v: the IHP Open PDK's SRAM behavioural models
+  (https://github.com/IHP-GmbH/IHP-Open-PDK), unmodified, for simulation only.
+  Apache-2.0, Copyright 2023 IHP PDK Authors.

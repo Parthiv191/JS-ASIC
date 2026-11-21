@@ -85,8 +85,11 @@ Each status PR refreshes the table and closes rows that are done.
 | A12 | Gate-level co-sim (`make -C test/cosim GATES=yes`) on `main`'s current gds netlist, the last M1 item; or #54's `cosim_gl` job once it merges | supervisor | verification | 11-21 | Open |
 | A13 | architecture §8's "any pad pull-ups" check is answered: none (TT, 11-21, challenge Q3); §6 could note the flash-sampling margin at 40 MHz (challenge §5) | supervisor | verification | 11-21 | Open |
 | A14 | `test/` follow-ups: drop `meas_values()`, `cosim(..., sample2=True)` for the MON data2 filters, the `devices.py` restart with CS low, confirm-0 bus flag timing, RAW REL let-go, late bits one per cycle; the random lead-block programs in #54's co-sim step | verification | devOps | 11-12 | Open |
+| A15 | Apache 2.0 rules (challenge §6): only Apache/MIT/BSD/ISC files come in, each with a `NOTICE` line in the same PR; nothing copied from unlicensed entries | supervisor | verification, devOps | 11-21 | Open |
+| A16 | #46: `fpga/basys3.xdc` takes its pin names from Digilent's Basys-3-Master.xdc (MIT); add a `NOTICE` line when #46 merges | supervisor | verification | 11-21 | Open |
+| A17 | Stale comments: `src/pdn_cfg.tcl`'s header and `test/sram/README.md` still say RM_IHPSG13_1P_256x16; the design uses 512x32 | supervisor | devOps | 11-21 | Open |
 
 Closed:
-- A9, A10, A11: the dates, the RP2350, the demo.md review (#52; demo.md updated in this PR);
+- A9, A10, A11: the dates, the RP2350, the demo.md review (#52, applied in #80);
 - A2, A4, A6 (#47); A5, the engine order (#45); A8, the competitor comparison (board, 11-11);
 - Core-scope trims for risk 1 (#45); `clock_hz` to 40 MHz (#49); the LFSR draw sequence (#41).

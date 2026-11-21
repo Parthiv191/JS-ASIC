@@ -51,3 +51,7 @@ precheck and the gate-level tests, and publish the
 - [Digital design lessons](https://tinytapeout.com/digital_design/)
 - [Build your design locally](https://www.tinytapeout.com/guides/local-hardening/)
 - [Join the community](https://tinytapeout.com/discord)
+
+## License
+
+Apache 2.0, as Tiny Tapeout requires ([LICENSE](LICENSE)). Third-party files and their licences are listed in [NOTICE](NOTICE).
